@@ -1,0 +1,6 @@
+{
+  "fenics_dir": "exports/fenics",
+  "frontarena_dir": "exports/frontarena",
+  "stale_minutes_key": 120,
+  "stale_minutes_other": 1440
+}

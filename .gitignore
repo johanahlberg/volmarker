@@ -1,9 +1,6 @@
-# generated / local data - never commit desk data or market data
-demo_data/
-data/
 __pycache__/
 *.pyc
 .DS_Store
 
 # vendor documentation (FMD specs) - not for GitHub
-FMD/
+*.pdf
