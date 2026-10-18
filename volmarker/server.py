@@ -1,0 +1,185 @@
+"""Local HTTP server (stdlib only). Binds to 127.0.0.1 - each trader runs
+their own instance against the shared data folder."""
+
+from __future__ import annotations
+
+import json
+import logging
+import queue
+import re
+from datetime import date, timedelta
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+from .calendar import interpolate_atm, is_good_day
+from .conventions import TENORS, split_pair
+from .service import Service
+from .store import ConflictError, LockTimeout
+
+STATIC = Path(__file__).parent / "static"
+CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+                 ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml"}
+
+log = logging.getLogger("volmarker")
+
+
+def make_handler(svc: Service):
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt, *args):
+            log.debug("%s - %s", self.address_string(), fmt % args)
+
+        # ---- helpers --------------------------------------------------
+        def _json(self, obj, status=HTTPStatus.OK):
+            body = json.dumps(obj).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _body(self) -> dict:
+            n = int(self.headers.get("Content-Length") or 0)
+            return json.loads(self.rfile.read(n) or b"{}")
+
+        def _static(self, name: str):
+            path = (STATIC / name).resolve()
+            if STATIC.resolve() not in path.parents or not path.is_file():
+                return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            body = path.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", CONTENT_TYPES.get(path.suffix, "application/octet-stream"))
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        # ---- routes ---------------------------------------------------
+        def do_GET(self):
+            url = urlparse(self.path)
+            p = url.path
+            if p == "/":
+                return self._static("index.html")
+            if p.startswith("/static/"):
+                return self._static(p[len("/static/"):])
+            if p == "/api/me":
+                return self._json({"user": svc.user, "data": str(svc.store.root),
+                                   "tenors": TENORS})
+            if p == "/api/pairs":
+                return self._json(svc.summaries())
+            if p == "/api/stream":
+                return self._stream()
+            m = re.fullmatch(r"/api/pairs/([A-Z]{6})", p)
+            if m:
+                v = svc.view(m.group(1))
+                return self._json(v) if v else self._json({"error": "unknown pair"}, 404)
+            m = re.fullmatch(r"/api/pairs/([A-Z]{6})/history", p)
+            if m:
+                limit = int(parse_qs(url.query).get("limit", ["50"])[0])
+                return self._json(svc.store.history(m.group(1), limit))
+            if p == "/api/alerts":
+                return self._json({"alerts": svc.alerts.list(), "config": svc.store.config()["alerts"]})
+            if p == "/api/market/status":
+                return self._json(svc.feed_status())
+            m = re.fullmatch(r"/api/pairs/([A-Z]{6})/market", p)
+            if m:
+                q = parse_qs(url.query)
+                return self._json(svc.market_for(m.group(1), q.get("brand", [None])[0]))
+            m = re.fullmatch(r"/api/pairs/([A-Z]{6})/curve", p)
+            if m:
+                return self._curve(m.group(1))
+            return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+        def do_POST(self):
+            p = urlparse(self.path).path
+            try:
+                body = self._body()
+                if p == "/api/alerts/ack":
+                    return self._json({"acked": svc.ack_alerts(body.get("keys"), body.get("pair"))})
+                if p == "/api/pairs":
+                    rec = svc.create_pair(body["pair"], body.get("mode", "marked"),
+                                          body.get("bases"), body.get("key", False))
+                    return self._json(rec)
+                m = re.fullmatch(r"/api/pairs/([A-Z]{6})/preview", p)
+                if m:
+                    return self._json(svc.preview(m.group(1), body["state"]))
+                m = re.fullmatch(r"/api/pairs/([A-Z]{6})/dailies", p)
+                if m:
+                    return self._json(svc.dailies(m.group(1), body.get("state"), body.get("brand")))
+                m = re.fullmatch(r"/api/pairs/([A-Z]{6})/publish", p)
+                if m:
+                    rec = svc.publish(m.group(1), body["state"], body.get("expected_version"),
+                                      body.get("comment", ""))
+                    return self._json(rec)
+            except ConflictError as e:
+                return self._json({"error": str(e), "latest": e.latest}, HTTPStatus.CONFLICT)
+            except LockTimeout as e:
+                return self._json({"error": str(e)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except (ValueError, KeyError, TypeError) as e:
+                return self._json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+            return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+        def _curve(self, pair: str):
+            rec = svc.get(pair)
+            if rec is None:
+                return self._json({"error": "unknown pair"}, 404)
+            holidays, _ = svc.store.load_calendar()
+            today = date.today()
+            ccys = split_pair(pair)
+            days = [d for d in (today + timedelta(days=i) for i in range(1, 186))
+                    if is_good_day(d, ccys, holidays)]
+            atm = {t: rec["tenors"][t]["atm"] for t in TENORS}
+            vols = interpolate_atm(pair, atm, today, days, rec.get("weights"), holidays)
+            return self._json({"points": [[d.isoformat(), round(v, 4)]
+                                          for d, v in sorted(vols.items())],
+                               "events": (rec.get("weights") or {}).get("events", [])})
+
+        def _stream(self):
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            q = svc.subscribe()
+            try:
+                self.wfile.write(b": connected\n\n")
+                self.wfile.flush()
+                while True:
+                    try:
+                        ev = q.get(timeout=15)
+                        msg = f"data: {json.dumps(ev)}\n\n"
+                    except queue.Empty:
+                        msg = ": ping\n\n"
+                    self.wfile.write(msg.encode())
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                svc.unsubscribe(q)
+
+    return Handler
+
+
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        import sys
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError)):
+            return  # browser tab closed mid-request - not an error
+        super().handle_error(request, client_address)
+
+
+def serve(svc: Service, port: int) -> ThreadingHTTPServer:
+    for p in range(port, port + 20):
+        try:
+            httpd = _Server(("127.0.0.1", p), make_handler(svc))
+            httpd.daemon_threads = True
+            return httpd
+        except OSError:
+            continue
+    raise OSError(f"No free port in {port}-{port + 19}")

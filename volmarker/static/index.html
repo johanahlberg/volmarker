@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VolMarker</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">VolMarker</div>
+  <div class="meta"><span id="me"></span><span class="sep">·</span><span id="datadir" class="muted"></span></div>
+  <div class="spacer"></div>
+  <button id="alerts-btn" class="alerts-btn" title="Market alerts">⚠ 0</button>
+  <span id="fmd" class="conn off" title="Fenics Market Data feed">FMD off</span>
+  <span id="conn" class="conn" title="Live connection to the shared folder">● live</span>
+  <button id="theme" class="ghost" title="Toggle light/dark">◐</button>
+  <button id="newpair">+ New pair</button>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <input id="filter" type="search" placeholder="Filter pairs…  ( / )" autocomplete="off">
+    <div id="pairlist"></div>
+  </aside>
+
+  <main id="main">
+    <div id="empty" class="empty">Select a pair on the left, or create one with <b>+ New pair</b>.</div>
+    <section id="pane" hidden>
+      <div class="pairhead">
+        <div>
+          <h1 id="ph-pair"></h1>
+          <div id="ph-sub" class="muted"></div>
+        </div>
+        <div class="spacer"></div>
+        <input id="comment" type="text" placeholder="Comment (optional)">
+        <button id="discard" class="ghost" disabled>Discard</button>
+        <button id="publish" class="primary" disabled title="Ctrl/Cmd+S">Publish</button>
+      </div>
+
+      <div id="banner" class="banner" hidden></div>
+
+      <nav class="tabs">
+        <button data-tab="surface" class="active">Surface</button>
+        <button data-tab="s3d">3D</button>
+        <button data-tab="weights">Event weights</button>
+        <button data-tab="setup">Setup</button>
+        <button data-tab="history">History</button>
+      </nav>
+
+      <div data-panel="surface">
+        <div id="followbar" class="followbar" hidden></div>
+        <div class="toolbar">
+          <span class="lbl">Shift</span>
+          <select id="sh-field"></select>
+          <input id="sh-amt" type="number" step="0.05" value="0.10" class="num">
+          <span class="lbl">from</span><select id="sh-from"></select>
+          <span class="lbl">to</span><select id="sh-to"></select>
+          <button id="sh-apply">Apply to draft</button>
+          <button id="sh-mkt" title="Set the selected field over the tenor range to the broker mid">Market mid</button>
+          <button id="sh-mktall" title="Take ATM, 25D/10D RR and BF from the market over the tenor range">Market surface</button>
+          <div class="spacer"></div>
+          <label class="check"><input id="mkt-show" type="checkbox" checked> Market</label>
+          <select id="mkt-brand" title="Broker source"><option value="auto">Auto (FMD first)</option><option value="best">Best of brands</option></select>
+          <span class="lbl">Skew exp.</span>
+          <input id="skew-exp" type="datetime-local">
+          <button id="skew-eod" class="ghost" title="Expire skew at 17:00 today">EOD</button>
+          <button id="skew-clear" class="ghost" title="Zero all skews">Clear</button>
+        </div>
+        <div class="gridwrap"><table id="grid" class="grid"></table></div>
+        <div class="below">
+          <div class="card chartcard">
+            <div class="cardhead"><b>ATM term structure</b><span id="legend" class="legend"></span></div>
+            <div id="chart" class="chart"></div>
+          </div>
+          <div class="card warncard">
+            <div class="cardhead"><b>Checks</b></div>
+            <ul id="warnings" class="warnings"></ul>
+          </div>
+        </div>
+      </div>
+
+      <div data-panel="s3d" hidden>
+        <div class="toolbar">
+          <span class="lbl">Show</span>
+          <label class="check"><input type="radio" name="s3-src" value="mid" checked> Mid</label>
+          <label class="check"><input type="radio" name="s3-src" value="quoted"> Fenics (incl. skew)</label>
+          <label class="check"><input type="radio" name="s3-src" value="diff"> Draft − published</label>
+          <span class="lbl" style="margin-left:12px">Tenor axis</span>
+          <select id="s3-axis"><option value="sqrt">√time</option><option value="even">Evenly spaced</option></select>
+          <div class="spacer"></div>
+          <span class="muted">Drag to rotate · hover for values</span>
+          <button id="s3-reset" class="ghost">Reset view</button>
+        </div>
+        <div class="card">
+          <div id="surf3d" class="surf3d"></div>
+          <div id="s3-scale" class="scale"></div>
+          <p class="muted small">Pillar vols approximated as ATM + BF ± RR/2 from broker-strangle BFs (display only; Fenics applies the exact conventions).</p>
+        </div>
+      </div>
+
+      <div data-panel="weights" hidden>
+        <div class="card">
+          <div class="cardhead"><b>Day-weight factors</b><span class="muted">Replace the normal weight of 1.0. If more than one applies, the lowest is used.</span></div>
+          <div id="factors" class="factors"></div>
+        </div>
+        <div class="card">
+          <div class="cardhead"><b>Events</b><span class="muted">Added on top of the day weight (e.g. 0.8 → 1.8)</span>
+            <div class="spacer"></div><button id="ev-add">+ Event</button></div>
+          <table id="events" class="grid small"></table>
+        </div>
+        <div class="card" id="dailies-card">
+          <div class="cardhead"><b>Market dailies (FMD)</b>
+            <span class="muted" id="dl-note">Forward vol per daily expiry: market vs. your weights</span>
+            <div class="spacer"></div>
+            <button id="dl-calib" title="Replace the event weights inside the dailies window with the ones implied by the market (into the draft)">Calibrate event weights to dailies</button>
+          </div>
+          <div id="dl-chart" class="chart" style="height:200px"></div>
+          <div class="gridwrap" style="margin-top:8px"><table id="dl-table" class="grid small"></table></div>
+          <ul id="dl-warn" class="warnings"></ul>
+        </div>
+        <div class="card chartcard">
+          <div class="cardhead"><b>Interpolated ATM, next 6 months</b><span class="muted">published version · total variance interpolated in weighted time</span></div>
+          <div id="curve" class="chart"></div>
+        </div>
+      </div>
+
+      <div data-panel="setup" hidden>
+        <div class="card setup">
+          <label>Mode
+            <select id="su-mode"><option value="marked">Marked</option><option value="derived">Derived from two base pairs</option></select>
+          </label>
+          <label class="su-derived">Base 1 <select id="su-b1"></select></label>
+          <label class="su-derived">Base 2 <select id="su-b2"></select></label>
+          <label class="check"><input id="su-key" type="checkbox"> Key pair (auto-quoted, tighter staleness limit)</label>
+          <label>ATM convention (for broker ATM quotes)
+            <select id="su-atm"><option value="DNS">DNS (delta-neutral straddle)</option><option value="ATMF">ATMF (at-the-money forward)</option></select>
+          </label>
+          <label class="check"><input id="su-follow" type="checkbox"><span><b>Follow FMD</b> (market mode): the feed publishes FMD mids for ATM, 25D/10D RR and BF to Fenics and Front Arena automatically</span></label>
+          <p class="muted su-follow-note">You keep the spread, skew and event weights. Moves bigger than the jump limit are held for a minute first. If the feed stops, nothing is published and every app raises an alert. Untick to take the surface back.</p>
+          <div class="su-tol">
+            <div class="lbl">Alert tolerance (vol pts; empty = desk default)</div>
+            <div id="su-tol" class="factors"></div>
+            <label class="check"><input id="su-alerts-off" type="checkbox"> Mute market alerts for this pair</label>
+          </div>
+          <p class="muted">These changes are saved to the draft. Click <b>Publish</b> to apply them.<br>
+          Derived: ATM = triangle(base ATMs, correlation). Type an ATM on a derived pair to calibrate the correlation to it. Tick <i>pin</i> to keep a typed ATM fixed while the bases move.
+          The correlation is between the two base pairs as quoted (e.g. EURUSD vs USDCHF is typically negative).</p>
+        </div>
+      </div>
+
+      <div data-panel="history" hidden>
+        <table id="history" class="grid small"></table>
+      </div>
+    </section>
+  </main>
+</div>
+
+<aside id="alerts-panel" class="alerts-panel" hidden>
+  <div class="cardhead"><b>Market alerts</b><span id="al-sub" class="muted"></span><div class="spacer"></div>
+    <button id="al-ackall" class="ghost" title="Acknowledge all: muted until they clear or get worse by another tolerance">Ack all</button>
+    <button id="al-close" class="ghost" title="Close">✕</button></div>
+  <label class="check"><input id="al-notify" type="checkbox"> Desktop notifications</label>
+  <div id="al-list"></div>
+  <p class="muted small">Published mids vs FMD, per mark: alert when the gap stays above the tolerance for a while, cleared below 80 % of it.
+    Defaults in <code>config.json</code> → <code>alerts</code>; per pair in Setup.</p>
+</aside>
+
+<div id="tooltip" class="tooltip" hidden></div>
+
+<dialog id="dlg-new">
+  <form method="dialog" id="form-new">
+    <h2>New pair</h2>
+    <label>Pair <input id="np-pair" placeholder="EURCHF" maxlength="7" required></label>
+    <label>Mode <select id="np-mode"><option value="marked">Marked</option><option value="derived">Derived</option></select></label>
+    <label class="np-derived">Base 1 <select id="np-b1"></select></label>
+    <label class="np-derived">Base 2 <select id="np-b2"></select></label>
+    <label class="check"><input id="np-key" type="checkbox"> Key pair</label>
+    <div id="np-err" class="err"></div>
+    <div class="actions"><button value="cancel" formnovalidate class="ghost">Cancel</button><button id="np-ok" value="ok" class="primary">Create</button></div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
