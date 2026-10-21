@@ -39,9 +39,12 @@ Tests: `python -m unittest discover -s tests -t .`
 | Parallel shifts | Toolbar: field, amount and tenor range, then **Apply to draft**. |
 | Derived pairs | ATM (in blue) = triangle(base ATMs, correlation). Type an ATM to calibrate that tenor's correlation to it; the pair then keeps running off its bases. Tick **Pin** to hold a typed ATM fixed instead. |
 | Skew | The Skew columns shift ATM, RR and BF in the Fenics file only. Set an expiry (or press **EOD**); when it passes, one of the running apps publishes a clean version. |
-| Event weights | Weekend and holiday factors plus additive event weights for each pair. The chart shows the resulting interpolated ATM curve. |
+| Event weights | Weekday weights, holiday factors and additive event weights for each pair; relevant events from the Bloomberg calendar get their default weight on the right expiry automatically (see below). **Test dates**: type expiry dates (or **+ Event dates** for the day of and the day before each upcoming event) to see the interpolated ATM, weighted days and forward vol, for the draft against the published version, live while you edit weights or marks. The 6-month chart shows the draft curve against the published one. |
 | History | Every version with its user and comment. **Restore** copies an old version into the draft. |
-| Sidebar | `D` = derived, `FMD` = follows the market (green ok, amber a move is held, red not updating), `skew` = skew active, `stale` = not marked within the limit (2h for key pairs, 24h for others; set in `config.json`), `!n` = number of failed checks, `⚠n` = market alerts (grey once acknowledged). |
+| Groups | Each pair has a **Group** (Setup tab, e.g. "Scandies", "GBP", "Metals"); the sidebar lists pairs by group. The group is a pair setting, the same for the whole desk. Pairs without one are under *Ungrouped*. |
+| Your sidebar | Drag groups, or pairs within a group, into your own order. Click a group header to fold it (a folded group still shows its stale and ⚠ counts). This layout is personal and saved in `users/<your user>.json`, so it follows you to any PC. **Reset** in the sidebar footer goes back to A–Z. |
+| Spread | This pair minus a reference pair (e.g. USDCHF − EURUSD) for ATM, 25D/10D RR and BF per tenor. Draft mids are compared against the reference's published mids, with the FMD spread next to it (red when further apart than the alert tolerance). Type a spread to set the pair to reference + spread in the draft, then publish as usual. The charts show the spread by tenor and its published history (1 day to 1 month). The default reference is a pair setting (**Spread reference** in Setup, or **Make … the default** in the Spread tab, then publish); without one it is a key or marked pair from the same group. The chips switch to any related pair (e.g. EURCHF against USDCHF instead of EURUSD) without changing the default. Pairs that don't need it (e.g. EURUSD) can be set to **None**, via **No spread for this pair** or Setup, and then don't show the tab. |
+| Sidebar | `K` = key pair, `D` = derived, `FMD` = follows the market (green ok, amber a move is held, red not updating), `skew` = skew active, `stale` = not marked within the limit (2h for key pairs, 24h for others; set in `config.json`), `!n` = number of failed checks, `⚠n` = market alerts (grey once acknowledged). |
 
 ## Market data (Fenics Market Data)
 
@@ -119,10 +122,44 @@ data/
   market/_status.json         feed connection state and heartbeat
   market/_follow.json         market-mode follower state per pair
   alerts/<date>.jsonl         alert log (raised / cleared)
+  users/<user>.json           each trader's own sidebar order, folded groups, test dates
+  calendar/event_defaults.csv relevant events with default weights (+ .log.jsonl)
+  calendar/bloomberg/<CCY>.json  last Bloomberg ECO import per currency
+  exports/weights/            Fenics message copy, FA_FX and FA_WS event files; weights_sent.jsonl
   locks/                      short-lived lock files
 ```
 
-Point `fenics_dir` and `frontarena_dir` in `config.json` at the folders that Fenics and Front Arena read from. Export files are written under a temporary name and then renamed, so the readers never see a half-written file.
+Every publish writes the vol files in the layout of the Excel marking workbook (VOL_PUBLISHER). Point the folders in `config.json` at what the macro used:
+
+| File | `config.json` | Macro folder | Content |
+|---|---|---|---|
+| `<CCY1><CCY2>volsurface.txt` | `frontarena_dir` | the export folder | `vol,EUR,USD,1mo,<ATM bid>,<ATM ask>`, then `vol25`/`vol10` `strangle`/`riskreversal` mids. Pure mids, never skewed. Tenors `1d 1wk 2wk 1mo … 1yr … 5yr`. |
+| `<CCY1><CCY2>volsurface.txt` | `fenics_dir` | `…\FENICSVOLS\` | `vol,atm\|s25\|rr25\|s10\|rr10,EUR,USD,1m,<bid>,<ask>`, quoted surface (skew included). RR and BF go out with bid = ask = mid, since Fenics only uses the mid. Tenors `1d 1w 2w 1m … 1y … 5y`. |
+| `<CCY1><CCY2>spreads.txt` | `dc_spread_dir` | `…\DC_SPRD\` | `1m,<ATM spread × 0.5 × DC factor>`, only for pairs with a **DC spread factor** of at least 0.01 (Setup). |
+| `<CCY1><CCY2>_yyyymmdd_hhmmss.csv` | `history_dir` | `…\History\` | A copy of the Fenics file, as the macro made. Not for the Follow FMD feed's publishes (every 15 s); the pair's history keeps every version anyway. |
+
+Numbers are written like VBA (up to 15 significant digits), and lines end in CRLF. Files are written under a temporary name and then renamed, so the readers never see a half-written file.
+
+## Event calendar and event weights
+
+The weights follow the desk's Excel weight workbook and Fenics:
+
+    day weight = weekday weight x holiday factor(ccy1) x holiday factor(ccy2) + events
+
+with seven weekday weights per pair (e.g. Mon 1.05, Tue-Fri 1, Sat/Sun 0) and a holiday factor per currency (e.g. 0.4) that applies on that currency's holidays. Older records with weekend factors are read as weekday weights.
+
+**Bloomberg import.** In the *Event weights* tab → *Event calendar*, **Import Bloomberg calendar…** takes an ECO export saved as .xlsx (one file per currency or region; eurozone country codes all count as EUR). The preview lists every distinct event with its ticker, relevance, next release and release times. Tick the relevant ones and set their default weight, then **Import with this selection**. The file replaces the previous import of that currency (`calendar/bloomberg/<CCY>.json`). The whole file is kept, so ticking another event later on the list needs no new import. Releases with only a date range are left out until Bloomberg gives a day.
+
+**Relevant events.** Only events on the list (`calendar/event_defaults.csv`: ccy, event, weight, ticker) get a weight. An event matches on its ticker, or on its name; outside the home country the name carries the country code, as in the Excel workbook ("GE IFO Business Climate"). To start from the workbook's list: `python scripts/import_excel_weights.py "Events USD.xlsm" --data <folder>`.
+
+**Which expiry an event weighs on.** Bloomberg times are in the terminal's time zone (`calendar_tz`, Europe/Zurich). Each pair has an **Expiry cut** in Setup (NYC 10:00 New York, TOK 15:00 Tokyo; more in `config.json` → `cuts`). An event weighs on the first good business day whose cut is after the release, so FOMC at 14:00 New York on Wednesday weighs on Thursday's expiry, while the ECB at 14:15 Frankfurt (08:15 New York) weighs on the same day. Daylight-saving gaps between Europe and the US are handled. Manual events without a time (`calendar/events.csv`, e.g. elections) weigh on their own date.
+
+**Per pair.** The events table shows each expiry with its release time, currency, the default weight and the weight used. Several events on one expiry add up, and the biggest names the day (hover over the Σ for the breakdown). Typing a weight overrides the default for that pair (↺ goes back); 0 switches it off; **+ Event** adds a one-off. **Calibrate to dailies** writes market-implied weights the same way.
+
+**Send weights.** **Send to Fenics & Front Arena** sends the published version, as the workbook's macro does:
+- Fenics: one `gfi_message` (`load_events` / `WEIGHT_FEED`) posted as `xml=…` to `weights_export.fenics_url` + `/xmlposter`. It carries the weekday weights, the holiday base weights (FirstCcy = ccy2, SecondCcy = ccy1) and the events. An event on a holiday of its own currency is sent as a holiday weight `h + w / (weekday x other holiday)`. User and password are asked each time; the password is passed on and never stored. A copy of the message without the password is kept in `exports/weights/fenics/`.
+- Front Arena: `FA_FX/<CCY1><CCY2>_events.txt` (ccy,date,event,weight per expiry) and `FA_WS/…` (moved to the business day before, weight (w + base) / base). Folders and date format in `config.json` → `weights_export` (default yyyy-mm-dd: the macro wrote the PC's regional format, which was yyyy-mm-dd on the desk PCs in Oct 2026 and dd.mm.yyyy on an earlier send).
+- Every send is logged in `exports/weights_sent.jsonl`; the card says when weights, defaults or the calendar changed since the last send.
 
 ## Conventions and maths
 
@@ -135,7 +172,6 @@ Point `fenics_dir` and `frontarena_dir` in `config.json` at the folders that Fen
 
 ## Not done yet
 
-- Exact CSV layout for Fenics and Front Arena (`volmarker/exports.py`, waiting for sample files)
 - Importing the existing Excel tabs and weight files
 - Derived RR/BF for crosses (marked by hand for now, as in Excel)
 - Inventory-driven skew (needs positions from Front Arena)

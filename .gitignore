@@ -4,3 +4,6 @@ __pycache__/
 
 # vendor documentation (FMD specs) - not for GitHub
 *.pdf
+
+# bank workbooks and Bloomberg exports shared for analysis - not part of the app
+Excels/

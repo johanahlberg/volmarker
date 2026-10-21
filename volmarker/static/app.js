@@ -5,11 +5,21 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type", "lock_rr10f", "lock_bf10f",
-  "follow_market", "alert_tol", "alerts_off", "tenors"];
+  "follow_market", "alert_tol", "alerts_off", "group", "spread_ref", "spread_off", "cut", "dc_factor", "tenors"];
 const MKT_FIELDS = { atm: "atm", rr25: "rr25", rr10: "rr10", bf25: "bf25", bf10: "bf10" };
 const FOLLOW_FIELDS = ["atm", "rr25", "rr10f", "rr10", "bf25", "bf10f", "bf10"];   // owned by the feed on Follow FMD pairs
 const MARK_LABEL = { atm: "ATM", rr25: "25D RR", rr10: "10D RR", bf25: "25D BF", bf10: "10D BF" };
-const DEFAULT_WEIGHTS = { weekend1: 0, weekend2: 0, holiday1: 0.3, holiday2: 0.3, events: [] };
+const DEFAULT_WEIGHTS = { weekdays: [1, 1, 1, 1, 1, 0, 0], holiday1: 0.4, holiday2: 0.4, events: [] };
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+function normaliseWeights(w) {     // as calendar.normalise_weights: old weekend1/weekend2 -> weekday weights
+  const out = { ...clone(DEFAULT_WEIGHTS), ...(w || {}) };
+  if (!(w?.weekdays?.length === 7) && w && ("weekend1" in w || "weekend2" in w)) {
+    const we = Math.min(+w.weekend1 || 0, +w.weekend2 || 0);
+    out.weekdays = [1, 1, 1, 1, 1, we, we];
+  }
+  delete out.weekend1; delete out.weekend2;
+  return out;
+}
 
 const app = {
   me: null, tenors: [], pairs: [], current: null,
@@ -17,6 +27,9 @@ const app = {
   baseVersion: null, // version the draft is based on
   draft: null, preview: null, dirty: false, tab: "surface",
   alerts: [], alertCfg: null,
+  prefs: {},         // this user's own settings (sidebar layout, spread references), saved on the shared drive
+  spread: null,      // Spread tab: reference pair data
+  spreadView: {},    // reference picked in the Spread tab this session, per pair (the default is the pair's spread_ref)
 };
 
 // ---------------------------------------------------------------- api
@@ -47,28 +60,125 @@ function localTime(iso) {
 }
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
+// ---------------------------------------------------------------- user preferences
+let prefsTimer = null;
+function savePrefs() {
+  clearTimeout(prefsTimer);
+  prefsTimer = setTimeout(() => api("/api/prefs", app.prefs).catch(() => {}), 400);
+}
+
 // ---------------------------------------------------------------- sidebar
+// The group is a pair setting (shared); the order of groups and pairs and which groups are folded are per user.
+const UNGROUPED = "Ungrouped";
+const groupOf = (p) => p.group || UNGROUPED;
+function rankBy(list) { return (x) => { const i = (list || []).indexOf(x); return i < 0 ? 1e9 : i; }; }
+function orderedGroups(rows) {
+  const r = rankBy(app.prefs.group_order);
+  return [...new Set(rows.map(groupOf))].sort((a, b) =>
+    r(a) - r(b) || (a === UNGROUPED) - (b === UNGROUPED) || a.localeCompare(b));
+}
+function orderedPairs(group, rows) {
+  const r = rankBy((app.prefs.pair_order || {})[group]);
+  return rows.filter((p) => groupOf(p) === group).sort((a, b) => r(a.pair) - r(b.pair) || a.pair.localeCompare(b.pair));
+}
+let sbDrag = null, sbPending = false;
 function renderPairs(flashPair) {
+  if (sbDrag) { sbPending = true; return; }       // don't rebuild under the mouse while dragging
   const q = $("#filter").value.trim().toUpperCase();
   const rows = app.pairs.filter((p) => !q || p.pair.includes(q));
-  const groups = [["Key pairs", rows.filter((p) => p.key)], ["Other pairs", rows.filter((p) => !p.key)]];
-  const html = groups.filter(([, g]) => g.length).map(([title, g]) =>
-    `<div class="group">${title} (${g.length})</div>` + g.map((p) => {
-      const tags = [
-        p.mode === "derived" ? `<span class="tag" title="Derived from ${esc((p.bases || []).join(" × "))}">D</span>` : "",
-        p.skew ? `<span class="tag" title="Skew active in Fenics">skew</span>` : "",
-        p.stale ? `<span class="tag stale" title="Not marked for ${age(p.age_minutes)}">stale</span>` : "",
-        p.warnings ? `<span class="tag" title="${p.warnings} check(s)">!${p.warnings}</span>` : "",
-        p.follow ? `<span class="tag follow ${p.follow}" title="Follows FMD (${p.follow})">FMD</span>` : "",
-        p.alerts ? `<span class="tag alert${p.alerts_new ? "" : " acked"}" title="${p.alerts} market alert(s)${p.alerts_new ? "" : ", acknowledged"}">⚠${p.alerts}</span>` : "",
-      ].join("");
-      const ageTitle = `Marked ${localTime(p.marked_ts)} · last update ${localTime(p.ts)} by ${p.user}`;
-      return `<div class="prow${p.pair === app.current ? " sel" : ""}${p.pair === flashPair ? " flash" : ""}" data-pair="${p.pair}">
-        <span><span class="name">${p.pair}</span>${tags}</span>
-        <span class="atm" title="1M ATM">${fmt(p.atm_1m, 2)}</span>
-        <span class="age" title="${esc(ageTitle)}">${age(p.age_minutes)}</span></div>`;
-    }).join("")).join("");
+  const folded = app.prefs.collapsed || {};
+  const html = orderedGroups(rows).map((g) => {
+    const ps = orderedPairs(g, rows), fold = !q && folded[g] && !ps.some((p) => p.pair === flashPair);
+    const nStale = ps.filter((p) => p.stale).length, nAl = ps.reduce((n, p) => n + p.alerts, 0);
+    const nNew = ps.reduce((n, p) => n + p.alerts_new, 0);
+    const sum = fold ? (nStale ? `<span class="tag stale" title="${nStale} stale">${nStale} stale</span>` : "") +
+      (nAl ? `<span class="tag alert${nNew ? "" : " acked"}" title="${nAl} market alert(s)">⚠${nAl}</span>` : "") +
+      (ps.some((p) => p.pair === app.current) ? `<span class="tag" title="The selected pair is in this group">●</span>` : "") : "";
+    return `<div class="gblock" data-group="${esc(g)}"><div class="group${fold ? " folded" : ""}" draggable="true" data-group="${esc(g)}" title="Click to ${fold ? "unfold" : "fold"} · drag to move">` +
+      `<span class="caret">▾</span>${esc(g)} <span class="cnt">${ps.length}</span>${sum}</div>` +
+      (fold ? "" : ps.map((p) => pairRow(p, flashPair)).join("")) + `</div>`;
+  }).join("");
   $("#pairlist").innerHTML = html || `<div class="muted" style="padding:8px">No pairs</div>`;
+}
+function pairRow(p, flashPair) {
+  const tags = [
+    p.key ? `<span class="tag key" title="Key pair">K</span>` : "",
+    p.mode === "derived" ? `<span class="tag" title="Derived from ${esc((p.bases || []).join(" × "))}">D</span>` : "",
+    p.skew ? `<span class="tag" title="Skew active in Fenics">skew</span>` : "",
+    p.stale ? `<span class="tag stale" title="Not marked for ${age(p.age_minutes)}">stale</span>` : "",
+    p.warnings ? `<span class="tag" title="${p.warnings} check(s)">!${p.warnings}</span>` : "",
+    p.follow ? `<span class="tag follow ${p.follow}" title="Follows FMD (${p.follow})">FMD</span>` : "",
+    p.alerts ? `<span class="tag alert${p.alerts_new ? "" : " acked"}" title="${p.alerts} market alert(s)${p.alerts_new ? "" : ", acknowledged"}">⚠${p.alerts}</span>` : "",
+  ].join("");
+  const ageTitle = `Marked ${localTime(p.marked_ts)} · last update ${localTime(p.ts)} by ${p.user}`;
+  return `<div class="prow${p.pair === app.current ? " sel" : ""}${p.pair === flashPair ? " flash" : ""}" data-pair="${p.pair}" draggable="true">
+    <span><span class="name">${p.pair}</span>${tags}</span>
+    <span class="atm" title="1M ATM">${fmt(p.atm_1m, 2)}</span>
+    <span class="age" title="${esc(ageTitle)}">${age(p.age_minutes)}</span></div>`;
+}
+function wireSidebar() {
+  const list = $("#pairlist");
+  const clearMarks = () => $$(".drop-before, .drop-after", list).forEach((el) => el.classList.remove("drop-before", "drop-after"));
+  const target = (e) => {   // element to drop next to, and on which side
+    if (!sbDrag) return null;
+    const el = sbDrag.type === "group" ? e.target.closest(".gblock")
+      : e.target.closest(`.gblock[data-group="${CSS.escape(sbDrag.group)}"] .prow`);
+    if (!el || el.dataset[sbDrag.type === "group" ? "group" : "pair"] === sbDrag.id) return null;
+    const r = el.getBoundingClientRect();
+    const mid = sbDrag.type === "group" ? r.top + Math.min(r.height / 2, 14) : r.top + r.height / 2;
+    return { el, after: e.clientY > mid };
+  };
+  list.addEventListener("dragstart", (e) => {
+    const g = e.target.closest?.(".group"), r = e.target.closest?.(".prow");
+    if (g) sbDrag = { type: "group", id: g.dataset.group };
+    else if (r) sbDrag = { type: "pair", id: r.dataset.pair, group: r.closest(".gblock").dataset.group };
+    else return;
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", sbDrag.id);
+    (g || r).classList.add("dragging");
+  });
+  list.addEventListener("dragover", (e) => {
+    const t = target(e); clearMarks();
+    if (!t) return;
+    e.preventDefault(); e.dataTransfer.dropEffect = "move";
+    t.el.classList.add(t.after ? "drop-after" : "drop-before");
+  });
+  list.addEventListener("drop", (e) => {
+    const t = target(e); clearMarks();
+    if (!t) return;
+    e.preventDefault();
+    const q = $("#filter").value.trim().toUpperCase();
+    if (sbDrag.type === "group") {
+      const order = orderedGroups(app.pairs).filter((g) => g !== sbDrag.id);
+      order.splice(order.indexOf(t.el.dataset.group) + (t.after ? 1 : 0), 0, sbDrag.id);
+      app.prefs.group_order = order;
+    } else {
+      const g = sbDrag.group;
+      const order = orderedPairs(g, app.pairs).map((p) => p.pair).filter((p) => p !== sbDrag.id);
+      order.splice(order.indexOf(t.el.dataset.pair) + (t.after ? 1 : 0), 0, sbDrag.id);
+      (app.prefs.pair_order ||= {})[g] = order;
+    }
+    savePrefs();
+  });
+  list.addEventListener("dragend", () => {
+    clearMarks(); sbDrag = null;
+    sbPending = false; renderPairs();
+  });
+  list.addEventListener("click", (e) => {
+    const g = e.target.closest(".group");
+    if (g) {
+      if ($("#filter").value.trim()) return;      // all groups are open while filtering
+      const c = (app.prefs.collapsed ||= {});
+      if (c[g.dataset.group]) delete c[g.dataset.group]; else c[g.dataset.group] = true;
+      savePrefs(); renderPairs(); return;
+    }
+    const r = e.target.closest(".prow"); if (r) selectPair(r.dataset.pair);
+  });
+  $("#layout-reset").onclick = () => {
+    if (!window.confirm("Reset your sidebar order and unfold all groups?")) return;
+    delete app.prefs.group_order; delete app.prefs.pair_order; delete app.prefs.collapsed;
+    savePrefs(); renderPairs();
+  };
 }
 async function loadPairs(flashPair) {
   app.pairs = await api("/api/pairs");
@@ -76,6 +186,8 @@ async function loadPairs(flashPair) {
   fillPairSelects();
 }
 function fillPairSelects() {
+  $("#group-list").innerHTML = [...new Set(app.pairs.map((p) => p.group).filter(Boolean))].sort()
+    .map((g) => `<option value="${esc(g)}"></option>`).join("");
   const opts = app.pairs.map((p) => `<option>${p.pair}</option>`).join("");
   for (const id of ["#np-b1", "#np-b2", "#su-b1", "#su-b2"]) {
     const el = $(id), v = el.value; el.innerHTML = `<option value="">—</option>` + opts; el.value = v;
@@ -85,6 +197,7 @@ function fillPairSelects() {
 // ---------------------------------------------------------------- pair loading
 async function selectPair(pair) {
   if (app.dirty && pair !== app.current && !confirmDiscard()) return;
+  if (pair !== app.current) { app.defEvents = []; app.testRows = []; }
   app.current = pair;
   history.replaceState(null, "", "#" + pair);
   await reloadView();
@@ -108,11 +221,12 @@ async function reloadView() {
   if (app.tab === "weights") renderWeights(true);
   if (app.tab === "history") renderHistory();
   if (app.tab === "setup") renderSetup();
+  if (app.tab === "spread") { if (app.spread?.pair === app.current && app.spread.ref === spreadRef()) { renderSpread(); loadSpreadHistory(); } else loadSpreadRef(); }
 }
 function pick(rec) {
   const s = {};
   for (const k of STATE_KEYS) s[k] = clone(rec[k] ?? null);
-  s.weights = s.weights || clone(DEFAULT_WEIGHTS);
+  s.weights = normaliseWeights(s.weights);
   for (const k of ["lock_rr10f", "lock_bf10f"]) s[k] = s[k] === null ? true : !!s[k];
   s.atm_type = s.atm_type || "DNS";
   s.follow_market = !!s.follow_market; s.alerts_off = !!s.alerts_off;
@@ -222,6 +336,11 @@ function onCellInput(el) {
   const txt = el.value.trim();
   const v = txt === "" ? null : Number(txt);
   if (txt !== "" && !Number.isFinite(v)) { el.classList.add("dirty"); return; }
+  setDraftValue(t, f, v);
+  changed();
+}
+function setDraftValue(t, f, v) {
+  const row = app.draft.tenors[t];
   if (f === "atm" && app.draft.mode === "derived" && !row.pin) {
     row.atm = v; row.corr = null;          // calibrate correlation to this ATM
   } else if (f === "corr") {
@@ -229,7 +348,10 @@ function onCellInput(el) {
   } else {
     row[f] = v === null && !["atm", "rr10", "bf10"].includes(f) ? 0 : v;
   }
-  changed();
+}
+function revertDraftValue(t, f) {
+  app.draft.tenors[t][f] = clone(publishedRow(t)[f]);
+  if (f === "atm" && app.draft.mode === "derived") app.draft.tenors[t].corr = clone(publishedRow(t).corr);
 }
 
 function moveFocus(el, dRow) {
@@ -245,6 +367,7 @@ let previewTimer = null, previewSeq = 0;
 function changed() {
   app.dirty = true;
   updateButtons();
+  if (app.tab === "weights") weightsCalc();
   clearTimeout(previewTimer);
   previewTimer = setTimeout(runPreview, 120);
 }
@@ -331,7 +454,7 @@ function renderHeader() {
   $("#ph-pair").textContent = r.pair;
   const mode = d.mode === "derived" ? `Derived from ${d.bases.join(" × ")}` : "Marked";
   const by = r.source === "propagation" ? `auto-updated (${esc(r.comment)})` : `by ${esc(r.user)}`;
-  $("#ph-sub").innerHTML = `${mode}${d.key ? " · key pair" : ""} · v${r.version} ${by} at ${localTime(r.ts)}` +
+  $("#ph-sub").innerHTML = `${d.group ? esc(d.group) + " · " : ""}${mode}${d.key ? " · key pair" : ""} · v${r.version} ${by} at ${localTime(r.ts)}` +
     (r.source === "propagation" ? ` · last marked ${localTime(r.marked_ts)}` : "") +
     (app.view.dependents.length ? ` · feeds ${app.view.dependents.join(", ")}` : "");
 }
@@ -433,9 +556,16 @@ function renderFollow() {
   bar.className = "followbar " + cls; bar.innerHTML = html;
 }
 
+function renderSpreadTab() {      // pairs set to "no spread" don't get the tab
+  const off = !!app.draft?.spread_off, btn = $('.tabs button[data-tab="spread"]');
+  btn.hidden = off;
+  if (off && app.tab === "spread") $('.tabs button[data-tab="surface"]').click();
+}
 function renderAll() {
+  renderSpreadTab();
   renderHeader(); renderFollow(); renderGrid(); renderMarket(); renderWarnings(); renderSkewExpiry(); renderTermChart(); updateButtons();
   if (app.tab === "s3d") render3D();
+  if (app.tab === "spread") renderSpreadValues();
 }
 
 // ---------------------------------------------------------------- charts
@@ -685,21 +815,530 @@ function wire3d() {
   $("#s3-reset").onclick = () => { view3d.yaw = -0.65; view3d.pitch = 0.55; render3D(); };
 }
 
+// ---------------------------------------------------------------- spread tab (this pair − a reference pair)
+const SP_MARKS = ["atm", "rr25", "rr10", "bf25", "bf10"];
+const havePair = (p) => app.pairs.some((x) => x.pair === p);
+function spreadRef() {
+  const v = app.spreadView[app.current];
+  return v !== undefined && (v === "" || havePair(v)) ? v : spreadDefault();
+}
+function spreadDefault() {
+  // the pair's setting (in the draft, so "Make default" shows at once) ...
+  const set = app.draft?.pair === app.current ? app.draft.spread_ref : null;
+  if (set && havePair(set)) return set;
+  // ... else a pair from the same sidebar group, key and marked pairs first (EURUSD for USDCHF)
+  const me = app.pairs.find((p) => p.pair === app.current);
+  if (!me) return "";
+  const rank = (p) => (p.key ? 0 : 2) + (p.mode === "marked" ? 0 : 1);
+  const cands = orderedPairs(groupOf(me), app.pairs).filter((p) => p.pair !== app.current);
+  return cands.sort((a, b) => rank(a) - rank(b))[0]?.pair || "";
+}
+function mktMid(market, t, m) {
+  const q = market?.view?.[t]?.[m];
+  return q && q.mid != null && !q.alt_atm && market.feed?.state !== "off" ? q : null;
+}
+async function loadSpreadRef() {
+  const pair = app.current, ref = spreadRef();
+  app.spread = { pair, ref, view: null, market: null, hist: null };
+  if (ref) {
+    const brand = encodeURIComponent($("#mkt-brand").value);
+    const [v, m] = await Promise.all([api(`/api/pairs/${ref}`).catch(() => null),
+      api(`/api/pairs/${ref}/market?brand=${brand}`).catch(() => null)]);
+    if (app.spread.pair !== pair || app.spread.ref !== ref) return;
+    Object.assign(app.spread, { view: v, market: m });
+  }
+  renderSpread();
+  loadSpreadHistory();
+}
+function renderSpread() {
+  if (app.tab !== "spread" || !app.view) return;
+  const sp = app.spread || {}, ref = sp.ref;
+  $("#sp-pair").textContent = app.current;
+  const chips = relatedPairs();
+  $("#sp-chips").innerHTML = chips.map((p) => `<button class="chip${p === ref ? " on" : ""}" data-ref="${p}"` +
+    ` title="${p === spreadDefault() ? "Default reference for " + app.current : "Show " + app.current + " − " + p}">${p}${p === spreadDefault() ? " ★" : ""}</button>`).join("");
+  $("#sp-ref").innerHTML = `<option value="">${chips.length ? "Other…" : "— choose —"}</option>` +
+    app.pairs.filter((p) => p.pair !== app.current).map((p) => `<option>${p.pair}</option>`).join("");
+  $("#sp-ref").value = ref && !chips.includes(ref) ? ref : "";
+  const def = spreadDefault(), btn = $("#sp-default");
+  btn.hidden = !ref || ref === def;
+  btn.textContent = `Make ${ref} the default`;
+  btn.title = `Set ${ref} as ${app.current}'s spread reference for the whole desk (into the draft; publish to save)`;
+  if (!ref || !sp.view) {
+    $("#sp-note").textContent = ref ? "Loading…" : "Pick a reference pair";
+    $("#sp-grid").innerHTML = ""; $("#sp-chart").innerHTML = ""; $("#sp-hist").innerHTML = ""; $("#sp-legend").innerHTML = "";
+    $("#sp-h-note").textContent = "";
+    return;
+  }
+  const r = sp.view.record;
+  $("#sp-note").textContent = `${ref} v${r.version} at ${localTime(r.ts)}`;
+  let h = `<thead><tr><th class="tn"></th>${SP_MARKS.map((m) => `<th class="grp" colspan="3">${MARK_LABEL[m]}</th>`).join("")}</tr>`;
+  h += `<tr><th class="tn">Tenor</th>${SP_MARKS.map(() => `<th class="sep">${ref}</th><th>Spread</th><th title="FMD ${app.current} − FMD ${ref}">FMD</th>`).join("")}</tr></thead><tbody>`;
+  for (const t of app.tenors) {
+    h += `<tr><td class="tn">${t}</td>` + SP_MARKS.map((m) =>
+      `<td class="calc sep" data-t="${t}" data-m="${m}" data-k="ref"></td>` +
+      `<td><input class="cell" data-t="${t}" data-f="${m}" inputmode="decimal" autocomplete="off"></td>` +
+      `<td class="calc fmd" data-t="${t}" data-m="${m}" data-k="fmd"></td>`).join("") + `</tr>`;
+  }
+  $("#sp-grid").innerHTML = h + "</tbody>";
+  renderSpreadValues();
+}
+// pairs sharing a currency with this one: bases and the default first, then the same group, then key pairs
+function relatedPairs() {
+  const [c1, c2] = [app.current.slice(0, 3), app.current.slice(3)], me = app.pairs.find((p) => p.pair === app.current);
+  const bases = app.draft?.bases || [], def = spreadDefault();
+  const score = (p) => (p.pair === def ? 0 : 10) + (bases.includes(p.pair) ? 0 : 5) + (me && groupOf(p) === groupOf(me) ? 0 : 2) + (p.key ? 0 : 1);
+  const out = app.pairs.filter((p) => p.pair !== app.current && [c1, c2].some((c) => p.pair.includes(c)))
+    .sort((a, b) => score(a) - score(b) || a.pair.localeCompare(b.pair)).slice(0, 8).map((p) => p.pair);
+  if (def && !out.includes(def)) out.unshift(def);
+  return out;
+}
+function spreadAt(t, m, resolved) {
+  const a = resolved?.[t]?.mid?.[m], b = app.spread?.view?.resolved?.[t]?.mid?.[m];
+  return a == null || b == null ? null : a - b;
+}
+function spreadTol(t, m) {
+  const c = app.alertCfg; if (!c) return null;
+  return ((app.draft.alert_tol || {})[m] || c.tolerance[m]) * ((c.tenor_scale || {})[t] || 1);
+}
+function renderSpreadValues() {
+  const sp = app.spread;
+  if (app.tab !== "spread" || !sp?.view || sp.pair !== app.current) return;
+  const res = app.preview.resolved, rres = sp.view.resolved, d = app.draft;
+  for (const el of $$("#sp-grid input")) {
+    const t = el.dataset.t, m = el.dataset.f, v = spreadAt(t, m, res);
+    if (document.activeElement !== el) el.value = fmt(v, 3);
+    const pub = spreadAt(t, m, app.view.resolved);
+    el.classList.toggle("dirty", !same(v, pub));
+    const ro = d.follow_market || (m === "rr10" && d.lock_rr10f) || (m === "bf10" && d.lock_bf10f) || rres[t].mid[m] == null;
+    el.readOnly = ro; el.tabIndex = ro ? -1 : 0; el.classList.toggle("ro", ro);
+    el.title = `${app.current} ${fmt(res[t].mid[m], 3)} − ${sp.ref} ${fmt(rres[t].mid[m], 3)}` +
+      (pub != null && !same(v, pub) ? ` · published spread ${fmt(pub, 3)}` : "") +
+      (d.follow_market ? "\nFollows FMD: set by the feed" : ro && rres[t].mid[m] != null ? "\nUntick the 10D factor lock to type the 10D" : "");
+  }
+  for (const td of $$("#sp-grid td.calc")) {
+    const t = td.dataset.t, m = td.dataset.m;
+    if (td.dataset.k === "ref") { td.textContent = fmt(rres[t].mid[m], 3); continue; }
+    const a = mktMid(app.market, t, m), b = mktMid(sp.market, t, m);
+    const f = a && b ? a.mid - b.mid : null, ours = spreadAt(t, m, res), tol = spreadTol(t, m);
+    td.textContent = fmt(f, 3);
+    const off = f != null && ours != null && tol != null && Math.abs(ours - f) > tol;
+    td.classList.toggle("off", off);
+    td.classList.toggle("stale", !!(a?.stale || b?.stale));
+    td.title = f == null ? "No FMD quote for one of the pairs" :
+      `FMD ${app.current} ${fmt(a.mid, 3)} − ${sp.ref} ${fmt(b.mid, 3)}` + (ours != null ? ` · yours ${ours - f > 0 ? "+" : ""}${fmt(ours - f, 3)} vs FMD` : "") +
+      (tol != null ? ` (tol ${fmt(tol, 2)})` : "") + (a.stale || b.stale ? " · stale quote" : "");
+  }
+  renderSpreadChart();
+}
+function renderSpreadChart() {
+  const T = app.tenors, m = $("#sp-mark").value, sp = app.spread;
+  $("#sp-ts-title").textContent = `${MARK_LABEL[m]} spread by tenor`;
+  const series = [{ name: app.dirty ? "Draft" : "Spread", color: "var(--s1)", values: T.map((t) => spreadAt(t, m, app.preview.resolved)), dots: true }];
+  if (app.dirty) series.push({ name: "Published", color: "var(--muted)", dash: true, values: T.map((t) => spreadAt(t, m, app.view.resolved)) });
+  const fv = T.map((t) => { const a = mktMid(app.market, t, m), b = mktMid(sp.market, t, m); return a && b ? a.mid - b.mid : null; });
+  if (fv.some((v) => v != null)) series.push({ name: "FMD", color: "var(--s5)", noLine: true, label: false, values: fv });
+  $("#sp-legend").innerHTML = series.map((s) => `<span><i class="${s.dash ? "dash" : ""}" style="background:${s.color}"></i>${esc(s.name)}</span>`).join("");
+  lineChart($("#sp-chart"), { n: T.length, xLabel: (i) => `${T[i]} · ${app.current} − ${sp.ref}`, xTicks: T.map((t, i) => [i, t]), series, yLabel: "Spread by tenor" });
+}
+let spHistSeq = 0, spHistTimer = null;
+function loadSpreadHistory(delay = 0) {
+  clearTimeout(spHistTimer);
+  spHistTimer = setTimeout(async () => {
+    const sp = app.spread;
+    if (app.tab !== "spread" || !sp?.ref || !sp.view) return;
+    const seq = ++spHistSeq;
+    let h;
+    try {
+      h = await api(`/api/pairs/${sp.pair}/spread?ref=${sp.ref}&tenor=${$("#sp-tenor").value}&days=${$("#sp-days").value}`);
+    } catch (e) { h = { points: [], error: e.message }; }
+    if (seq !== spHistSeq || app.spread !== sp) return;
+    sp.hist = h; renderSpreadHistory();
+  }, delay);
+}
+function renderSpreadHistory() {
+  const sp = app.spread, h = sp?.hist, m = $("#sp-mark").value;
+  if (!h) return;
+  $("#sp-h-title").textContent = `${$("#sp-tenor").value} ${MARK_LABEL[m]} spread, published`;
+  const pts = h.points || [];
+  $("#sp-h-note").textContent = h.error ? h.error :
+    `${app.current} − ${sp.ref} as published at each moment · ${h.versions} version(s) in the window` + (h.truncated ? " · older versions not read" : "");
+  if (!pts.length) { $("#sp-hist").innerHTML = `<div class="muted" style="padding:20px">No history in this window</div>`; return; }
+  const day = (iso) => new Date(iso).toDateString(), ticks = [];
+  pts.forEach(([ts], i) => {
+    if (i && day(ts) !== day(pts[i - 1][0])) ticks.push([i, new Date(ts).toLocaleDateString(undefined, { weekday: "short", day: "numeric" })]);
+  });
+  if (!ticks.length) ticks.push([0, new Date(pts[0][0]).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })],
+    [pts.length - 1, new Date(pts[pts.length - 1][0]).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })]);
+  lineChart($("#sp-hist"), {
+    n: pts.length, xLabel: (i) => localTime(pts[i][0]), xTicks: ticks, yLabel: "Spread history",
+    series: [{ name: "Spread", color: "var(--s1)", values: pts.map((p) => p[1][m]), label: false, dots: pts.length < 40 }],
+  });
+}
+function wireSpread() {
+  const pick = (ref) => { app.spreadView[app.current] = ref; loadSpreadRef(); };
+  $("#sp-ref").onchange = () => { if ($("#sp-ref").value) pick($("#sp-ref").value); };
+  $("#sp-chips").addEventListener("click", (e) => { const b = e.target.closest(".chip"); if (b) pick(b.dataset.ref); });
+  $("#sp-hide").onclick = () => {
+    app.draft.spread_off = true;
+    changed(); renderSpreadTab();
+    showBanner(`No Spread tab for ${app.current} in the draft. Publish to save it for the desk; switch it back under Setup → Spread reference.`, [["OK", () => hideBanner()]]);
+  };
+  $("#sp-default").onclick = () => {
+    app.draft.spread_ref = app.spread.ref; delete app.spreadView[app.current];
+    changed(); renderSpread();
+    showBanner(`${app.spread.ref} is now ${app.current}'s spread reference in the draft. Publish to save it for the desk.`, [["OK", () => hideBanner()]]);
+  };
+  $("#sp-mark").onchange = () => { renderSpreadChart(); renderSpreadHistory(); };
+  $("#sp-tenor").onchange = $("#sp-days").onchange = () => loadSpreadHistory();
+  const g = $("#sp-grid");
+  g.addEventListener("input", (e) => {
+    const el = e.target; if (!el.matches("input.cell") || el.readOnly) return;
+    const t = el.dataset.t, m = el.dataset.f, txt = el.value.trim(), v = Number(txt);
+    const ref = app.spread?.view?.resolved?.[t]?.mid?.[m];
+    if (txt === "" || !Number.isFinite(v) || ref == null) { el.classList.add("dirty"); return; }
+    setDraftValue(t, m, Math.round((ref + v) * 1e6) / 1e6);
+    changed();
+  });
+  g.addEventListener("focusin", (e) => { if (e.target.matches("input.cell")) e.target.select(); });
+  g.addEventListener("focusout", () => setTimeout(renderSpreadValues, 0));
+  g.addEventListener("keydown", (e) => {
+    const el = e.target; if (!el.matches("input.cell")) return;
+    const step = e.key === "ArrowDown" || e.key === "Enter" ? 1 : e.key === "ArrowUp" ? -1 : 0;
+    if (step) {
+      e.preventDefault();
+      const i = app.tenors.indexOf(el.dataset.t) + step;
+      const next = i >= 0 && i < app.tenors.length && $(`#sp-grid input[data-t="${app.tenors[i]}"][data-f="${el.dataset.f}"]`);
+      if (next) { next.focus(); next.select(); }
+    } else if (e.key === "Escape") {
+      revertDraftValue(el.dataset.t, el.dataset.f); el.blur(); changed();
+    }
+  });
+}
+
 // ---------------------------------------------------------------- weights tab
-function renderWeights(reloadCurve) {
+const isoToday = () => { const d = new Date(), p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
+const useDefaults = () => app.draft.weights.use_defaults !== false;
+function renderWeights(reload) {
   const w = app.draft.weights, [c1, c2] = [app.current.slice(0, 3), app.current.slice(3)];
-  const f = [["weekend1", `Weekend ${c1}`], ["weekend2", `Weekend ${c2}`], ["holiday1", `Holiday ${c1}`], ["holiday2", `Holiday ${c2}`]];
-  $("#factors").innerHTML = f.map(([k, l]) =>
-    `<label>${l}<input class="num wf" data-k="${k}" value="${fmt(w[k], 2)}"></label>`).join("");
-  const evs = (w.events || []).slice().map((e, i) => ({ ...e, i })).sort((a, b) => a.date.localeCompare(b.date));
-  $("#events").innerHTML = `<thead><tr><th class="tn">Date</th><th class="tn">Description</th><th>Weight</th><th></th></tr></thead><tbody>` +
-    (evs.length ? evs.map((e) => `<tr><td class="tn"><input type="date" class="ev" data-i="${e.i}" data-k="date" value="${e.date}"></td>
-      <td class="tn"><input class="ev" data-i="${e.i}" data-k="desc" value="${esc(e.desc)}"></td>
-      <td><input class="ev num" data-i="${e.i}" data-k="weight" value="${fmt(e.weight, 2)}"></td>
-      <td><button class="ghost ev-del" data-i="${e.i}" title="Remove">✕</button></td></tr>`).join("")
-      : `<tr><td colspan="4" class="muted tn">No events</td></tr>`) + "</tbody>";
-  if (reloadCurve) renderCurve();
-  loadDailies();
+  $("#factors").innerHTML = WEEKDAYS.map((d, i) =>
+    `<label>${d}<input class="num wf" data-wd="${i}" value="${fmt(w.weekdays[i], 2)}"></label>`).join("") +
+    `<span class="fsep"></span>` + [["holiday1", `${c1} holiday`], ["holiday2", `${c2} holiday`]].map(([k, l]) =>
+    `<label title="Multiplies the weekday weight on a ${l}">${l}<input class="num wf" data-k="${k}" value="${fmt(w[k], 2)}"></label>`).join("");
+  const cut = (app.me.cuts || {})[app.draft.cut || "NYC"];
+  $("#cut-note").textContent = cut ? `Expiry cut ${app.draft.cut || "NYC"}: ${cut.time} ${cut.tz.split("/").pop().replace("_", " ")} (Setup)` : "";
+  $("#ev-usedef").checked = useDefaults();
+  renderEvents();
+  renderTestDates();
+  if (reload) { loadDefEvents(); loadDefaults(); }
+  loadWeightsExport();
+  weightsCalc(0);
+}
+// one row per date: desk default, pair override of a default, or the pair's own event
+function eventRows() {
+  const w = app.draft.weights, own = {}, defs = useDefaults() ? app.defEvents || [] : [];
+  (w.events || []).forEach((e, i) => (own[e.date] ||= []).push({ ...e, i }));
+  const rows = defs.filter((d) => !own[d.date]).map((d) => ({ date: d.date, desc: d.desc, def: d.weight, weight: d.weight, kind: "default", parts: d.parts, ccy: d.ccy }));
+  for (const [date, es] of Object.entries(own)) {
+    const d = defs.find((x) => x.date === date);
+    rows.push({ date, desc: es.map((e) => e.desc).filter(Boolean).join(", "), def: d ? d.weight : null, defDesc: d?.desc, parts: d?.parts,
+      weight: es.reduce((s, e) => s + (Number(e.weight) || 0), 0), kind: d ? "override" : "pair", idx: es.map((e) => e.i),
+      ccy: es[0].ccy || d?.ccy || app.current.slice(0, 3) });
+  }
+  return rows.sort((a, b) => a.date.localeCompare(b.date));
+}
+function renderEvents() {
+  const today = isoToday(), all = eventRows(), rows = all.filter((r) => r.date >= today);
+  const past = all.filter((r) => r.date < today && r.kind !== "default").length;
+  const wd = (d) => new Date(d + "T12:00:00").toLocaleDateString(undefined, { weekday: "short" });
+  const ccys = [app.current.slice(0, 3), app.current.slice(3)];
+  $("#events").innerHTML = `<thead><tr><th class="tn" title="Option expiry the event weighs on">Expiry</th><th class="tn">Day</th><th class="tn" title="Release time (${esc(app.me.calendar_tz || "")})">Release</th><th class="tn">Ccy</th><th class="tn">Description</th><th title="Desk default">Default</th><th>Weight</th><th></th></tr></thead><tbody>` +
+    (rows.length ? rows.map((r) => {
+      const i = r.idx ? r.idx[0] : "", extra = r.idx ? r.idx.slice(1).join(",") : "";
+      const attrs = r.kind === "default" ? `data-date="${r.date}" data-desc="${esc(r.desc)}"` : `data-i="${i}" data-extra="${extra}"`;
+      // plain text in the same yyyy-mm-dd as the other rows (a date picker would show the PC's regional format)
+      const date = r.kind === "pair" ? `<input class="ev evdate" ${attrs} data-k="date" value="${r.date}" placeholder="yyyy-mm-dd" maxlength="10" size="10" title="Expiry date, yyyy-mm-dd">` : r.date;
+      const breakdown = (r.parts || []).length > 1 ? r.parts.map((x) => `${x.desc}  ${fmt(x.weight, 2)}`).join("\n") + `\n= ${fmt(r.def, 2)}` : "";
+      const shown = r.ccy && (r.desc || "").startsWith(r.ccy + " ") ? r.desc.slice(4) : r.desc;
+      const desc = r.kind === "default" ? `<span class="muted" title="${esc(breakdown || "Desk default")}">${esc(shown)}</span>`
+        : `<input class="ev" ${attrs} data-k="desc" value="${esc(r.desc)}" placeholder="${esc(r.defDesc || "")}">`;
+      const act = r.kind === "pair" ? `<button class="ghost ev-del" data-idx="${r.idx.join(",")}" title="Remove">✕</button>`
+        : r.kind === "override" ? `<button class="ghost ev-del" data-idx="${r.idx.join(",")}" title="Back to the desk default (${fmt(r.def, 2)})">↺</button>` : "";
+      const rel = (r.parts || [])[0]?.release || "";
+      const relTxt = rel.slice(0, 10) === r.date ? rel.slice(11) : rel ? `${wd(rel.slice(0, 10))} ${rel.slice(8, 10)}. ${rel.slice(11)}` : "";
+      const relTitle = (r.parts || []).map((x) => `${x.desc}: ${x.release}`).join("\n");
+      const ccy = r.kind === "pair" ? `<select class="ev" ${attrs} data-k="ccy">${ccys.map((c) => `<option${c === r.ccy ? " selected" : ""}>${c}</option>`).join("")}</select>` : esc(r.ccy || "");
+      return `<tr class="ev-${r.kind}"><td class="tn">${date}</td><td class="tn">${wd(r.date)}</td><td class="tn small${rel && rel.slice(0, 10) !== r.date ? " moved" : ""}" title="${esc(relTitle)}">${esc(relTxt)}</td><td class="tn">${ccy}</td><td class="tn">${desc}</td>
+        <td class="muted"${breakdown ? ` title="${esc(breakdown)}"` : ""}>${r.def == null ? "" : fmt(r.def, 2) + (breakdown ? " Σ" : "")}</td>
+        <td><input class="ev num${r.kind === "override" ? " ovr" : ""}" ${attrs} data-k="weight" value="${fmt(r.weight, 2)}" title="${r.kind === "default" ? "Desk default; type to override for this pair" : r.kind === "override" ? "Overrides the desk default for this pair" : "This pair's own event"}"></td>
+        <td>${act}</td></tr>`;
+    }).join("") : `<tr><td colspan="8" class="muted tn">No upcoming events</td></tr>`) + "</tbody>";
+  const nDef = rows.filter((r) => r.kind === "default").length, nOvr = rows.filter((r) => r.kind === "override").length;
+  $("#ev-note").innerHTML = (useDefaults() ? `${nDef} from desk defaults, ${nOvr} overridden. ` : "Desk defaults off for this pair. ") +
+    (past ? `${past} past event(s) hidden <button class="ghost" id="ev-prune">Remove past</button>` : "");
+}
+async function loadDefEvents() {
+  const pair = app.current;
+  try {
+    const d = await api(`/api/pairs/${pair}/default-events?cut=${encodeURIComponent(app.draft.cut || "NYC")}`);
+    if (pair === app.current) app.defEvents = d;
+  } catch { app.defEvents = []; }
+  if (app.tab === "weights") renderEvents();
+}
+let wcTimer = null;
+function weightsCalc(delay = 200) {    // everything on the weights tab that depends on the draft
+  clearTimeout(wcTimer);
+  wcTimer = setTimeout(() => { if (app.tab !== "weights" || !app.current) return; loadTestDates(); renderCurve(); loadDailies(); renderWeightsExport(); }, delay);
+}
+
+// ---------------------------------------------------------------- test dates
+function testDates() { return ((app.prefs.test_dates || {})[app.current] || []).filter((d) => d > isoToday()); }
+function setTestDates(list) {
+  (app.prefs.test_dates ||= {})[app.current] = [...new Set(list)].sort();
+  savePrefs(); renderTestDates(); loadTestDates();
+}
+let tdSeq = 0;
+async function loadTestDates() {
+  const dates = testDates(), seq = ++tdSeq;
+  if (!dates.length) { app.testRows = []; return renderTestDates(); }
+  try {
+    const r = await api(`/api/pairs/${app.current}/testdates`, { dates, state: app.dirty ? app.draft : null });
+    if (seq === tdSeq) { app.testRows = r.rows; renderTestDates(); }
+  } catch (e) { if (seq === tdSeq) { app.testRows = []; renderTestDates(e.message); } }
+}
+function renderTestDates(err) {
+  const rows = (app.testRows || []).filter((r) => testDates().includes(r.date));
+  const dirty = app.dirty;
+  $("#td-table").innerHTML = `<thead><tr><th class="tn">Expiry</th><th class="tn">Day</th><th title="Calendar days">Days</th><th title="Weighted days from today">W. days</th><th title="Weight of the expiry day itself">Day wt</th>` +
+    `<th>${dirty ? "Draft ATM" : "ATM"}</th>${dirty ? "<th>Published</th><th>Δ</th>" : ""}<th title="Forward vol from the row above">Fwd</th><th class="tn">Events</th><th></th></tr></thead><tbody>` +
+    (rows.length ? rows.map((r) => {
+      let d = r.atm != null && r.published != null ? r.atm - r.published : null;
+      if (d != null && Math.abs(d) < 0.0005) d = 0;
+      return `<tr${r.good_day ? "" : ' class="muted" title="Not a good business day for both currencies"'}><td class="tn">${r.date}</td><td class="tn">${r.weekday}</td><td>${r.days}</td>
+        <td>${fmt(r.weighted_days, 2)}</td><td>${fmt(r.day_weight, 2)}</td><td><b>${fmt(r.atm, 3)}</b></td>
+        ${dirty ? `<td>${fmt(r.published, 3)}</td><td class="${d && Math.abs(d) >= 0.0005 ? "chg" : "muted"}">${d == null ? "" : (d > 0 ? "+" : "") + fmt(d, 3)}</td>` : ""}
+        <td>${fmt(r.fwd, 3)}</td><td class="tn small">${esc(r.events.join(", "))}</td>
+        <td><button class="ghost td-del" data-date="${r.date}" title="Remove">✕</button></td></tr>`;
+    }).join("") : `<tr><td colspan="11" class="muted tn">${esc(err || "Add an expiry date above, e.g. the day of and the day before an event")}</td></tr>`) + "</tbody>";
+}
+function addEventTestDates() {
+  const today = isoToday(), lim = new Date(); lim.setMonth(lim.getMonth() + 3);
+  const end = lim.toISOString().slice(0, 10), out = [...testDates()];
+  for (const r of eventRows()) {
+    if (r.date <= today || r.date > end || !(r.weight > 0)) continue;
+    const d = new Date(r.date + "T12:00:00");
+    do d.setDate(d.getDate() - 1); while ([0, 6].includes(d.getDay()));
+    const before = d.toISOString().slice(0, 10);
+    if (before > today) out.push(before);
+    out.push(r.date);
+  }
+  setTestDates(out);
+}
+
+// ---------------------------------------------------------------- desk defaults for recurring events
+async function loadDefaults() {
+  if (app.dfDirty) return;
+  try { app.defaults = await api("/api/event-defaults"); } catch { return; }
+  app.dfRows = clone(app.defaults.rows);
+  renderDefaults();
+}
+function renderDefaults() {
+  const d = app.defaults || {}, q = ($("#df-filter").value || "").trim().toLowerCase();
+  const rows = (app.dfRows || []).map((r, i) => ({ ...r, i }))
+    .filter((r) => !q || `${r.ccy} ${r.event} ${r.ticker || ""}`.toLowerCase().includes(q))
+    .sort((a, b) => (a.ccy || "").localeCompare(b.ccy || "") || (b.weight - a.weight) || a.i - b.i);
+  $("#df-table").innerHTML = `<thead><tr><th class="tn">Ccy</th><th class="tn">Event</th><th class="tn">Ticker</th><th>Weight</th><th title="Upcoming calendar events this one matches">Upcoming</th><th class="tn">Next release</th><th></th></tr></thead><tbody>` +
+    (rows.length ? rows.map((r) => `<tr><td class="tn"><input class="df" data-i="${r.i}" data-k="ccy" value="${esc(r.ccy)}" maxlength="3" size="4" placeholder="any"></td>
+      <td class="tn"><input class="df" data-i="${r.i}" data-k="event" value="${esc(r.event)}" placeholder="e.g. FOMC Rate Decision (Upper Bound)" size="34"></td>
+      <td class="tn"><input class="df" data-i="${r.i}" data-k="ticker" value="${esc(r.ticker || "")}" placeholder="optional" size="14"></td>
+      <td><input class="df num" data-i="${r.i}" data-k="weight" value="${fmt(r.weight, 2)}"></td>
+      <td${r.matches === 0 ? ' class="warn" title="Not in the calendar: check the name, or import the Bloomberg file"' : ""}>${r.matches ?? ""}</td><td class="tn muted small">${esc(r.next || "")}</td>
+      <td><button class="ghost df-del" data-i="${r.i}" title="Remove">✕</button></td></tr>`).join("")
+      : `<tr><td colspan="7" class="muted tn">${q ? "No match" : "No relevant events yet"}</td></tr>`) + "</tbody>";
+  $("#df-save").disabled = $("#df-revert").disabled = !app.dfDirty;
+  $("#df-meta").textContent = app.dfDirty ? "Unsaved changes" : d.ts ? `Saved by ${d.user} at ${localTime(d.ts)}` : "";
+  const imp = d.imports || {};
+  $("#cal-imports").textContent = Object.keys(imp).length ? "Bloomberg: " + Object.entries(imp).map(([c, x]) =>
+    `${c} ${localTime(x.ts)} by ${x.user} (${x.events})`).join(" · ") : "No Bloomberg import yet";
+}
+
+// ---------------------------------------------------------------- Bloomberg calendar import
+async function previewImport(file) {
+  const buf = new Uint8Array(await file.arrayBuffer());
+  let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+  const payload = { name: file.name, data: btoa(bin) };
+  try {
+    const p = await api("/api/calendar/preview", payload);
+    app.imp = { payload, p, rows: p.events.map((x) => ({ ...x, on: x.relevant, weight: x.weight ?? 0 })) };
+    $("#defaults-card").open = true; $("#cal-preview").hidden = false;
+    renderImport();
+  } catch (e) { showBanner(`Import failed: ${esc(e.message)}`, [], "error"); }
+}
+function renderImport() {
+  const { p, rows } = app.imp, q = $("#cal-p-filter").value.trim().toLowerCase(), only = $("#cal-p-only").checked;
+  $("#cal-p-title").textContent = `${p.file}: ${p.ccys.join(", ")}`;
+  const on = rows.filter((r) => r.on).length;
+  $("#cal-p-sub").textContent = `${p.count} releases ${p.from} → ${p.to}, ${rows.length} different events, ${on} relevant · times in ${p.source_tz}` +
+    (p.downloaded ? ` · downloaded ${p.downloaded}` : "");
+  const shown = rows.map((r, i) => ({ ...r, i })).filter((r) => (!only || r.on) && (!q || `${r.name} ${r.ticker}`.toLowerCase().includes(q)));
+  $("#cal-p-table").innerHTML = `<thead><tr><th></th><th class="tn">Event</th><th class="tn">Ticker</th><th title="Bloomberg relevance">Rel.</th><th>Count</th><th class="tn">Next</th><th class="tn">Times</th><th>Weight</th></tr></thead><tbody>` +
+    shown.map((r) => `<tr class="${r.on ? "" : "muted"}"><td><input type="checkbox" class="ip" data-i="${r.i}" data-k="on"${r.on ? " checked" : ""}></td>
+      <td class="tn">${esc(r.name)}</td><td class="tn small">${esc(r.ticker)}</td><td>${r.relevance ?? ""}</td><td>${r.count}</td>
+      <td class="tn small">${esc(r.next || "")}</td><td class="tn small">${esc(r.times.join(" "))}</td>
+      <td><input class="ip num" data-i="${r.i}" data-k="weight" value="${fmt(r.weight, 2)}"${r.on ? "" : " disabled"}></td></tr>`).join("") + "</tbody>";
+  const notes = [];
+  if (p.missing.length) notes.push(`On the list but not in this file (kept): ${p.missing.map((r) => r.event).join(", ")}.`);
+  if (p.skipped) notes.push(`${p.skipped} release(s) without a fixed day yet are left out (e.g. ${p.skipped_list.slice(0, 2).map((x) => x.event).join(", ")}).`);
+  if (Object.keys(p.assumed).length) notes.push(`Country codes ${Object.keys(p.assumed).join(", ")} counted as ${[...new Set(Object.values(p.assumed))].join(", ")}.`);
+  notes.push("Ticked events become the list of relevant events for these currencies, with these weights. The whole file is kept, so ticking another event later needs no new import.");
+  $("#cal-p-note").textContent = notes.join(" ");
+}
+async function saveImport() {
+  if (app.dfDirty && !window.confirm("Your unsaved changes to the relevant events list will be replaced. Continue?")) return;
+  const { payload, rows } = app.imp;
+  try {
+    app.defaults = await api("/api/calendar/import", { ...payload, expected_version: app.defaults?.version ?? null,
+      selection: rows.filter((r) => r.on).map((r) => ({ ccy: r.ccy, name: r.name, ticker: r.ticker, weight: r.weight })) });
+    app.dfRows = clone(app.defaults.rows); app.dfDirty = false; app.imp = null;
+    $("#cal-preview").hidden = true; renderDefaults();
+    if (app.current) { await loadDefEvents(); weightsCalc(0); }
+    showBanner("Bloomberg calendar imported. Every pair now uses it.", [["OK", () => hideBanner()]]);
+  } catch (e) {
+    showBanner(e.status === 409 ? `${esc(e.message)}. Nothing was imported; load the list again and retry.` : `Import failed: ${esc(e.message)}`, [], "error");
+  }
+}
+
+// ---------------------------------------------------------------- send weights (Fenics XML poster, Front Arena files)
+async function loadWeightsExport() {
+  const pair = app.current;
+  try { const x = await api(`/api/pairs/${pair}/weights-export`); if (pair === app.current) { app.wx = x; renderWeightsExport(); } } catch {}
+}
+function renderWeightsExport() {
+  const x = app.wx; if (!x) return;
+  const l = x.last;
+  $("#wx-state").innerHTML = (l ? `Last sent v${l.version} by ${esc(l.user)} at ${localTime(l.ts)}${l.ok ? "" : ` <span class="warn">(${esc(l.error || "failed")})</span>`}` : "Not sent from VolMarker yet") +
+    (x.changed ? ` · <b class="warn">weights changed since</b>` : " · up to date");
+  if (!$("#wx-user").value) $("#wx-user").value = app.prefs.fenics_user || "";
+  $("#wx-send").disabled = app.dirty;
+  $("#wx-send").title = app.dirty ? "Publish first: the published version is sent" : `POST to ${x.url}/xmlposter`;
+  $("#wx-table").innerHTML = `<thead><tr><th class="tn">Expiry</th><th class="tn">Ccy</th><th class="tn">Type</th><th class="tn">Event</th><th>Weight</th><th>Sent value</th></tr></thead><tbody>` +
+    `<tr><td class="tn" colspan="4">Weekdays Mon–Sun · holiday ${app.current.slice(0, 3)} / ${app.current.slice(3)}</td><td colspan="2">${x.weekdays.map((v) => fmt(v, 2)).join(" ")} · ${fmt(x.holiday1, 2)} / ${fmt(x.holiday2, 2)}</td></tr>` +
+    x.fenics.map((e) => `<tr><td class="tn">${e.date}</td><td class="tn">${e.ccy}</td><td class="tn">${e.type}</td><td class="tn">${esc(e.name)}</td><td>${fmt(e.weight, 3)}</td><td>${fmt(e.value, 4)}</td></tr>`).join("") + "</tbody>";
+}
+async function sendWeights() {
+  const username = $("#wx-user").value.trim(), password = $("#wx-pass").value;
+  if (!username || !password) { $("#wx-msg").textContent = "User and password needed"; return; }
+  if (app.prefs.fenics_user !== username) { app.prefs.fenics_user = username; savePrefs(); }
+  $("#wx-send").disabled = true; $("#wx-msg").textContent = "Sending…";
+  try {
+    const r = await api(`/api/pairs/${app.current}/weights-export`, { username, password });
+    $("#wx-msg").textContent = r.ok ? "Sent: Fenics accepted, Front Arena files written" : `Front Arena files written; Fenics: ${r.error}`;
+    $("#wx-msg").className = r.ok ? "ok" : "warn";
+    if (!r.ok && r.response) $("#wx-msg").title = r.response;
+  } catch (e) { $("#wx-msg").textContent = `Failed: ${e.message}`; $("#wx-msg").className = "warn"; }
+  $("#wx-pass").value = "";
+  loadWeightsExport();
+}
+
+async function saveDefaults() {
+  try {
+    app.defaults = await api("/api/event-defaults", { rows: app.dfRows, expected_version: app.defaults?.version ?? null });
+    app.dfRows = clone(app.defaults.rows); app.dfDirty = false;
+    renderDefaults(); await loadDefEvents(); weightsCalc(0);
+  } catch (e) {
+    if (e.status === 409) showBanner(`${esc(e.message)}. Nothing was saved.`, [
+      ["Load theirs (discard mine)", () => { app.dfDirty = false; hideBanner(); loadDefaults(); }],
+      ["Keep editing mine", () => { app.defaults = e.data.latest; hideBanner(); }]]);
+    else showBanner(`Saving the defaults failed: ${esc(e.message)}`, [], "error");
+  }
+}
+function wireWeights() {
+  $("#factors").addEventListener("input", (e) => {
+    const v = Number(e.target.value); if (!Number.isFinite(v)) return;
+    if (e.target.dataset.wd !== undefined) app.draft.weights.weekdays[+e.target.dataset.wd] = v;
+    else app.draft.weights[e.target.dataset.k] = v;
+    changed();
+  });
+  $("#ev-usedef").onchange = (e) => { app.draft.weights.use_defaults = e.target.checked; changed(); renderEvents(); };
+  $("#events").addEventListener("change", (e) => {
+    const el = e.target; if (!el.matches(".ev")) return;
+    const evs = (app.draft.weights.events ||= []), k = el.dataset.k;
+    let val = k === "weight" ? Number(el.value) || 0 : el.value;
+    if (k === "date") {
+      val = val.trim();
+      const d = new Date(val + "T12:00:00");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(val) || isNaN(d) || d.toISOString().slice(0, 10) !== val) {
+        el.classList.add("bad"); el.title = "Not a date: use yyyy-mm-dd, e.g. 2026-11-04"; return;
+      }
+    }
+    if (el.dataset.date) {                 // a desk default: typing creates this pair's override
+      const def = (app.defEvents || []).find((x) => x.date === el.dataset.date);
+      evs.push({ date: el.dataset.date, desc: k === "desc" ? val : el.dataset.desc, weight: k === "weight" ? val : def?.weight ?? 0, ccy: def?.ccy });
+    } else {
+      evs[+el.dataset.i][k] = val;
+      if (k === "weight" && el.dataset.extra)     // several events on one date: keep one carrying the total
+        el.dataset.extra.split(",").map(Number).sort((a, b) => b - a).forEach((j) => evs.splice(j, 1));
+    }
+    changed(); renderEvents();
+  });
+  $("#events").addEventListener("click", (e) => {
+    if (!e.target.matches(".ev-del")) return;
+    e.target.dataset.idx.split(",").map(Number).sort((a, b) => b - a).forEach((j) => app.draft.weights.events.splice(j, 1));
+    changed(); renderEvents();
+  });
+  $("#ev-note").addEventListener("click", (e) => {
+    if (e.target.id !== "ev-prune") return;
+    const today = isoToday();
+    app.draft.weights.events = (app.draft.weights.events || []).filter((x) => x.date >= today);
+    changed(); renderEvents();
+  });
+  $("#ev-add").onclick = () => {
+    const used = new Set(eventRows().map((r) => r.date)), d = new Date();
+    let iso; do { d.setDate(d.getDate() + 1); iso = d.toISOString().slice(0, 10); } while (used.has(iso));
+    (app.draft.weights.events ||= []).push({ date: iso, desc: "", weight: 0.5 });
+    changed(); renderEvents();
+  };
+  // test dates
+  $("#td-add").onclick = () => { const v = $("#td-date").value; if (v && v > isoToday()) setTestDates([...testDates(), v]); };
+  $("#td-date").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#td-add").click(); });
+  $("#td-events").onclick = addEventTestDates;
+  $("#td-clear").onclick = () => setTestDates([]);
+  $("#td-table").addEventListener("click", (e) => {
+    if (e.target.matches(".td-del")) setTestDates(testDates().filter((d) => d !== e.target.dataset.date));
+  });
+  // desk defaults
+  $("#defaults-card").addEventListener("toggle", () => { if ($("#defaults-card").open) loadDefaults(); });
+  $("#df-table").addEventListener("change", (e) => {
+    const el = e.target; if (!el.matches(".df")) return;
+    const r = app.dfRows[+el.dataset.i], k = el.dataset.k;
+    r[k] = k === "weight" ? Number(el.value) || 0 : k === "ccy" ? el.value.trim().toUpperCase() : el.value.trim();
+    delete r.matches; delete r.next;
+    app.dfDirty = true; renderDefaults();
+  });
+  $("#df-table").addEventListener("click", (e) => {
+    if (!e.target.matches(".df-del")) return;
+    app.dfRows.splice(+e.target.dataset.i, 1); app.dfDirty = true; renderDefaults();
+  });
+  $("#df-add").onclick = () => { (app.dfRows ||= []).push({ ccy: app.current?.slice(0, 3) || "", event: "", ticker: "", weight: 0.5 }); app.dfDirty = true; $("#df-filter").value = ""; renderDefaults(); };
+  $("#df-filter").addEventListener("input", renderDefaults);
+  // Bloomberg import
+  $("#cal-file").onchange = (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) previewImport(f); };
+  $("#cal-p-filter").addEventListener("input", renderImport);
+  $("#cal-p-only").onchange = renderImport;
+  $("#cal-p-table").addEventListener("change", (e) => {
+    const el = e.target; if (!el.matches(".ip")) return;
+    const r = app.imp.rows[+el.dataset.i];
+    if (el.dataset.k === "on") r.on = el.checked; else r.weight = Number(el.value) || 0;
+    renderImport();
+  });
+  $("#cal-p-save").onclick = saveImport;
+  $("#cal-p-cancel").onclick = () => { app.imp = null; $("#cal-preview").hidden = true; };
+  // send weights
+  $("#wx-send").onclick = sendWeights;
+  $("#wx-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") sendWeights(); });
+  $("#wx-show").onclick = () => { $("#wx-detail").hidden = !$("#wx-detail").hidden; };
+  $("#df-save").onclick = saveDefaults;
+  $("#df-revert").onclick = () => { app.dfDirty = false; loadDefaults(); };
 }
 
 // ---------------------------------------------------------------- market dailies -> weights
@@ -752,21 +1391,34 @@ function calibrateDailies() {
   changed(); renderWeights(false);
   showBanner(`Event weights up to ${d.window_end} set from the market dailies (${d.events.length} events). Review and publish.`, [["OK", () => hideBanner()]]);
 }
+let curveSeq = 0;
 async function renderCurve() {
-  const c = await api(`/api/pairs/${app.current}/curve`);
+  const seq = ++curveSeq;
+  let c;
+  try { c = await api(`/api/pairs/${app.current}/curve`, { state: app.dirty ? app.draft : null }); } catch { return; }
+  if (seq !== curveSeq) return;
   const pts = c.points;
   if (!pts.length) { $("#curve").innerHTML = `<div class="muted" style="padding:20px">No ATM marks</div>`; return; }
   const ticks = [];
   pts.forEach(([d], i) => {
     if (i && d.slice(0, 7) !== pts[i - 1][0].slice(0, 7)) ticks.push([i, new Date(d).toLocaleString(undefined, { month: "short" })]);
   });
+  const draft = pts.some((p) => p[2] != null && Math.abs(p[2] - p[1]) > 1e-6);
+  const series = draft
+    ? [{ name: "Draft", color: "var(--s1)", values: pts.map((p) => p[2]), label: false },
+       { name: "Published", color: "var(--muted)", dash: true, values: pts.map((p) => p[1]), label: false }]
+    : [{ name: "ATM", color: "var(--s1)", values: pts.map((p) => p[1]), label: false }];
+  $("#curve-legend").innerHTML = draft ? series.map((s) => `<span><i class="${s.dash ? "dash" : ""}" style="background:${s.color}"></i>${esc(s.name)}</span>`).join("") : "";
+  const evs = c.events.filter((e) => e.weight);
   lineChart($("#curve"), {
     n: pts.length, xLabel: (i) => {
-      const d = pts[i][0], ev = c.events.filter((e) => e.date === d).map((e) => e.desc).join(", ");
+      const d = pts[i][0], ev = evs.filter((e) => e.date === d).map((e) => `${e.desc} ${e.weight > 0 ? "+" : ""}${fmt(e.weight, 2)}`).join(", ");
       return d + (ev ? ` · ${ev}` : "");
     },
-    xTicks: ticks, series: [{ name: "ATM", color: "var(--s1)", values: pts.map((p) => p[1]), label: false }],
-    markers: c.events.map((e) => ({ i: pts.findIndex((p) => p[0] >= e.date), label: e.desc })).filter((mk) => mk.i >= 0),
+    xTicks: ticks, series,
+    // label only the biggest days (all events are in the hover text)
+    markers: [...evs].sort((a, b) => b.weight - a.weight).slice(0, 10).filter((e) => e.weight >= 0.3)
+      .map((e) => ({ i: pts.findIndex((p) => p[0] >= e.date), label: e.desc.replace(/^[A-Z]{3} /, "").replace(/ \+\d+$/, "").slice(0, 24) })).filter((mk) => mk.i >= 0),
     yLabel: "Interpolated ATM vol by expiry date",
   });
 }
@@ -777,6 +1429,14 @@ function renderSetup() {
   $("#su-mode").value = d.mode;
   $("#su-b1").value = d.bases?.[0] || ""; $("#su-b2").value = d.bases?.[1] || "";
   $("#su-key").checked = !!d.key;
+  if (document.activeElement !== $("#su-group")) $("#su-group").value = d.group || "";
+  $("#su-spref").innerHTML = `<option value="">Automatic (same group)</option><option value="-">None (no Spread tab)</option>` +
+    app.pairs.filter((p) => p.pair !== app.current).map((p) => `<option>${p.pair}</option>`).join("");
+  $("#su-spref").value = d.spread_off ? "-" : d.spread_ref || "";
+  const cuts = app.me.cuts || {};
+  $("#su-cut").innerHTML = Object.entries(cuts).map(([k, c]) => `<option value="${k}">${k} (${c.time} ${c.tz.split("/").pop().replace("_", " ")})</option>`).join("");
+  $("#su-cut").value = d.cut || "NYC";
+  if (document.activeElement !== $("#su-dc")) $("#su-dc").value = d.dc_factor == null ? "" : fmt(d.dc_factor, 2);
   $("#su-atm").value = d.atm_type || "DNS";
   $$(".su-derived").forEach((el) => (el.hidden = d.mode !== "derived"));
   $("#su-follow").checked = !!d.follow_market;
@@ -793,6 +1453,13 @@ function onSetupChange() {
   const d = app.draft, mode = $("#su-mode").value;
   const bases = [$("#su-b1").value, $("#su-b2").value];
   d.key = $("#su-key").checked;
+  d.group = $("#su-group").value.trim().replace(/\s+/g, " ") || null;
+  if ($("#su-cut").value && $("#su-cut").value !== (d.cut || "NYC")) { d.cut = $("#su-cut").value; app.defEvents = []; loadDefEvents(); }
+  const dcTxt = $("#su-dc").value.trim(), dcv = Number(dcTxt);
+  d.dc_factor = dcTxt === "" || !Number.isFinite(dcv) ? null : dcv;
+  const spv = $("#su-spref").value;
+  d.spread_off = spv === "-";
+  if (!d.spread_off) d.spread_ref = spv || null;      // switching it off keeps the reference for later
   d.atm_type = $("#su-atm").value;
   if (mode === "derived") {
     if (!bases[0] || !bases[1]) { $$(".su-derived").forEach((el) => (el.hidden = false)); return; }
@@ -829,6 +1496,7 @@ function onSetupChange() {
   d.follow_market = follow;
   d.alerts_off = $("#su-alerts-off").checked;
   renderSetup();
+  renderSpreadTab();
   if (rebuild) buildGrid();
   changed();
 }
@@ -857,16 +1525,26 @@ function connect() {
       clearTimeout(t); t = setTimeout(() => loadPairs(), 300);
       return;
     }
+    if (ev.type === "event_defaults") {
+      if (ev.user !== app.me.user || !app.dfDirty) loadDefaults();
+      if (app.current && app.tab === "weights") { await loadDefEvents(); weightsCalc(0); }
+      return;
+    }
     if (ev.type === "market") {
       clearTimeout(t); t = setTimeout(() => loadPairs(), 400);
       if (app.current && (ev.pairs.includes(app.current) || ev.follow) && !mktBusy) {
-        mktBusy = true; setTimeout(async () => { await loadMarket(); loadDailies(); mktBusy = false; }, 300);
+        mktBusy = true; setTimeout(async () => { await loadMarket(); loadDailies(); renderSpreadValues(); mktBusy = false; }, 300);
       }
+      if (app.tab === "spread" && app.spread?.ref && ev.pairs.includes(app.spread.ref)) refreshSpreadRef();
       return;
     }
     flash = ev.pair;
     clearTimeout(t); t = setTimeout(() => loadPairs(flash), 150);
     if (!app.current) return;
+    if (app.tab === "spread" && app.spread?.ref) {
+      if (ev.pair === app.spread.ref) refreshSpreadRef();
+      else if (ev.pair === app.current) loadSpreadHistory(1500);
+    }
     const auto = (ev.source === "market" && app.published.follow_market) || ev.source === "propagation";
     if (ev.pair === app.current && ev.version > app.baseVersion && auto) {
       await quietUpdate(ev.source);   // no banner; keeps focus and the trader's edits (server rebases on publish)
@@ -887,6 +1565,26 @@ function connect() {
       if (app.dirty) runPreview(); else renderTermChart();
     }
   };
+}
+
+let spRefBusy = false;
+function refreshSpreadRef() {        // the reference pair was published or its market moved: keep the draft, update the spreads
+  if (spRefBusy) return;
+  spRefBusy = true;
+  setTimeout(async () => {
+    const sp = app.spread;
+    try {
+      const brand = encodeURIComponent($("#mkt-brand").value);
+      const [v, m] = await Promise.all([api(`/api/pairs/${sp.ref}`), api(`/api/pairs/${sp.ref}/market?brand=${brand}`).catch(() => null)]);
+      if (app.spread === sp) {
+        const moved = sp.view?.record?.version !== v.record.version;
+        Object.assign(sp, { view: v, market: m });
+        if (!$("#sp-grid input")) renderSpread(); else { $("#sp-note").textContent = `${sp.ref} v${v.record.version} at ${localTime(v.record.ts)}`; renderSpreadValues(); }
+        if (moved) loadSpreadHistory(1500);
+      }
+    } catch {}
+    spRefBusy = false;
+  }, 300);
 }
 
 async function quietUpdate(source) {
@@ -983,9 +1681,7 @@ function wireAlerts() {
 
 // ---------------------------------------------------------------- wiring
 function wire() {
-  $("#pairlist").addEventListener("click", (e) => {
-    const r = e.target.closest(".prow"); if (r) selectPair(r.dataset.pair);
-  });
+  wireSidebar();
   $("#filter").addEventListener("input", () => renderPairs());
   $("#filter").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { const first = $(".prow", $("#pairlist")); if (first) selectPair(first.dataset.pair); }
@@ -1010,8 +1706,7 @@ function wire() {
     else if (e.key === "ArrowUp") { e.preventDefault(); moveFocus(el, -1); }
     else if (e.key === "Escape") {
       const t = el.dataset.t, f = el.dataset.f;
-      app.draft.tenors[t][f] = clone(publishedRow(t)[f]);
-      if (f === "atm" && app.draft.mode === "derived") app.draft.tenors[t].corr = clone(publishedRow(t).corr);
+      revertDraftValue(t, f);
       el.value = fmt(app.draft.tenors[t][f], 3); changed();
     }
   });
@@ -1022,7 +1717,7 @@ function wire() {
     setFromMarket(el.dataset.t, el.dataset.m, q.mid); changed(); renderGrid();
   });
   $("#mkt-show").onchange = () => { renderMarket(); renderTermChart(); };
-  $("#mkt-brand").onchange = () => loadMarket();
+  $("#mkt-brand").onchange = async () => { await loadMarket(); if (app.tab === "spread") refreshSpreadRef(); };
   const followBlock = () => {
     if (!app.draft.follow_market) return false;
     showBanner("This pair follows FMD: ATM, RR and BF come from the feed. Untick Follow FMD in Setup to mark by hand.", [["OK", () => hideBanner()]]);
@@ -1106,30 +1801,11 @@ function wire() {
     if (app.tab === "setup") renderSetup();
     if (app.tab === "surface") renderTermChart();
     if (app.tab === "s3d") render3D();
+    if (app.tab === "spread") loadSpreadRef();
   }));
 
-  // weights
-  $("#factors").addEventListener("input", (e) => {
-    const v = Number(e.target.value); if (!Number.isFinite(v)) return;
-    app.draft.weights[e.target.dataset.k] = v; changed(); loadDailies();
-  });
-  $("#events").addEventListener("change", (e) => {
-    if (!e.target.matches(".ev")) return;
-    const ev = app.draft.weights.events[+e.target.dataset.i], k = e.target.dataset.k;
-    ev[k] = k === "weight" ? Number(e.target.value) || 0 : e.target.value;
-    changed(); renderWeights(false);
-  });
-  $("#events").addEventListener("click", (e) => {
-    if (!e.target.matches(".ev-del")) return;
-    app.draft.weights.events.splice(+e.target.dataset.i, 1); changed(); renderWeights(false);
-  });
-  $("#ev-add").onclick = () => {
-    (app.draft.weights.events ||= []).push({ date: new Date().toISOString().slice(0, 10), desc: "", weight: 0.5 });
-    changed(); renderWeights(false);
-  };
-
   // setup
-  ["#su-mode", "#su-b1", "#su-b2", "#su-key", "#su-atm", "#su-follow", "#su-alerts-off"].forEach((id) => $(id).addEventListener("change", onSetupChange));
+  ["#su-mode", "#su-b1", "#su-b2", "#su-key", "#su-group", "#su-spref", "#su-cut", "#su-dc", "#su-atm", "#su-follow", "#su-alerts-off"].forEach((id) => $(id).addEventListener("change", onSetupChange));
   $("#su-tol").addEventListener("change", (e) => {
     const m = e.target.dataset.m; if (!m) return;
     const txt = e.target.value.trim(), v = Number(txt);
@@ -1158,7 +1834,7 @@ function wire() {
     const mode = $("#np-mode").value;
     try {
       const rec = await api("/api/pairs", {
-        pair: $("#np-pair").value, mode, key: $("#np-key").checked,
+        pair: $("#np-pair").value, mode, key: $("#np-key").checked, group: $("#np-group").value.trim() || null,
         bases: mode === "derived" ? [$("#np-b1").value, $("#np-b2").value] : null,
       });
       dlg.close(); await loadPairs(); selectPair(rec.pair);
@@ -1180,6 +1856,8 @@ function wire() {
   window.addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => { if (!app.view) return; renderTermChart(); if (app.tab === "s3d") render3D(); }, 100); });
   wire3d();
   wireAlerts();
+  wireSpread();
+  wireWeights();
 }
 
 async function init() {
@@ -1190,6 +1868,8 @@ async function init() {
   const opts = app.tenors.map((t) => `<option>${t}</option>`).join("");
   $("#sh-from").innerHTML = opts; $("#sh-to").innerHTML = opts;
   $("#sh-from").value = "1M"; $("#sh-to").value = "1Y";
+  $("#sp-tenor").innerHTML = opts; $("#sp-tenor").value = "1M";
+  try { app.prefs = await api("/api/prefs"); } catch { app.prefs = {}; }
   wire();
   await loadPairs();
   loadAlerts();

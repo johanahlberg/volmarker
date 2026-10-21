@@ -1,5 +1,15 @@
 ccy,date,description
-USD,2026-10-28,FOMC
+USD,2026-10-29,FOMC Rate Decision (Upper Bound)
+EUR,2026-10-29,ECB Deposit Facility Rate
 USD,2026-11-03,US midterm elections
-USD,2026-12-09,FOMC
-CHF,2026-12-10,SNB
+USD,2026-11-06,Change in Nonfarm Payrolls
+GBP,2026-11-05,Bank of England Bank Rate
+NOK,2026-11-05,Norges Bank Deposit Rates
+SEK,2026-11-05,Riksbank Policy Rate
+USD,2026-11-12,CPI YoY
+USD,2026-12-04,Change in Nonfarm Payrolls
+USD,2026-12-10,FOMC Rate Decision (Upper Bound)
+USD,2026-12-10,CPI YoY
+CHF,2026-12-10,SNB Policy Rate
+EUR,2026-12-17,ECB Deposit Facility Rate
+GBP,2026-12-17,Bank of England Bank Rate

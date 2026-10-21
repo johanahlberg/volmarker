@@ -3,20 +3,19 @@ their own instance against the shared data folder."""
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import queue
 import re
-from datetime import date, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .calendar import interpolate_atm, is_good_day
-from .conventions import TENORS, split_pair
+from .conventions import TENORS
 from .service import Service
-from .store import ConflictError, LockTimeout
+from .store import ConflictError, DefaultsConflict, LockTimeout
 
 STATIC = Path(__file__).parent / "static"
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -67,10 +66,13 @@ def make_handler(svc: Service):
             if p.startswith("/static/"):
                 return self._static(p[len("/static/"):])
             if p == "/api/me":
-                return self._json({"user": svc.user, "data": str(svc.store.root),
-                                   "tenors": TENORS})
+                cfg = svc.store.config()
+                return self._json({"user": svc.user, "data": str(svc.store.root), "tenors": TENORS,
+                                   "cuts": cfg.get("cuts") or {}, "calendar_tz": cfg.get("calendar_tz")})
             if p == "/api/pairs":
                 return self._json(svc.summaries())
+            if p == "/api/prefs":
+                return self._json(svc.prefs())
             if p == "/api/stream":
                 return self._stream()
             m = re.fullmatch(r"/api/pairs/([A-Z]{6})", p)
@@ -91,18 +93,55 @@ def make_handler(svc: Service):
                 return self._json(svc.market_for(m.group(1), q.get("brand", [None])[0]))
             m = re.fullmatch(r"/api/pairs/([A-Z]{6})/curve", p)
             if m:
-                return self._curve(m.group(1))
+                return self._json(svc.curve(m.group(1)))
+            m = re.fullmatch(r"/api/pairs/([A-Z]{6})/default-events", p)
+            if m:
+                return self._json(svc.pair_default_events(m.group(1), parse_qs(url.query).get("cut", [None])[0]))
+            m = re.fullmatch(r"/api/pairs/([A-Z]{6})/weights-export", p)
+            if m:
+                return self._json(svc.weights_status(m.group(1)))
+            if p == "/api/event-defaults":
+                return self._json(svc.event_defaults())
+            m = re.fullmatch(r"/api/pairs/([A-Z]{6})/spread", p)
+            if m:
+                q = parse_qs(url.query)
+                try:
+                    return self._json(svc.spread_history(
+                        m.group(1), q.get("ref", [""])[0], q.get("tenor", ["1M"])[0],
+                        float(q.get("days", ["5"])[0])))
+                except ValueError as e:
+                    return self._json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
             return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
         def do_POST(self):
             p = urlparse(self.path).path
             try:
                 body = self._body()
+                if p == "/api/prefs":
+                    return self._json(svc.save_prefs(body))
+                if p == "/api/event-defaults":
+                    return self._json(svc.save_event_defaults(body.get("rows") or [], body.get("expected_version")))
+                if p in ("/api/calendar/preview", "/api/calendar/import"):
+                    data = base64.b64decode(body["data"])
+                    if p.endswith("preview"):
+                        return self._json(svc.bloomberg_preview(data, body.get("name", "")))
+                    return self._json(svc.bloomberg_import(data, body.get("name", ""), body.get("selection"),
+                                                           body.get("expected_version")))
+                m = re.fullmatch(r"/api/pairs/([A-Z]{6})/weights-export", p)
+                if m:
+                    return self._json(svc.send_weights(m.group(1), body.get("username", ""), body.get("password", "")))
+                m = re.fullmatch(r"/api/pairs/([A-Z]{6})/curve", p)
+                if m:
+                    return self._json(svc.curve(m.group(1), body.get("state")))
+                m = re.fullmatch(r"/api/pairs/([A-Z]{6})/testdates", p)
+                if m:
+                    return self._json(svc.test_dates(m.group(1), body.get("dates") or [], body.get("state")))
                 if p == "/api/alerts/ack":
                     return self._json({"acked": svc.ack_alerts(body.get("keys"), body.get("pair"))})
                 if p == "/api/pairs":
                     rec = svc.create_pair(body["pair"], body.get("mode", "marked"),
-                                          body.get("bases"), body.get("key", False))
+                                          body.get("bases"), body.get("key", False),
+                                          body.get("group"))
                     return self._json(rec)
                 m = re.fullmatch(r"/api/pairs/([A-Z]{6})/preview", p)
                 if m:
@@ -115,6 +154,8 @@ def make_handler(svc: Service):
                     rec = svc.publish(m.group(1), body["state"], body.get("expected_version"),
                                       body.get("comment", ""))
                     return self._json(rec)
+            except DefaultsConflict as e:
+                return self._json({"error": str(e), "latest": e.latest}, HTTPStatus.CONFLICT)
             except ConflictError as e:
                 return self._json({"error": str(e), "latest": e.latest}, HTTPStatus.CONFLICT)
             except LockTimeout as e:
@@ -122,21 +163,6 @@ def make_handler(svc: Service):
             except (ValueError, KeyError, TypeError) as e:
                 return self._json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
             return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
-
-        def _curve(self, pair: str):
-            rec = svc.get(pair)
-            if rec is None:
-                return self._json({"error": "unknown pair"}, 404)
-            holidays, _ = svc.store.load_calendar()
-            today = date.today()
-            ccys = split_pair(pair)
-            days = [d for d in (today + timedelta(days=i) for i in range(1, 186))
-                    if is_good_day(d, ccys, holidays)]
-            atm = {t: rec["tenors"][t]["atm"] for t in TENORS}
-            vols = interpolate_atm(pair, atm, today, days, rec.get("weights"), holidays)
-            return self._json({"points": [[d.isoformat(), round(v, 4)]
-                                          for d, v in sorted(vols.items())],
-                               "events": (rec.get("weights") or {}).get("events", [])})
 
         def _stream(self):
             self.send_response(HTTPStatus.OK)

@@ -1,0 +1,9 @@
+ccy,event,weight,ticker
+USD,FOMC Rate Decision (Upper Bound),0.8,FDTR Index
+USD,Change in Nonfarm Payrolls,0.5,NFP TCH Index
+USD,CPI YoY,0.4,CPI YOY Index
+EUR,ECB Deposit Facility Rate,0.6,
+CHF,SNB Policy Rate,0.6,
+GBP,Bank of England Bank Rate,0.6,
+SEK,Riksbank Policy Rate,0.4,
+NOK,Norges Bank Deposit Rates,0.4,

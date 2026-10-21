@@ -1,35 +1,68 @@
 """Event-weighted time and total-variance interpolation between vol marks.
 
-Day weights for a pair, mirroring the desk's Excel weight files:
+Day weights for a pair, as in the desk's Excel weight files and in Fenics:
 
-  * base weight is 1.0 on a normal business day;
-  * a weekend or holiday in either currency replaces it with the pair's
-    factor for that case (e.g. 0.3); if several apply the lowest is used;
-  * event weights are additive on top (FOMC weight 0.8 -> 1.8 on a normal
-    day, 0.3 + 0.8 = 1.1 on a holiday).
+    day weight = weekday weight x holiday factor(ccy1) x holiday factor(ccy2) + events
+
+  * weekday weights: one per weekday (Mon..Sun), e.g. 1.05, 1, 1, 1, 1, 0, 0;
+  * a holiday factor applies on a holiday of that currency (e.g. 0.4), so a
+    holiday in both currencies gives 0.4 x 0.4;
+  * event weights are additive on top (FOMC 0.8 -> 1.8 on a normal day).
 
 Total variance  w(T) = vol(T)^2 * T_cal  is interpolated linearly in
 weighted time between the marked tenors.
 
 Pair weight config (stored on the pair's state under "weights"):
 
-    {"weekend1": 0.0, "weekend2": 0.0, "holiday1": 0.3, "holiday2": 0.3,
-     "events": [{"date": "2026-10-28", "desc": "FOMC", "weight": 0.8}]}
+    {"weekdays": [1, 1, 1, 1, 1, 0, 0], "holiday1": 0.4, "holiday2": 0.4,
+     "use_defaults": true,
+     "events": [{"date": "2026-10-29", "desc": "FOMC", "weight": 1.2, "ccy": "USD"}]}
 
-Global calendar data (holidays and event dates per currency) lives on the
-shared drive under calendar/ - see store.load_calendar.
+Older records with weekend1/weekend2 are read as weekday weights (see
+normalise_weights).
+
+Events come from the event calendar (Bloomberg imports plus manual events,
+see store.load_calendar) and the desk's list of relevant events
+(calendar/event_defaults.csv: ccy, event, weight, ticker). A calendar event in
+one of the pair's currencies that is on the list (same ticker, or same name)
+gets the listed weight on its OPTION EXPIRY date: the first good business day
+whose expiry cut (e.g. 10:00 New York) comes after the release. FOMC at 14:00
+New York on the 28th therefore weighs on the 29th's expiry. Events without a
+release time weigh on their own date.
+
+Several events on one expiry add up; the biggest names the day. An event the
+pair has on the same date replaces the default (manual or calibrated to the
+dailies); weight 0 switches it off. "use_defaults": false ignores the list.
 """
 
 from __future__ import annotations
 
 import calendar as _cal
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
 from .conventions import TENORS, split_pair
+from .tz import to_local
 
-DEFAULT_WEIGHTS = {"weekend1": 0.0, "weekend2": 0.0,
-                   "holiday1": 0.3, "holiday2": 0.3, "events": []}
+WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+DEFAULT_WEIGHTS = {"weekdays": [1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0],
+                   "holiday1": 0.4, "holiday2": 0.4, "events": [], "use_defaults": True}
+DEFAULT_CUT = {"tz": "America/New_York", "time": "10:00"}
+
+
+def normalise_weights(weights: dict | None) -> dict:
+    """Fill defaults; convert the old weekend1/weekend2 factors to weekday weights."""
+    w = dict(DEFAULT_WEIGHTS)
+    w.update(weights or {})
+    if not (weights or {}).get("weekdays") and ("weekend1" in w or "weekend2" in w):
+        we = min(float(w.get("weekend1", 0)), float(w.get("weekend2", 0)))
+        w["weekdays"] = [1.0] * 5 + [we, we]
+    w["weekdays"] = [float(x) for x in w["weekdays"]]
+    if len(w["weekdays"]) != 7:
+        raise ValueError("weekday weights: 7 values, Monday to Sunday")
+    for k in ("weekend1", "weekend2"):
+        w.pop(k, None)
+    return w
 
 WEEKEND = {5, 6}  # Saturday, Sunday
 
@@ -66,20 +99,105 @@ def tenor_dates(pair: str, today: date, holidays: dict[str, set]) -> dict[str, d
 
 def day_weight(d: date, ccys: tuple[str, str], weights: dict, holidays: dict[str, set],
                events_by_date: dict[date, float]) -> float:
-    base = [1.0]
-    if d.weekday() in WEEKEND:
-        base += [weights["weekend1"], weights["weekend2"]]
+    """weights must be normalised (see normalise_weights)."""
+    base = weights["weekdays"][d.weekday()]
     for i, c in enumerate(ccys, start=1):
         if d in holidays.get(c, ()):
-            base.append(weights[f"holiday{i}"])
-    return min(base) + events_by_date.get(d, 0.0)
+            base *= weights[f"holiday{i}"]
+    return base + events_by_date.get(d, 0.0)
+
+
+def expiry_for(ev: dict, ccys: tuple[str, str], holidays: dict[str, set], cut: dict | None) -> date:
+    """The option expiry an event weighs on: the first good day whose cut is
+    after the release (events without a time: their own date, rolled forward)."""
+    cut = cut or DEFAULT_CUT
+    if ev.get("ts"):
+        local = to_local(datetime.fromisoformat(ev["ts"]), cut["tz"])
+        h, m = (int(x) for x in cut["time"].split(":"))
+        d = local.date() + timedelta(days=1 if local.time() >= time(h, m) else 0)
+    else:
+        d = date.fromisoformat(ev["date"])
+    while not is_good_day(d, ccys, holidays):
+        d += timedelta(days=1)
+    return d
+
+
+def rule_weight(ev: dict, rules: list[dict]) -> float | None:
+    """Weight of a calendar event on the desk's list of relevant events, or None.
+    A rule matches on its ticker, or on the event name (case-insensitive)."""
+    name, raw, ticker = ev["desc"].lower(), (ev.get("event") or "").lower(), (ev.get("ticker") or "").lower()
+    ws = []
+    for r in rules:
+        if (r.get("ccy") or "").strip("*") not in ("", ev["ccy"]):
+            continue
+        rt, rn = (r.get("ticker") or "").strip().lower(), (r.get("event") or "").strip().lower()
+        if (rt and rt == ticker) or (rn and rn in (name, raw)):
+            ws.append(float(r["weight"]))
+    return max(ws) if ws else None
+
+
+def default_events(pair: str, cal_events: list[dict], defaults: list[dict],
+                   start: str | None = None, holidays: dict[str, set] | None = None,
+                   cut: dict | None = None, display_tz: str | None = None) -> list[dict]:
+    """Desk default weights for this pair, one entry per expiry date: the sum
+    of the relevant events weighing on it, labelled with the biggest one.
+    "parts" lists them all, with their release time."""
+    ccys = split_pair(pair)
+    holidays = holidays or {}
+    by_date: dict[str, dict[str, dict]] = {}
+    for ev in cal_events:
+        if ev["ccy"] not in ccys:
+            continue
+        w = rule_weight(ev, defaults)
+        if w is None:
+            continue
+        d = expiry_for(ev, ccys, holidays, cut).isoformat()
+        if start and d < start:
+            continue
+        release = ev["date"]
+        if ev.get("ts") and display_tz:
+            release = to_local(datetime.fromisoformat(ev["ts"]), display_tz).strftime("%Y-%m-%d %H:%M")
+        elif ev.get("time"):
+            release = f"{ev['date']} {ev['time']}"
+        # an event listed twice in the calendar counts once
+        by_date.setdefault(d, {})[f"{ev['ccy']} {ev['desc']}"] = {"weight": w, "ccy": ev["ccy"], "release": release}
+    out = []
+    for d, evs in sorted(by_date.items()):
+        parts = sorted(evs.items(), key=lambda kv: -kv[1]["weight"])
+        out.append({"date": d, "desc": parts[0][0] + (f" +{len(parts) - 1}" if len(parts) > 1 else ""),
+                    "weight": round(sum(p["weight"] for _, p in parts), 6), "ccy": parts[0][1]["ccy"],
+                    "parts": [{"desc": n, **p} for n, p in parts]})
+    return out
+
+
+def effective_events(pair_events: list[dict], defaults: list[dict]) -> list[dict]:
+    """The pair's own events plus the defaults on dates the pair doesn't set itself."""
+    own: dict[str, list] = {}
+    for e in pair_events:
+        own.setdefault(e["date"], []).append(e)
+    out = [dict(e, source="default") for e in defaults if e["date"] not in own]
+    dflt = {e["date"]: e for e in defaults}
+    for d, es in own.items():
+        out.append({"date": d, "desc": ", ".join(e.get("desc") or "" for e in es),
+                    "weight": sum(float(e["weight"]) for e in es), "source": "pair",
+                    "ccy": es[0].get("ccy") or dflt.get(d, {}).get("ccy")})
+    return sorted(out, key=lambda e: e["date"])
+
+
+def with_defaults(pair: str, weights: dict | None, cal_events: list[dict], defaults: list[dict],
+                  holidays: dict[str, set] | None = None, cut: dict | None = None) -> dict:
+    """Pair weights (normalised) with the desk defaults merged into the events."""
+    w = normalise_weights(weights)
+    if w.get("use_defaults", True):
+        w["events"] = effective_events(w.get("events") or [],
+                                       default_events(pair, cal_events, defaults, holidays=holidays, cut=cut))
+    return w
 
 
 def cumulative_weights(pair: str, today: date, end: date, weights: dict | None,
                        holidays: dict[str, set]) -> list[float]:
     """cum[n] = weighted days from today to today + n (day 0 excluded)."""
-    w = dict(DEFAULT_WEIGHTS)
-    w.update(weights or {})
+    w = normalise_weights(weights)
     ccys = split_pair(pair)
     events: dict[date, float] = {}
     for ev in w.get("events", []):
@@ -173,8 +291,7 @@ def implied_daily_weights(pair: str, today: date, daily_vols: dict[date, float],
     (pillars = expiry dates of ON, 1W, 2W, ...). Otherwise differences in vol
     level between segments would show up as fake events.
     """
-    w = dict(DEFAULT_WEIGHTS)
-    w.update(weights or {})
+    w = normalise_weights(weights)
     ccys = split_pair(pair)
     exp = sorted(d for d in daily_vols if d > today)   # dailies sharing an expiry collapse to one
     rows, prev_d, prev_tv = [], today, 0.0

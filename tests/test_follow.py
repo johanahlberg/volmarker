@@ -54,7 +54,11 @@ class TestFollower(unittest.TestCase):
             self.assertAlmostEqual(rec["tenors"]["1M"]["rr10f"], 2.5)  # locked factor recalibrated
             self.assertTrue(rec["follow_market"])
             self.assertIn("ATM +0.30", rec["comment"])
-            self.assertIn("1M,ATM,,7.0500,7.5500", (store.root / "exports" / "fenics" / "EURUSD.csv").read_text())
+            self.assertIn("vol,atm,EUR,USD,1m,7.05,7.55\r\n", (store.root / "exports" / "fenics" / "EURUSDvolsurface.txt").read_bytes().decode())
+            # no history copy of the follower's version (manual publishes do get one)
+            hist = list((store.root / "exports" / "history").glob("EURUSD_*.csv"))
+            self.assertTrue(hist)
+            self.assertFalse(any("1m,7.05," in h.read_text() for h in hist))
             write_market(store, "EURUSD", 7.5, rr10=0.25, bf10=0.7)
             self.assertEqual(fol.step(NOW + 5), [])             # throttled
             self.assertTrue(fol.status["EURUSD"]["waiting"])

@@ -17,7 +17,7 @@ import time
 
 from datetime import date
 
-from ..calendar import daily_dates, interpolate_atm
+from ..calendar import daily_dates, interpolate_atm, with_defaults
 from ..conventions import TENORS, split_pair
 from ..store import Store
 from ..surface import resolve
@@ -71,11 +71,13 @@ def daily_instruments(store: Store, pair: str, rec: dict, res: dict, rnd: random
     days than the desk's weights do (+0.4, and 0.9 for calendar events the
     pair has no weight for), so a calibration has something to find."""
     holidays, cal = store.load_calendar()
-    w = dict(rec.get("weights") or {})
-    events = [dict(e, weight=float(e["weight"]) + 0.4) for e in w.get("events", [])]
+    cfg = store.config()
+    cut = (cfg.get("cuts") or {}).get(rec.get("cut") or "NYC")
+    w = with_defaults(pair, rec.get("weights"), cal, store.load_event_defaults()["rows"], holidays, cut)
+    events = [dict(e, weight=float(e["weight"]) + 0.4) for e in w["events"]]
     have = {e["date"] for e in events}
-    events += [{"date": e["date"], "weight": 0.9} for e in cal
-               if e["ccy"] in split_pair(pair) and e["date"] not in have]
+    events += [{"date": e["date"], "weight": 0.9} for e in cal      # manual events nobody weighted
+               if e.get("source") == "manual" and e["ccy"] in split_pair(pair) and e["date"] not in have]
     w["events"] = events
     today = date.today()
     dd = daily_dates(pair, today, list(range(1, 15)), holidays,

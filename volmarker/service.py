@@ -9,14 +9,18 @@ import queue
 import threading
 import time
 import os
+import re
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import exports
 from .alerts import AlertEngine, deviation, iso, level
 from .conventions import TENORS, normalise_pair
-from .calendar import daily_dates, implied_daily_weights, interpolate_atm, tenor_dates
+from . import bbg, weights_export
+from .calendar import (DEFAULT_CUT, cumulative_weights, daily_dates, default_events, expiry_for,
+                       implied_daily_weights, interpolate_atm, is_good_day, normalise_weights,
+                       rule_weight, tenor_dates, with_defaults)
 from .conventions import split_pair
 from .fmd.book import daily_n
 from .market import compare, market_view, parse_fix_time
@@ -27,10 +31,18 @@ from .surface import (ALERT_MARKS, FOLLOW_FIELDS, apply_derivation, check_surfac
 log = logging.getLogger("volmarker")
 
 STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type",
-              "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "tenors"]
+              "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "group", "spread_ref", "spread_off", "cut", "dc_factor", "tenors"]
 LEADER_STALE = 45.0
 FEED_STALE = 15.0
 FOLLOW_STALE = 30.0
+SPREAD_SCAN = 5000      # versions read per pair for the spread history
+MAX_TEST_DATES = 60
+
+
+def _labels(own: list, cal: list) -> list[str]:
+    """Event names for a date: the pair's (or default) ones, then calendar ones not already named."""
+    out = [x for x in dict.fromkeys(own) if x]
+    return out + [c for c in dict.fromkeys(cal) if c and not any(c in x for x in out)]
 
 
 class Service:
@@ -77,7 +89,7 @@ class Service:
             alerts = [a for a in active if a["pair"] == r["pair"]]
             out.append({
                 "pair": r["pair"], "mode": r["mode"], "bases": r.get("bases"),
-                "key": r.get("key", False), "version": r["version"],
+                "key": r.get("key", False), "group": r.get("group"), "spread_ref": r.get("spread_ref"), "version": r["version"],
                 "ts": r["ts"], "user": r["user"], "source": r.get("source"),
                 "marked_ts": r["marked_ts"], "age_minutes": round(age_min, 1),
                 "stale": follow == "down" if follow else r["mode"] == "marked" and age_min > limit,
@@ -162,6 +174,7 @@ class Service:
         rec = self._prepare(pair, draft) if draft else self.get(pair)
         m = self.market_for(pair, brand, draft=rec)
         holidays, cal_events = self.store.load_calendar()
+        eff = self.effective_weights(pair, rec.get("weights"), cal_events, holidays, rec)
         basis = self.store.config().get("fmd_daily_basis", "calendar")
         daily = {daily_n(t): marks for t, marks in m["view"].items() if daily_n(t)}
         today = date.today()
@@ -173,15 +186,17 @@ class Service:
         res = implied_daily_weights(pair, today, vols, rec.get("weights"), holidays,
                                     pillars=[pillar_dates[t] for t in TENORS])
         atm = {t: rec["tenors"][t]["atm"] for t in TENORS}
-        model = interpolate_atm(pair, atm, today, sorted(vols), rec.get("weights"), holidays)
+        model = interpolate_atm(pair, atm, today, sorted(vols), eff, holidays)
         ccys = split_pair(pair)
         cur_events: dict[str, list] = {}
-        for ev in (rec.get("weights") or {}).get("events", []):
+        for ev in eff["events"]:
             cur_events.setdefault(ev["date"], []).append(ev)
-        cal = {}
+        cal = {}      # labels: manual calendar events and relevant Bloomberg ones, on their expiry
+        rules = self.store.load_event_defaults()["rows"]
         for ev in cal_events:
-            if ev["ccy"] in ccys:
-                cal.setdefault(ev["date"], []).append(ev["desc"])
+            if ev["ccy"] in ccys and (ev.get("source") == "manual" or rule_weight(ev, rules) is not None):
+                d = expiry_for(ev, ccys, holidays, self.cut_of(rec)).isoformat()
+                cal.setdefault(d, []).append(ev["desc"])
         n_by_date: dict = {}
         for n, d in sorted(dd.items()):
             n_by_date.setdefault(d, []).append(n)       # e.g. 6D-8D over a weekend share Monday's expiry
@@ -200,15 +215,282 @@ class Service:
                 "rr25": (q.get("rr25") or {}).get("mid"), "bf25": (q.get("bf25") or {}).get("mid"),
                 "implied_event": r["implied_event"], "implied_weight": r["implied_weight"],
                 "current_event": sum(float(e["weight"]) for e in cur_events.get(iso, [])),
-                "labels": list(dict.fromkeys([e.get("desc", "") for e in cur_events.get(iso, [])] + cal.get(iso, []))),
+                "labels": _labels([e.get("desc", "") for e in cur_events.get(iso, [])], cal.get(iso, [])),
             })
             prev_d, prev_tv = d, tv
         events = []
         for ev in res["events"]:
-            names = [x for x in [e.get("desc") for e in cur_events.get(ev["date"], [])] + cal.get(ev["date"], []) if x]
+            names = _labels([e.get("desc") for e in cur_events.get(ev["date"], [])], cal.get(ev["date"], []))
             events.append({"date": ev["date"], "desc": names[0] if names else "FMD daily", "weight": ev["weight"]})
+        # a default event inside the window that the market doesn't price is switched off (weight 0)
+        window = (today.isoformat(), max(vols).isoformat())
+        implied = {e["date"] for e in events}
+        for ev in eff["events"]:
+            if ev.get("source") == "default" and window[0] < ev["date"] <= window[1] and ev["date"] not in implied:
+                events.append({"date": ev["date"], "desc": ev["desc"], "weight": 0.0})
         return {"rows": rows, "events": events, "warnings": res["warnings"], "basis": basis,
                 "window_end": max(vols).isoformat() if vols else None, "feed": m["feed"]}
+
+    # ---- event weights: desk defaults, curve, test dates ---------------
+    def cut_of(self, rec: dict | None) -> dict:
+        """The pair's option expiry cut: {"tz", "time"} (config "cuts", NYC by default)."""
+        cuts = self.store.config().get("cuts") or {}
+        return cuts.get((rec or {}).get("cut") or "NYC") or cuts.get("NYC") or DEFAULT_CUT
+
+    def effective_weights(self, pair: str, weights: dict | None, cal_events: list[dict] | None = None,
+                          holidays: dict | None = None, rec: dict | None = None) -> dict:
+        if cal_events is None or holidays is None:
+            holidays, cal_events = self.store.load_calendar()
+        return with_defaults(pair, weights, cal_events, self.store.load_event_defaults()["rows"],
+                             holidays, self.cut_of(rec or self.get(pair)))
+
+    def pair_default_events(self, pair: str, cut: str | None = None) -> list[dict]:
+        """Upcoming relevant events of this pair with their default weight, on their expiry."""
+        holidays, cal = self.store.load_calendar()
+        rec = dict(self.get(pair) or {}, **({"cut": cut} if cut else {}))
+        return default_events(pair, cal, self.store.load_event_defaults()["rows"],
+                              start=date.today().isoformat(), holidays=holidays, cut=self.cut_of(rec),
+                              display_tz=self.store.config().get("calendar_tz", "Europe/Zurich"))
+
+    def event_defaults(self) -> dict:
+        """The list of relevant events, with how many upcoming calendar events each one matches."""
+        d = self.store.load_event_defaults()
+        _, cal = self.store.load_calendar()
+        today = date.today().isoformat()
+        upcoming = sorted((e for e in cal if e["date"] >= today), key=lambda e: (e["date"], e.get("time") or ""))
+        for r in d["rows"]:
+            hits = [e for e in upcoming if rule_weight(e, [r]) is not None]
+            r["matches"] = len(hits)
+            r["next"] = f"{hits[0]['date']} {hits[0].get('time') or ''} {hits[0]['ccy']} {hits[0]['desc']}" if hits else None
+        d["imports"] = self.store.bloomberg_imports()
+        return d
+
+    # ---- event weights to Fenics (XML poster) and Front Arena -----------
+    def _weights_target(self, pair: str) -> tuple[dict, dict, dict, date]:
+        rec = self.get(pair)
+        if rec is None:
+            raise ValueError(f"Unknown pair {pair}")
+        holidays, cal = self.store.load_calendar()
+        return rec, self.effective_weights(pair, rec.get("weights"), cal, holidays, rec), holidays, date.today()
+
+    def weights_status(self, pair: str) -> dict:
+        """What would be sent for the published version, and whether it differs from the last send."""
+        rec, w, holidays, today = self._weights_target(pair)
+        cfg = self.store.config()["weights_export"]
+        fx, ws = weights_export.frontarena_lines(pair, w, holidays, today, cfg["date_format"])
+        items = weights_export.fenics_items(pair, w, holidays, today)
+        last = self._weights_sent().get(pair)
+        fp = weights_export.fingerprint(pair, w, holidays, today)
+        return {"version": rec["version"], "fingerprint": fp, "last": last,
+                "changed": not last or not last.get("ok") or last.get("fingerprint") != fp,
+                "url": cfg["fenics_url"], "fenics": [dict(e, date=e["date"].isoformat()) for e in items],
+                "fa_fx": fx, "fa_ws": ws, "weekdays": w["weekdays"],
+                "holiday1": w["holiday1"], "holiday2": w["holiday2"]}
+
+    def send_weights(self, pair: str, username: str, password: str) -> dict:
+        """Write the Front Arena event files and post the weights to Fenics
+        (published version). The password is only passed on, never stored."""
+        rec, w, holidays, today = self._weights_target(pair)
+        cfg = self.store.config()["weights_export"]
+        fx, ws = weights_export.frontarena_lines(pair, w, holidays, today, cfg["date_format"])
+        c1, c2 = split_pair(pair)
+        for key, lines in (("fa_fx_dir", fx), ("fa_ws_dir", ws)):
+            atomic_write(self._export_dir(cfg[key]) / f"{c1}{c2}_events.txt", "".join(l + "\r\n" for l in lines))
+        fp = weights_export.fingerprint(pair, w, holidays, today)
+        entry = {"ts": now_iso(), "user": self.user, "pair": pair, "version": rec["version"],
+                 "fingerprint": fp, "fa": True, "fenics": False, "ok": False}
+        xml = weights_export.fenics_xml(pair, w, holidays, today, username, password)
+        shown = xml.replace(f"<password>{weights_export.escape(password)}</password>", "<password></password>")
+        atomic_write(self._export_dir(cfg["fenics_dir"]) / f"{c1}{c2}_weights.xml", shown)
+        response = ""
+        if not cfg["fenics_url"]:
+            entry["error"] = "No Fenics server set (config.json: weights_export.fenics_url)"
+        elif not username or not password:
+            entry["error"] = "Fenics user and password needed"
+        else:
+            try:
+                response = weights_export.post(cfg["fenics_url"], xml)
+                entry["fenics"] = "error" not in response.lower()
+                entry["ok"] = entry["fenics"]
+                if not entry["ok"]:
+                    entry["error"] = "Fenics answered with an error"
+            except OSError as e:
+                entry["error"] = f"Could not reach Fenics: {e}"
+        log = self.store.root / "exports" / "weights_sent.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+        return dict(entry, response=response[:4000], xml=shown)
+
+    def _weights_sent(self) -> dict[str, dict]:
+        """Last send per pair (from the log)."""
+        out: dict[str, dict] = {}
+        log = self.store.root / "exports" / "weights_sent.jsonl"
+        if log.exists():
+            for line in log.read_text(encoding="utf-8").splitlines():
+                try:
+                    e = json.loads(line)
+                    out[e["pair"]] = e
+                except (ValueError, KeyError):
+                    continue
+        return out
+
+    def _export_dir(self, p: str) -> Path:
+        path = Path(p)
+        return path if path.is_absolute() else self.store.root / path
+
+    # ---- Bloomberg ECO import -------------------------------------------
+    def bloomberg_preview(self, data: bytes, filename: str) -> dict:
+        """Parse an export and list its distinct events, marking the ones already
+        on the list of relevant events, so the desk can pick what to keep."""
+        tz = self.store.config().get("calendar_tz", "Europe/Zurich")
+        parsed = bbg.parse_eco(data, tz)
+        evs = parsed["events"]
+        if not evs:
+            raise ValueError("No events in this file")
+        ccys = sorted({e["ccy"] for e in evs})
+        rules = self.store.load_event_defaults()["rows"]
+        today = date.today().isoformat()
+        distinct: dict[tuple, dict] = {}
+        for e in sorted(evs, key=lambda e: (e["date"], e.get("time") or "")):
+            k = (e["ccy"], e["name"])
+            x = distinct.setdefault(k, {"ccy": e["ccy"], "name": e["name"], "ticker": e["ticker"],
+                                        "relevance": e["relevance"], "count": 0, "next": None, "times": set()})
+            x["count"] += 1
+            x["relevance"] = max(x["relevance"] or 0, e["relevance"] or 0)
+            if e.get("time"):
+                x["times"].add(e["time"])
+            if x["next"] is None and e["date"] >= today:
+                x["next"] = f"{e['date']} {e.get('time') or ''}".strip()
+            w = rule_weight({"ccy": e["ccy"], "desc": e["name"], "event": e["event"], "ticker": e["ticker"]}, rules)
+            if w is not None:
+                x["weight"] = w
+        found = {(x["ccy"], x["name"].lower()) for x in distinct.values()} | \
+                {(x["ccy"], x["ticker"].lower()) for x in distinct.values()}
+        missing = [r for r in rules if r["ccy"] in ccys and (r["ccy"], (r["event"] or "").lower()) not in found
+                   and (r["ccy"], (r.get("ticker") or "").lower()) not in found]
+        return {
+            "file": filename, "ccys": ccys, "downloaded": parsed["downloaded"], "source_tz": tz,
+            "count": len(evs), "from": min(e["date"] for e in evs), "to": max(e["date"] for e in evs),
+            "skipped": len(parsed["skipped"]), "skipped_list": parsed["skipped"][:50],
+            "assumed": parsed["assumed"], "missing": missing,
+            "events": sorted(({**x, "times": sorted(x["times"]), "relevant": "weight" in x}
+                              for x in distinct.values()),
+                             key=lambda x: (not x["relevant"], -(x["relevance"] or 0), x["name"])),
+        }
+
+    def bloomberg_import(self, data: bytes, filename: str, selection: list[dict] | None,
+                         expected_version: str | None) -> dict:
+        """Store the export (it replaces the previous one of the same currency)
+        and, if given, the desk's choice of relevant events and their weights
+        for the currencies in the file."""
+        tz = self.store.config().get("calendar_tz", "Europe/Zurich")
+        parsed = bbg.parse_eco(data, tz)
+        evs = parsed["events"]
+        if not evs:
+            raise ValueError("No events in this file")
+        ccys = sorted({e["ccy"] for e in evs})
+        if selection is not None:
+            cur = self.store.load_event_defaults()
+            keep = [r for r in cur["rows"] if r["ccy"] not in ccys]
+            # rules of these currencies that the file doesn't contain (one-offs like elections) stay
+            names = {(e["ccy"], e["name"].lower()) for e in evs} | {(e["ccy"], e["ticker"].lower()) for e in evs if e["ticker"]}
+            keep += [r for r in cur["rows"] if r["ccy"] in ccys and (r["ccy"], r["event"].lower()) not in names
+                     and (r["ccy"], (r.get("ticker") or "").lower()) not in names]
+            chosen = [{"ccy": x["ccy"], "event": x["name"], "ticker": x.get("ticker") or "",
+                       "weight": float(x.get("weight") or 0)} for x in selection if x.get("ccy") in ccys]
+            self.save_event_defaults(keep + chosen, expected_version)
+        for c in ccys:
+            self.store.save_bloomberg(c, {
+                "ts": now_iso(), "user": self.user, "file": filename, "downloaded": parsed["downloaded"],
+                "source_tz": tz, "events": [e for e in evs if e["ccy"] == c]})
+        self.store.journal({"ts": now_iso(), "kind": "event_defaults", "user": self.user,
+                            "instance": self.instance})
+        self._notify({"type": "event_defaults", "user": self.user})
+        return self.event_defaults()
+
+    def save_event_defaults(self, rows: list[dict], expected_version: str | None) -> dict:
+        d = self.store.save_event_defaults(rows, expected_version, self.user, now_iso())
+        self.store.journal({"ts": now_iso(), "kind": "event_defaults", "user": self.user,
+                            "instance": self.instance})
+        self._notify({"type": "event_defaults", "user": self.user})
+        return d
+
+    def _state_for(self, pair: str, draft: dict | None) -> dict | None:
+        if not draft:
+            return self.get(pair)
+        state, _ = self._derive(self._prepare(pair, draft))
+        return state
+
+    def curve(self, pair: str, draft: dict | None = None, days: int = 185) -> dict:
+        """Interpolated ATM per good day (published, and the draft if given)."""
+        pub = self.get(pair)
+        if pub is None:
+            raise ValueError(f"Unknown pair {pair}")
+        holidays, cal = self.store.load_calendar()
+        today = date.today()
+        ccys = split_pair(pair)
+        targets = [d for d in (today + timedelta(days=i) for i in range(1, days + 1))
+                   if is_good_day(d, ccys, holidays)]
+
+        def run(rec):
+            atm = {t: rec["tenors"][t]["atm"] for t in TENORS}
+            w = self.effective_weights(pair, rec.get("weights"), cal, holidays, rec)
+            return interpolate_atm(pair, atm, today, targets, w, holidays), w["events"]
+        vols, events = run(pub)
+        out = {"points": [[d.isoformat(), round(vols[d], 4), None] for d in targets if d in vols],
+               "events": events}
+        if draft:
+            dv, events = run(self._state_for(pair, draft))
+            out["points"] = [[d, v, round(dv[date.fromisoformat(d)], 4)
+                              if date.fromisoformat(d) in dv else None] for d, v, _ in out["points"]]
+            out["events"] = events
+        return out
+
+    def test_dates(self, pair: str, dates: list[str], draft: dict | None = None) -> dict:
+        """Interpolated ATM on trader-chosen expiry dates, for the draft and the
+        published version, with the weighted days and the forward vol between rows."""
+        pub = self.get(pair)
+        if pub is None:
+            raise ValueError(f"Unknown pair {pair}")
+        rec = self._state_for(pair, draft) or pub
+        today = date.today()
+        ds = sorted({date.fromisoformat(d) for d in dates[:MAX_TEST_DATES]})
+        ds = [d for d in ds if today < d <= today + timedelta(days=5 * 366)]
+        if not ds:
+            return {"rows": []}
+        holidays, cal = self.store.load_calendar()
+        ccys = split_pair(pair)
+        w = self.effective_weights(pair, rec.get("weights"), cal, holidays, rec)
+        wp = self.effective_weights(pair, pub.get("weights"), cal, holidays, pub)
+        v = interpolate_atm(pair, {t: rec["tenors"][t]["atm"] for t in TENORS}, today, ds, w, holidays)
+        vp = interpolate_atm(pair, {t: pub["tenors"][t]["atm"] for t in TENORS}, today, ds, wp, holidays)
+        cum = cumulative_weights(pair, today, ds[-1], w, holidays)
+        evs: dict[str, list] = {}
+        for e in w["events"]:
+            evs.setdefault(e["date"], []).append(e)
+        tdates = tenor_dates(pair, today, holidays)
+        rows, prev_n, prev_tv = [], 0, 0.0
+        for d in ds:
+            n = (d - today).days
+            vol = v.get(d)
+            tv = vol ** 2 * n / 365 if vol is not None else None
+            fwd = None
+            if tv is not None and prev_tv is not None and n > prev_n:
+                fwd = max(tv - prev_tv, 0) * 365 / (n - prev_n)
+                fwd = fwd ** 0.5
+            iso = d.isoformat()
+            after = [t for t in TENORS if tdates[t] >= d]
+            rows.append({
+                "date": iso, "weekday": d.strftime("%a"), "days": n,
+                "weighted_days": round(cum[n], 3), "day_weight": round(cum[n] - cum[n - 1], 3),
+                "good_day": is_good_day(d, ccys, holidays),
+                "atm": vol, "published": vp.get(d), "fwd": fwd,
+                "between": after[0] if after else TENORS[-1],
+                "events": [f"{e['desc']} ({e['weight']:+g})" for e in evs.get(iso, [])],
+            })
+            prev_n, prev_tv = n, tv
+        return {"rows": rows}
 
     def poll_market(self, notify: bool = True) -> None:
         d = self.store.root / "market"
@@ -268,8 +550,76 @@ class Service:
         return {"state": state, "resolved": resolve(state),
                 "warnings": warnings + check_surface(state)}
 
+    def spread_history(self, pair: str, ref: str, tenor: str, days: float = 5.0,
+                       points: int = 480) -> dict:
+        """Published mid of `pair` minus `ref` per mark at one tenor, sampled on
+        a regular time grid over the last `days` (each pair's value is the
+        version live at that moment)."""
+        if tenor not in TENORS:
+            raise ValueError(f"Unknown tenor {tenor}")
+        for p in (pair, ref):
+            if p not in self.cache:
+                raise ValueError(f"Unknown pair {p}")
+        days = min(max(float(days), 0.05), 31.0)
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=days)
+        truncated = False
+
+        def steps(p: str) -> list[tuple[datetime, dict]]:
+            nonlocal truncated
+            out, recs = [], self.store.history(p, SPREAD_SCAN)      # newest first
+            for r in recs:
+                ts = datetime.fromisoformat(r["ts"])
+                out.append((ts, resolve(r)[tenor]["mid"]))
+                if ts <= start:
+                    break
+            else:
+                truncated |= len(recs) == SPREAD_SCAN
+            return out[::-1]
+
+        a, b = steps(pair), steps(ref)
+        step = (now - start) / (points - 1)
+        out, ia, ib = [], -1, -1
+        for k in range(points):
+            t = start + step * k
+            while ia + 1 < len(a) and a[ia + 1][0] <= t:
+                ia += 1
+            while ib + 1 < len(b) and b[ib + 1][0] <= t:
+                ib += 1
+            if ia < 0 or ib < 0:
+                continue
+            va, vb = a[ia][1], b[ib][1]
+            out.append([t.isoformat(timespec="seconds"),
+                        {m: None if va[m] is None or vb[m] is None else round(va[m] - vb[m], 4)
+                         for m in ALERT_MARKS}])
+        return {"pair": pair, "ref": ref, "tenor": tenor, "from": start.isoformat(timespec="seconds"),
+                "to": now.isoformat(timespec="seconds"), "points": out, "truncated": truncated,
+                "versions": sum(ts > start for ts, _ in a) + sum(ts > start for ts, _ in b)}
+
+    # ---- per-user preferences (sidebar layout, spread references) -----
+    def _prefs_path(self) -> Path:
+        name = re.sub(r"[^A-Za-z0-9._-]", "_", self.user).strip(".") or "user"
+        return self.store.root / "users" / f"{name}.json"
+
+    def prefs(self) -> dict:
+        try:
+            p = json.loads(self._prefs_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return p if isinstance(p, dict) else {}
+
+    def save_prefs(self, prefs: dict) -> dict:
+        if not isinstance(prefs, dict):
+            raise ValueError("Preferences must be a JSON object")
+        text = json.dumps(prefs, indent=1)
+        if len(text) > 200_000:
+            raise ValueError("Preferences too large")
+        atomic_write(self._prefs_path(), text)
+        return prefs
+
     # ---- write side ---------------------------------------------------
-    def create_pair(self, pair: str, mode: str, bases: list[str] | None, key: bool) -> dict:
+    def create_pair(self, pair: str, mode: str, bases: list[str] | None, key: bool,
+                    group: str | None = None) -> dict:
         pair = normalise_pair(pair)
         if pair in self.cache:
             raise ValueError(f"{pair} already exists")
@@ -280,6 +630,7 @@ class Service:
                     raise ValueError(f"Base pair {b} does not exist")
         state = new_state(pair, mode, bases)
         state["key"] = bool(key)
+        state["group"] = group
         if mode == "derived":
             # start from the base-implied ATM at zero correlation
             for t in TENORS:
@@ -448,9 +799,9 @@ class Service:
         return rec
 
     def _export(self, rec: dict) -> None:
-        exports.write_exports(rec["pair"], resolve(rec),
-                              self.store.path_from_config("fenics_dir"),
-                              self.store.path_from_config("frontarena_dir"))
+        dirs = {k: self.store.path_from_config(f"{k}_dir") for k in ("fenics", "frontarena", "dc_spread", "history")}
+        # no history copy for the FMD follower's publishes (every 15 s); the pair's history.jsonl has them all
+        exports.write_exports(rec, resolve(rec), dirs, history=rec.get("source") != "market")
 
     def _propagate(self, pair: str, seen: set) -> None:
         """Recompute every derived pair that uses `pair`, recursively."""
@@ -513,6 +864,11 @@ class Service:
             return
         for e in entries:
             if e.get("instance") == self.instance:
+                continue
+            if e.get("kind") == "event_defaults":
+                self._notify({"type": "event_defaults", "user": e.get("user")})
+                continue
+            if not e.get("pair"):
                 continue
             rec = self.store.latest(e["pair"])
             if rec is None:

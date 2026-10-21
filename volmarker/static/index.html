@@ -22,6 +22,8 @@
   <aside class="sidebar">
     <input id="filter" type="search" placeholder="Filter pairs…  ( / )" autocomplete="off">
     <div id="pairlist"></div>
+    <div class="sidefoot muted" title="Your own order and folded groups, saved for your user name. Which group a pair is in is set in its Setup tab.">
+      Drag to reorder · click to fold<span class="spacer"></span><button id="layout-reset" class="ghost">Reset</button></div>
   </aside>
 
   <main id="main">
@@ -43,6 +45,7 @@
       <nav class="tabs">
         <button data-tab="surface" class="active">Surface</button>
         <button data-tab="s3d">3D</button>
+        <button data-tab="spread">Spread</button>
         <button data-tab="weights">Event weights</button>
         <button data-tab="setup">Setup</button>
         <button data-tab="history">History</button>
@@ -99,15 +102,62 @@
         </div>
       </div>
 
+      <div data-panel="spread" hidden>
+        <div class="toolbar">
+          <b id="sp-pair" class="mono"></b><span class="lbl">minus</span>
+          <span id="sp-chips" class="chips"></span>
+          <select id="sp-ref" title="Any other pair"></select>
+          <button id="sp-default" class="ghost" hidden></button>
+          <button id="sp-hide" class="ghost" title="Don't show the Spread tab for this pair (for the whole desk; can be switched back in Setup)">No spread for this pair</button>
+          <span id="sp-note" class="muted"></span>
+          <div class="spacer"></div>
+          <span class="lbl">Charts</span>
+          <select id="sp-mark"><option value="atm">ATM</option><option value="rr25">25D RR</option><option value="rr10">10D RR</option><option value="bf25">25D BF</option><option value="bf10">10D BF</option></select>
+        </div>
+        <div class="gridwrap"><table id="sp-grid" class="grid"></table></div>
+        <p class="muted small">Spread = this pair's draft mid − the reference's published mid. Type a spread to set this pair to reference + spread in the draft.
+          FMD = the same spread on FMD mids; red when your spread is further from it than the alert tolerance.</p>
+        <div class="below even">
+          <div class="card chartcard">
+            <div class="cardhead"><b id="sp-ts-title">Spread by tenor</b><span id="sp-legend" class="legend"></span></div>
+            <div id="sp-chart" class="chart"></div>
+          </div>
+          <div class="card chartcard">
+            <div class="cardhead"><b id="sp-h-title">Spread history</b><div class="spacer"></div>
+              <select id="sp-tenor"></select>
+              <select id="sp-days"><option value="1">1 day</option><option value="3">3 days</option><option value="5" selected>5 days</option><option value="10">10 days</option><option value="31">1 month</option></select>
+            </div>
+            <div id="sp-hist" class="chart"></div>
+            <p id="sp-h-note" class="muted small"></p>
+          </div>
+        </div>
+      </div>
+
       <div data-panel="weights" hidden>
         <div class="card">
-          <div class="cardhead"><b>Day-weight factors</b><span class="muted">Replace the normal weight of 1.0. If more than one applies, the lowest is used.</span></div>
+          <div class="cardhead"><b>Day weights</b><span class="muted">day weight = weekday weight × holiday factor of each currency on holiday + events</span>
+            <div class="spacer"></div><span id="cut-note" class="muted small"></span></div>
           <div id="factors" class="factors"></div>
         </div>
-        <div class="card">
-          <div class="cardhead"><b>Events</b><span class="muted">Added on top of the day weight (e.g. 0.8 → 1.8)</span>
-            <div class="spacer"></div><button id="ev-add">+ Event</button></div>
-          <table id="events" class="grid small"></table>
+        <div class="wgrid">
+          <div class="card">
+            <div class="cardhead"><b>Events</b><span class="muted">Added on top of the day weight (e.g. 0.8 → 1.8)</span>
+              <div class="spacer"></div>
+              <label class="check" title="Calendar events in this pair's currencies get the desk default weight (table at the bottom)"><input id="ev-usedef" type="checkbox"> Desk defaults</label>
+              <button id="ev-add">+ Event</button></div>
+            <div class="gridwrap tall"><table id="events" class="grid small"></table></div>
+            <p id="ev-note" class="muted small"></p>
+          </div>
+          <div class="card">
+            <div class="cardhead"><b>Test dates</b><span class="muted">Interpolated ATM on your own expiry dates, live with the draft</span>
+              <div class="spacer"></div>
+              <input id="td-date" type="date" title="Add an expiry date">
+              <button id="td-add">Add</button>
+              <button id="td-events" class="ghost" title="Add the expiry dates of the upcoming events (next 3 months) and the day before each">+ Event dates</button>
+              <button id="td-clear" class="ghost">Clear</button></div>
+            <div class="gridwrap tall"><table id="td-table" class="grid small"></table></div>
+            <p class="muted small">Fwd = forward vol from the row above (from today for the first row). Draft vs published: edit weights or marks and watch the ATM move. Test dates are saved for you, per pair.</p>
+          </div>
         </div>
         <div class="card" id="dailies-card">
           <div class="cardhead"><b>Market dailies (FMD)</b>
@@ -120,9 +170,57 @@
           <ul id="dl-warn" class="warnings"></ul>
         </div>
         <div class="card chartcard">
-          <div class="cardhead"><b>Interpolated ATM, next 6 months</b><span class="muted">published version · total variance interpolated in weighted time</span></div>
+          <div class="cardhead"><b>Interpolated ATM, next 6 months</b><span class="muted">total variance interpolated in weighted time</span><span id="curve-legend" class="legend"></span></div>
           <div id="curve" class="chart"></div>
         </div>
+        <div class="card" id="wx-card">
+          <div class="cardhead"><b>Send weights</b><span class="muted">published version → Fenics (XML poster) and Front Arena (FA_FX, FA_WS event files)</span>
+            <div class="spacer"></div><span id="wx-state" class="muted"></span></div>
+          <div class="toolbar">
+            <input id="wx-user" placeholder="Fenics user" autocomplete="username" size="12">
+            <input id="wx-pass" type="password" placeholder="Password" autocomplete="current-password" size="12">
+            <button id="wx-send" class="primary">Send to Fenics &amp; Front Arena</button>
+            <button id="wx-show" class="ghost">Show what is sent</button>
+            <span id="wx-msg" class="muted"></span>
+          </div>
+          <div id="wx-detail" hidden>
+            <div class="gridwrap tall"><table id="wx-table" class="grid small"></table></div>
+            <p class="muted small">Events on a holiday of their own currency go to Fenics as a holiday weight (holiday factor + event / (weekday × other holiday factor)), as in the Excel workbook. The password is passed on to Fenics and never stored.</p>
+          </div>
+        </div>
+        <details class="card" id="defaults-card">
+          <summary class="cardhead"><b>Event calendar</b><span class="muted">for all pairs · Bloomberg imports and the list of relevant events with their default weights</span></summary>
+          <div class="toolbar" style="margin-top:8px">
+            <label class="btnlike" title="Bloomberg ECO <GO>: export to Excel and save as .xlsx (one file per currency or region)">Import Bloomberg calendar…<input id="cal-file" type="file" accept=".xlsx" hidden></label>
+            <span id="cal-imports" class="muted small"></span>
+          </div>
+          <div id="cal-preview" hidden>
+            <div class="toolbar">
+              <b id="cal-p-title"></b><span id="cal-p-sub" class="muted small"></span>
+              <div class="spacer"></div>
+              <input id="cal-p-filter" type="search" placeholder="Filter events…" size="18">
+              <label class="check"><input id="cal-p-only" type="checkbox"> Relevant only</label>
+              <button id="cal-p-save" class="primary">Import with this selection</button>
+              <button id="cal-p-cancel" class="ghost">Cancel</button>
+            </div>
+            <div class="gridwrap tall"><table id="cal-p-table" class="grid small"></table></div>
+            <p id="cal-p-note" class="muted small"></p>
+          </div>
+          <div class="toolbar" style="margin-top:10px">
+            <b>Relevant events</b>
+            <button id="df-add">+ Event</button>
+            <button id="df-save" class="primary" disabled>Save list</button>
+            <button id="df-revert" class="ghost" disabled>Revert</button>
+            <span id="df-meta" class="muted"></span>
+            <div class="spacer"></div>
+            <input id="df-filter" type="search" placeholder="Filter…" size="14">
+          </div>
+          <div class="gridwrap tall"><table id="df-table" class="grid small"></table></div>
+          <p class="muted small">Only events on this list get a weight. An event matches on its Bloomberg ticker, or on its name (outside the home country with the country code in front, e.g. "GE IFO Business Climate").
+            It weighs on its option expiry: the first good day whose cut (the pair's Expiry cut in Setup, e.g. 10:00 New York) is after the release, so FOMC at 14:00 New York weighs on the next day.
+            Several events on one expiry add up; the biggest names the day. A weight typed on a pair, or calibrated to the dailies, replaces the default for that date; 0 switches it off.
+            One-off events (elections) can be typed on the pair. Saving applies to every pair straight away.</p>
+        </details>
       </div>
 
       <div data-panel="setup" hidden>
@@ -132,6 +230,10 @@
           </label>
           <label class="su-derived">Base 1 <select id="su-b1"></select></label>
           <label class="su-derived">Base 2 <select id="su-b2"></select></label>
+          <label title="Front Arena DC spread file: ATM spread × 0.5 × factor per tenor. Empty or below 0.01: no file (as in the Excel workbook)">DC spread factor <input id="su-dc" class="num" inputmode="decimal" placeholder="none"></label>
+          <label>Expiry cut <select id="su-cut" title="Events released after the cut weigh on the next expiry"></select></label>
+          <label>Spread reference <select id="su-spref" title="The pair shown by default in the Spread tab"></select></label>
+          <label>Group <input id="su-group" list="group-list" placeholder="e.g. Scandies" maxlength="40" autocomplete="off"></label>
           <label class="check"><input id="su-key" type="checkbox"> Key pair (auto-quoted, tighter staleness limit)</label>
           <label>ATM convention (for broker ATM quotes)
             <select id="su-atm"><option value="DNS">DNS (delta-neutral straddle)</option><option value="ATMF">ATMF (at-the-money forward)</option></select>
@@ -166,6 +268,7 @@
     Defaults in <code>config.json</code> → <code>alerts</code>; per pair in Setup.</p>
 </aside>
 
+<datalist id="group-list"></datalist>
 <div id="tooltip" class="tooltip" hidden></div>
 
 <dialog id="dlg-new">
@@ -175,6 +278,7 @@
     <label>Mode <select id="np-mode"><option value="marked">Marked</option><option value="derived">Derived</option></select></label>
     <label class="np-derived">Base 1 <select id="np-b1"></select></label>
     <label class="np-derived">Base 2 <select id="np-b2"></select></label>
+    <label>Group <input id="np-group" list="group-list" placeholder="optional" maxlength="40" autocomplete="off"></label>
     <label class="check"><input id="np-key" type="checkbox"> Key pair</label>
     <div id="np-err" class="err"></div>
     <div class="actions"><button value="cancel" formnovalidate class="ghost">Cancel</button><button id="np-ok" value="ok" class="primary">Create</button></div>

@@ -1,60 +1,87 @@
-"""CSV exports: one file per pair per target, one line per quote.
+"""Vol surface files, in the layout of the desk's Excel marking workbook
+(VOL_PUBLISHER, macro CreateVolatilityExportSingleCCY):
 
-    Fenics       quoted surface (mid + skew): ATM as bid/offer, wings as mids
-    Front Arena  pure mids, never skewed
+  Front Arena  <frontarena_dir>/<CCY1><CCY2>volsurface.txt   pure mids, never skewed
+      vol,EUR,USD,1d,<ATM bid>,<ATM ask>                     tenors 1d 1wk 2wk 1mo ... 1yr ... 5yr
+      vol25,EUR,USD,strangle,1d,<25D BF>      vol25,EUR,USD,riskreversal,1d,<25D RR>
+      vol10,EUR,USD,strangle,1d,<10D BF>      vol10,EUR,USD,riskreversal,1d,<10D RR>
+  Fenics       <fenics_dir>/<CCY1><CCY2>volsurface.txt       quoted surface (mid + skew)
+      vol,atm,EUR,USD,1w,<bid>,<ask>                          tenors 1d 1w 2w 1m ... 1y ... 5y
+      vol,s25|rr25|s10|rr10,EUR,USD,1w,<bid>,<ask>            bid = ask = mid: Fenics uses the
+                                                              mid for RR and BF
+  DC spreads   <dc_spread_dir>/<CCY1><CCY2>spreads.txt        only if the pair's dc_factor >= 0.01
+      1d,<ATM spread x 0.5 x dc_factor>
+  History      <history_dir>/<CCY1><CCY2>_yyyymmdd_hhmmss.csv  a copy of the Fenics file
 
-ADJUST HERE once the exact layouts of the current files are known
-(column names, order, number format, file naming).
+Numbers are written like VBA does (up to 15 significant digits, '.' decimal
+point); lines end in CRLF. Files are written under a temporary name and then
+renamed, so Fenics and Front Arena never read a half-written file.
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from .conventions import TENORS, split_pair
 from .store import atomic_write
 
-FENICS_HEADER = ["Ccy1", "Ccy2", "Tenor", "Mark", "Mid", "Bid", "Offer"]
-FRONTARENA_HEADER = ["Ccy1", "Ccy2", "Tenor", "Mark", "Mid"]
-
-WING_MARKS = [("25RR", "rr25"), ("10RR", "rr10"), ("25BF", "bf25"), ("10BF", "bf10")]
+FA_TENORS = dict(zip(TENORS, ["1d", "1wk", "2wk", "1mo", "2mo", "3mo", "6mo", "9mo", "1yr", "2yr", "3yr", "4yr", "5yr"]))
+FEN_TENORS = dict(zip(TENORS, ["1d", "1w", "2w", "1m", "2m", "3m", "6m", "9m", "1y", "2y", "3y", "4y", "5y"]))
 
 
-def _f(x: float | None) -> str:
-    return "" if x is None else f"{x:.4f}"
+def _n(x: float | None) -> str:
+    """A number as VBA's implicit conversion writes it (15 significant digits)."""
+    if x is None:
+        return ""
+    s = f"{x:.15g}"
+    return "0" if s == "-0" else s
 
 
-def fenics_rows(pair: str, resolved: dict) -> list[list[str]]:
+def _lines(lines: list[str]) -> str:
+    return "".join(l + "\r\n" for l in lines)
+
+
+def frontarena_lines(pair: str, resolved: dict, spreads: dict[str, float]) -> list[str]:
     c1, c2 = split_pair(pair)
-    rows = []
+    out = []
     for t in TENORS:
-        q = resolved[t]["quoted"]
-        if q["atm"] is None:
-            continue
-        rows.append([c1, c2, t, "ATM", "", _f(q["atm_bid"]), _f(q["atm_offer"])])
-        for mark, key in WING_MARKS:
-            rows.append([c1, c2, t, mark, _f(q[key]), "", ""])
-    return rows
+        atm = resolved[t]["mid"]["atm"]
+        half = spreads[t] / 2
+        out.append(f"vol,{c1},{c2},{FA_TENORS[t]},{_n(None if atm is None else atm - half)},"
+                   f"{_n(None if atm is None else atm + half)}")
+    for prefix, d in (("vol25", "25"), ("vol10", "10")):
+        for name, mark in (("strangle", f"bf{d}"), ("riskreversal", f"rr{d}")):
+            out += [f"{prefix},{c1},{c2},{name},{FA_TENORS[t]},{_n(resolved[t]['mid'][mark])}" for t in TENORS]
+    return out
 
 
-def frontarena_rows(pair: str, resolved: dict) -> list[list[str]]:
+def fenics_lines(pair: str, resolved: dict) -> list[str]:
     c1, c2 = split_pair(pair)
-    rows = []
-    for t in TENORS:
-        m = resolved[t]["mid"]
-        if m["atm"] is None:
-            continue
-        rows.append([c1, c2, t, "ATM", _f(m["atm"])])
-        for mark, key in WING_MARKS:
-            rows.append([c1, c2, t, mark, _f(m[key])])
-    return rows
+    out = [f"vol,atm,{c1},{c2},{FEN_TENORS[t]},{_n(resolved[t]['quoted']['atm_bid'])},"
+           f"{_n(resolved[t]['quoted']['atm_offer'])}" for t in TENORS]
+    for code, mark in (("s25", "bf25"), ("rr25", "rr25"), ("s10", "bf10"), ("rr10", "rr10")):
+        out += [f"vol,{code},{c1},{c2},{FEN_TENORS[t]},{_n(resolved[t]['quoted'][mark])},"
+                f"{_n(resolved[t]['quoted'][mark])}" for t in TENORS]
+    return out
 
 
-def _csv(header: list[str], rows: list[list[str]]) -> str:
-    return "\r\n".join(",".join(r) for r in [header] + rows) + "\r\n"
+def dc_spread_lines(spreads: dict[str, float], dc_factor: float) -> list[str]:
+    return [f"{FEN_TENORS[t]},{_n(spreads[t] * 0.5 * dc_factor)}" for t in TENORS]
 
 
-def write_exports(pair: str, resolved: dict, fenics_dir: Path, frontarena_dir: Path) -> None:
-    atomic_write(Path(fenics_dir) / f"{pair}.csv", _csv(FENICS_HEADER, fenics_rows(pair, resolved)))
-    atomic_write(Path(frontarena_dir) / f"{pair}.csv",
-                 _csv(FRONTARENA_HEADER, frontarena_rows(pair, resolved)))
+def write_exports(rec: dict, resolved: dict, dirs: dict[str, Path], history: bool = True,
+                  now: datetime | None = None) -> None:
+    """dirs: fenics, frontarena, dc_spread, history."""
+    pair = rec["pair"]
+    c1, c2 = split_pair(pair)
+    spreads = {t: rec["tenors"][t]["spread"] for t in TENORS}
+    fen = _lines(fenics_lines(pair, resolved))
+    atomic_write(Path(dirs["frontarena"]) / f"{c1}{c2}volsurface.txt", _lines(frontarena_lines(pair, resolved, spreads)))
+    atomic_write(Path(dirs["fenics"]) / f"{c1}{c2}volsurface.txt", fen)
+    dc = rec.get("dc_factor") or 0
+    if dc >= 0.01:
+        atomic_write(Path(dirs["dc_spread"]) / f"{c1}{c2}spreads.txt", _lines(dc_spread_lines(spreads, dc)))
+    if history:
+        stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+        atomic_write(Path(dirs["history"]) / f"{c1}{c2}_{stamp}.csv", fen)

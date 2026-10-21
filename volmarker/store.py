@@ -7,7 +7,9 @@ Layout under the data root:
                                  every running app tails this to see changes
     locks/<name>.lock            short-lived exclusive locks
     calendar/holidays.csv        ccy,date
-    calendar/events.csv          ccy,date,description
+    calendar/events.csv          ccy,date,description  (manual events, e.g. elections)
+    calendar/bloomberg/<CCY>.json  last Bloomberg ECO import per currency
+    calendar/event_defaults.csv  ccy,event,weight,ticker  (relevant events + default weights)
     config.json                  export directories etc.
 
 Writers take the pair's lock, check that the latest version is the one the
@@ -18,6 +20,8 @@ doubles as the audit trail.
 from __future__ import annotations
 
 import csv
+import hashlib
+import io
 import json
 import os
 import socket
@@ -44,6 +48,8 @@ class LockTimeout(Exception):
 DEFAULT_CONFIG = {
     "fenics_dir": "exports/fenics",
     "frontarena_dir": "exports/frontarena",
+    "dc_spread_dir": "exports/dc_spread",      # the macro's DC_SPRD folder
+    "history_dir": "exports/history",          # the macro's History folder
     "stale_minutes_key": 120,
     "stale_minutes_other": 1440,
     # Fenics Market Data FIX feed (password: FMD_PASSWORD env var or a local password_file)
@@ -74,6 +80,19 @@ DEFAULT_CONFIG = {
             "ca_file": None,
         },
     },
+    # event weights: Fenics XML poster and the Front Arena event files (as the Excel weight workbook)
+    "weights_export": {
+        "fenics_url": "",          # the pricing server (as in the Excel macro's login form); /xmlposter is appended
+        "fenics_dir": "exports/weights/fenics",                   # copy of the last message (no password)
+        "fa_fx_dir": "exports/weights/FA_FX",
+        "fa_ws_dir": "exports/weights/FA_WS",
+        # the macro wrote the PC's regional date format: yyyy-mm-dd on the desk PCs in Oct 2026, dd.mm.yyyy before
+        "date_format": "%Y-%m-%d",
+    },
+    # option expiry cuts: an event released after the cut weighs on the next expiry
+    "cuts": {"NYC": {"tz": "America/New_York", "time": "10:00"},
+             "TOK": {"tz": "Asia/Tokyo", "time": "15:00"}},
+    "calendar_tz": "Europe/Zurich",     # time zone of the Bloomberg terminal that exports the calendar
     "fmd_brand": "auto",
     "fmd_daily_basis": "calendar",   # FXO convention: "ND" = today + N calendar days, rolled to a good day
     "market_stale_minutes": 30,
@@ -211,6 +230,25 @@ class Store:
 
     # ---- calendar -----------------------------------------------------
     def load_calendar(self) -> tuple[dict[str, set], list[dict]]:
+        """Holidays per currency, and all calendar events: the manual ones
+        (events.csv) and every event of the Bloomberg imports. Only events on
+        the list of relevant events get a weight (calendar.rule_weight)."""
+        d = self.root / "calendar"
+        files = [d / "holidays.csv", d / "events.csv"] + sorted((d / "bloomberg").glob("*.json"))
+        key = []
+        for f in files:
+            try:
+                key.append((f.name, f.stat().st_mtime))
+            except OSError:
+                pass
+        cached = getattr(self, "_cal_cache", None)
+        if cached and cached[0] == key:
+            return {c: set(v) for c, v in cached[1].items()}, list(cached[2])
+        holidays, events = self._read_calendar()
+        self._cal_cache = (key, holidays, events)
+        return {c: set(v) for c, v in holidays.items()}, list(events)
+
+    def _read_calendar(self) -> tuple[dict[str, set], list[dict]]:
         holidays: dict[str, set] = {}
         events: list[dict] = []
         hp = self.root / "calendar" / "holidays.csv"
@@ -224,8 +262,92 @@ class Store:
             with open(ep, newline="", encoding="utf-8") as f:
                 for row in csv.DictReader(f):
                     events.append({"ccy": row["ccy"].upper(), "date": row["date"],
-                                   "desc": row["description"]})
+                                   "desc": row["description"], "source": "manual"})
+        for p in sorted((self.root / "calendar" / "bloomberg").glob("*.json")):
+            try:
+                imp = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            for e in imp.get("events", []):
+                events.append(dict(e, desc=e["name"], source="bloomberg"))
         return holidays, events
+
+    def bloomberg_imports(self) -> dict[str, dict]:
+        """Per currency: when the last Bloomberg import was made, by whom, from which file."""
+        out = {}
+        for p in sorted((self.root / "calendar" / "bloomberg").glob("*.json")):
+            try:
+                imp = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            out[p.stem] = {k: imp.get(k) for k in ("ts", "user", "file", "downloaded", "source_tz")}
+            out[p.stem]["events"] = len(imp.get("events", []))
+        return out
+
+    def save_bloomberg(self, ccy: str, payload: dict) -> None:
+        atomic_write(self.root / "calendar" / "bloomberg" / f"{ccy}.json",
+                     json.dumps(payload, separators=(",", ":")))
+
+
+    # ---- desk default weights for recurring events -----------------
+    def _defaults_path(self) -> Path:
+        return self.root / "calendar" / "event_defaults.csv"
+
+    def load_event_defaults(self) -> dict:
+        """{"rows": [{ccy, event, weight}], "version": content hash, "user", "ts"}"""
+        try:
+            text = self._defaults_path().read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        rows = []
+        for r in csv.DictReader(io.StringIO(text)):
+            try:
+                rows.append({"ccy": (r.get("ccy") or "").strip().upper(),
+                             "event": (r.get("event") or "").strip(), "weight": float(r["weight"]),
+                             "ticker": (r.get("ticker") or "").strip()})
+            except (KeyError, TypeError, ValueError):
+                continue
+        meta = {}
+        log = self.root / "calendar" / "event_defaults.log.jsonl"
+        if log.exists():
+            line = _last_line(log)
+            meta = json.loads(line) if line else {}
+        return {"rows": rows, "version": hashlib.sha1(text.encode()).hexdigest()[:12],
+                "user": meta.get("user"), "ts": meta.get("ts")}
+
+    def save_event_defaults(self, rows: list[dict], expected_version: str | None,
+                            user: str, ts: str) -> dict:
+        clean = []
+        for r in rows:
+            event = " ".join(str(r.get("event") or "").split())
+            ticker = " ".join(str(r.get("ticker") or "").split())
+            if not event and not ticker:
+                continue
+            ccy = str(r.get("ccy") or "").strip().upper()
+            if ccy not in ("", "*") and (len(ccy) != 3 or not ccy.isalpha()):
+                raise ValueError(f"Bad currency {ccy!r} for {event}")
+            w = float(r.get("weight"))
+            if not -1 < w <= 10:
+                raise ValueError(f"Weight for {event} must be between -1 and 10")
+            clean.append({"ccy": ccy, "event": event, "weight": w, "ticker": ticker})
+        with self.lock("event-defaults", user):
+            cur = self.load_event_defaults()
+            if expected_version is not None and expected_version != cur["version"]:
+                raise DefaultsConflict(cur)
+            buf = io.StringIO()
+            wr = csv.DictWriter(buf, ["ccy", "event", "weight", "ticker"], lineterminator="\n")
+            wr.writeheader()
+            wr.writerows(clean)
+            atomic_write(self._defaults_path(), buf.getvalue())
+            _append_line(self.root / "calendar" / "event_defaults.log.jsonl",
+                         json.dumps({"ts": ts, "user": user, "rows": clean}, separators=(",", ":")))
+        return self.load_event_defaults()
+
+
+class DefaultsConflict(Exception):
+    def __init__(self, latest: dict):
+        super().__init__(f"The desk defaults were changed by {latest.get('user')} at {latest.get('ts')}")
+        self.latest = latest
 
 
 def _merge(base: dict, over: dict) -> None:

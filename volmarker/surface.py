@@ -20,7 +20,10 @@ Pair-level flags lock_rr10f / lock_bf10f (default True) decide which of the
     locked:    10D = 25D * factor          (factor typed, 10D follows the 25D)
     unlocked:  factor = 10D / 25D          (10D quote typed, factor calibrated)
 
-Other pair-level settings: follow_market (the feed process publishes FMD
+Other pair-level settings: group (sidebar group, e.g. "Scandies"), spread_ref
+(default reference pair in the Spread tab), spread_off (no Spread tab), cut (option expiry
+cut, e.g. NYC or TOK: decides which expiry an event weighs on), dc_factor
+(Front Arena DC spread file = ATM spread x 0.5 x factor; none below 0.01), follow_market (the feed process publishes FMD
 mids into FOLLOW_FIELDS), alert_tol (per-mark alert tolerance overrides) and
 alerts_off.
 
@@ -32,7 +35,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 
-from .conventions import TENOR_DAYS, TENORS, split_pair
+from .conventions import TENOR_DAYS, TENORS, normalise_pair, split_pair
 from .derived import cross_vol, implied_corr, orientation
 
 TENOR_FIELDS = ["atm", "spread", "rr25", "rr10f", "rr10", "bf25", "bf10f", "bf10",
@@ -88,6 +91,17 @@ def clean_state(state: dict) -> dict:
     if s["follow_market"] and s["mode"] != "marked":
         raise ValueError("Only a marked pair can follow the market (set Mode to Marked)")
     s["alerts_off"] = bool(s.get("alerts_off"))
+    s["group"] = " ".join(str(s.get("group") or "").split())[:40] or None
+    s["spread_off"] = bool(s.get("spread_off"))
+    s["cut"] = str(s.get("cut") or "NYC").strip().upper()[:8]
+    dc = s.get("dc_factor")
+    s["dc_factor"] = None if dc in (None, "") else float(dc)
+    if s["dc_factor"] is not None and not 0 <= s["dc_factor"] <= 10:
+        raise ValueError("DC spread factor must be between 0 and 10")
+    ref = s.get("spread_ref")
+    s["spread_ref"] = normalise_pair(ref) if ref else None
+    if s["spread_ref"] == normalise_pair(s["pair"]):
+        raise ValueError("The spread reference must be another pair")
     tol = {}
     for m, v in (s.get("alert_tol") or {}).items():
         if m not in ALERT_MARKS:
