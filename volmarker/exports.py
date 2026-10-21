@@ -77,11 +77,38 @@ def write_exports(rec: dict, resolved: dict, dirs: dict[str, Path], history: boo
     c1, c2 = split_pair(pair)
     spreads = {t: rec["tenors"][t]["spread"] for t in TENORS}
     fen = _lines(fenics_lines(pair, resolved))
-    atomic_write(Path(dirs["frontarena"]) / f"{c1}{c2}volsurface.txt", _lines(frontarena_lines(pair, resolved, spreads)))
-    atomic_write(Path(dirs["fenics"]) / f"{c1}{c2}volsurface.txt", fen)
+    # no flush to disk: the rename keeps readers safe, and the next publish rewrites them anyway
+    atomic_write(Path(dirs["frontarena"]) / f"{c1}{c2}volsurface.txt", _lines(frontarena_lines(pair, resolved, spreads)), fsync=False)
+    atomic_write(Path(dirs["fenics"]) / f"{c1}{c2}volsurface.txt", fen, fsync=False)
     dc = rec.get("dc_factor") or 0
     if dc >= 0.01:
-        atomic_write(Path(dirs["dc_spread"]) / f"{c1}{c2}spreads.txt", _lines(dc_spread_lines(spreads, dc)))
+        atomic_write(Path(dirs["dc_spread"]) / f"{c1}{c2}spreads.txt", _lines(dc_spread_lines(spreads, dc)), fsync=False)
     if history:
         stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
-        atomic_write(Path(dirs["history"]) / f"{c1}{c2}_{stamp}.csv", fen)
+        atomic_write(Path(dirs["history"]) / f"{c1}{c2}_{stamp}.csv", fen, fsync=False)
+
+
+def read_frontarena(text: str, pair: str) -> dict[str, dict]:
+    """Parse a Front Arena volsurface file (as the Excel macro writes it) back
+    into marks per tenor: atm (mid), spread (ask - bid), rr25, rr10, bf25, bf10.
+    Raises ValueError if the file is incomplete, e.g. while Excel is writing it."""
+    c1, c2 = split_pair(pair)
+    tenor = {v: k for k, v in FA_TENORS.items()}
+    num = lambda x: None if x.strip() == "" else float(x)
+    out: dict[str, dict] = {t: {} for t in TENORS}
+    for line in text.splitlines():
+        f = [x.strip() for x in line.split(",")]
+        if len(f) < 5 or f[1:3] != [c1, c2]:
+            continue
+        if f[0] == "vol" and len(f) >= 6 and f[3] in tenor:
+            bid, ask = num(f[4]), num(f[5])
+            if bid is not None and ask is not None:
+                out[tenor[f[3]]].update(atm=round((bid + ask) / 2, 10), spread=round(ask - bid, 10))
+        elif f[0] in ("vol25", "vol10") and len(f) >= 6 and f[4] in tenor:
+            mark = {"strangle": "bf", "riskreversal": "rr"}.get(f[3])
+            if mark and num(f[5]) is not None:
+                out[tenor[f[4]]][f"{mark}{f[0][3:]}"] = num(f[5])
+    missing = [t for t in TENORS if set(out[t]) != {"atm", "spread", "rr25", "rr10", "bf25", "bf10"}]
+    if missing:
+        raise ValueError(f"incomplete file: {', '.join(missing)} missing")
+    return out

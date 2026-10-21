@@ -158,3 +158,94 @@ class TestVolExports(unittest.TestCase):
             s["dc_factor"] = 0.005
             write_exports(s, resolve(s), {**dirs, "dc_spread": Path(tmp) / "dc2"}, history=False)
             self.assertFalse((Path(tmp) / "dc2").exists())
+
+
+class TestExcelPairs(unittest.TestCase):
+    def setUp(self):
+        import os
+        from pathlib import Path
+        from volmarker.service import Service
+        from volmarker.store import Store
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(self.tmp.name)
+        self.svc = Service(self.store, "anna")
+        self.svc._leader = True
+        self.fa = Path(self.tmp.name) / "exports" / "frontarena"
+        self.os = os
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _excel_file(self, atm, mtime):
+        from volmarker.exports import frontarena_lines
+        from volmarker.surface import clean_state, new_state, resolve
+        s = new_state("USDCHF")
+        for t in s["tenors"]:
+            s["tenors"][t].update(atm=atm, spread=0.6, rr25=-0.45, bf25=0.2)
+        s = clean_state(s)
+        s["tenors"]["1M"]["rr10"] = -0.95                   # a 10D quote that isn't 25D x factor
+        p = self.fa / "USDCHFvolsurface.txt"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("\r\n".join(frontarena_lines("USDCHF", resolve(s), {t: 0.6 for t in s["tenors"]})) + "\r\n")
+        self.os.utime(p, (mtime, mtime))
+        return p
+
+    def test_import_and_no_overwrite(self):
+        import time as _t
+        self.svc.create_pair("USDCHF", "marked", None, True)           # VolMarker writes the file once
+        own = (self.fa / "USDCHFvolsurface.txt").stat().st_mtime
+        st = self.store.latest("USDCHF")
+        st["excel"] = True
+        for t in st["tenors"]:
+            st["tenors"][t]["atm"] = 7.0
+        self.svc.publish("USDCHF", st, st["version"])
+        self.assertEqual((self.fa / "USDCHFvolsurface.txt").stat().st_mtime, own)   # not written again
+        v0 = self.store.latest("USDCHF")["version"]
+        self.svc.poll_excel(now=_t.time() + 5)
+        self.assertEqual(self.store.latest("USDCHF")["version"], v0)    # its own old file is not an Excel export
+        base = _t.time() + 100
+        p = self._excel_file(7.8, base)
+        self.svc.poll_excel(now=base + 1)
+        self.assertEqual(self.store.latest("USDCHF")["version"], v0)    # maybe still being written: wait 2 s
+        self.svc.poll_excel(now=base + 5)
+        rec = self.store.latest("USDCHF")
+        self.assertEqual((rec["source"], rec["user"]), ("excel", "Excel"))
+        self.assertAlmostEqual(rec["tenors"]["1M"]["atm"], 7.8)
+        self.assertAlmostEqual(rec["tenors"]["1M"]["spread"], 0.6)
+        self.assertAlmostEqual(rec["tenors"]["1M"]["rr10"], -0.95)
+        self.assertAlmostEqual(rec["tenors"]["1M"]["rr10f"], -0.95 / -0.45)
+        self.assertEqual(rec["marked_ts"][:16], datetime.fromtimestamp(base, timezone.utc).isoformat()[:16])
+        v = rec["version"]
+        self.svc.poll_excel(now=base + 10)
+        self.assertEqual(self.store.latest("USDCHF")["version"], v)            # same file: read once
+        # a trader edits the weights while Excel exports again: no conflict, Excel's marks win
+        draft = self.svc.get("USDCHF")
+        draft["weights"] = {"weekdays": [1, 1, 1, 1, 1, 0, 0], "holiday1": 0.5, "holiday2": 0.5, "events": []}
+        self._excel_file(7.9, base + 60)
+        self.svc.poll_excel(now=base + 65)
+        rec = self.svc.publish("USDCHF", draft, v)
+        self.assertAlmostEqual(rec["tenors"]["1M"]["atm"], 7.9)
+        self.assertEqual(rec["weights"]["holiday1"], 0.5)
+        self.assertEqual(rec["excel_mtime"], base + 60)                        # kept, so it isn't read again
+        self.assertEqual(p.stat().st_mtime, base + 60)                         # and the file is untouched
+        # a half-written file is skipped and reported
+        p.write_text("vol,USD,CHF,1d,7,8\r\n"); self.os.utime(p, (base + 120, base + 120))
+        self.svc.poll_excel(now=base + 125)
+        self.assertIn("incomplete", self.svc.excel_errors["USDCHF"])
+        self.assertEqual(self.store.latest("USDCHF")["version"], rec["version"])
+
+    def test_foreign_write_alert(self):
+        from volmarker.surface import clean_state, new_state
+        import time as _t
+        self.svc.create_pair("USDCHF", "marked", None, True)
+        st = clean_state(dict(new_state("USDCHF")))
+        for t in st["tenors"]:
+            st["tenors"][t]["atm"] = 7.0
+        self.svc.publish("USDCHF", st, 1)
+        self.svc.poll_excel()
+        self.assertEqual(self.svc.excel_foreign, {})                           # our own export
+        self._excel_file(7.8, _t.time() + 120)                                 # Excel writes it later
+        self.svc.poll_excel()
+        self.assertIn("USDCHF", self.svc.excel_foreign)
+        self.svc.evaluate_alerts()
+        self.assertTrue(any(k[2] == "excel" for k in self.svc.alerts.active))

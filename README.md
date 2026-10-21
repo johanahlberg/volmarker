@@ -3,7 +3,7 @@
 A shared vol-marking cockpit for the FX options desk. It replaces the Excel marking sheets.
 
 - Each pair is either **marked** (ATM, 25D RR/BF and 10D factors per tenor) or **derived** from two base pairs through the correlation triangle.
-- Derived pairs update automatically whenever a base pair is published. No export button.
+- Derived pairs update automatically whenever a base pair is published. No export button. A publish returns as soon as the pair itself is saved; the pairs computed from it follow a moment later in the background, in dependency order (EURCHF after USDCHF). FMD-driven moves only republish them when an ATM moves at least `propagation.min_change` (0.005), at most every `propagation.min_interval_s` (5 s); manual publishes always go through. If an app is closed with work still queued, the housekeeping app catches up.
 - A **skew layer** is applied to the Fenics file only. Front Arena always gets the pure mids.
 - Every change is stored with its time and user. Concurrent edits are detected, never silently overwritten.
 - Uses only the Python standard library: no server, no database, nothing to install.
@@ -43,8 +43,9 @@ Tests: `python -m unittest discover -s tests -t .`
 | History | Every version with its user and comment. **Restore** copies an old version into the draft. |
 | Groups | Each pair has a **Group** (Setup tab, e.g. "Scandies", "GBP", "Metals"); the sidebar lists pairs by group. The group is a pair setting, the same for the whole desk. Pairs without one are under *Ungrouped*. |
 | Your sidebar | Drag groups, or pairs within a group, into your own order. Click a group header to fold it (a folded group still shows its stale and ⚠ counts). This layout is personal and saved in `users/<your user>.json`, so it follows you to any PC. **Reset** in the sidebar footer goes back to A–Z. |
-| Spread | This pair minus a reference pair (e.g. USDCHF − EURUSD) for ATM, 25D/10D RR and BF per tenor. Draft mids are compared against the reference's published mids, with the FMD spread next to it (red when further apart than the alert tolerance). Type a spread to set the pair to reference + spread in the draft, then publish as usual. The charts show the spread by tenor and its published history (1 day to 1 month). The default reference is a pair setting (**Spread reference** in Setup, or **Make … the default** in the Spread tab, then publish); without one it is a key or marked pair from the same group. The chips switch to any related pair (e.g. EURCHF against USDCHF instead of EURUSD) without changing the default. Pairs that don't need it (e.g. EURUSD) can be set to **None**, via **No spread for this pair** or Setup, and then don't show the tab. |
-| Sidebar | `K` = key pair, `D` = derived, `FMD` = follows the market (green ok, amber a move is held, red not updating), `skew` = skew active, `stale` = not marked within the limit (2h for key pairs, 24h for others; set in `config.json`), `!n` = number of failed checks, `⚠n` = market alerts (grey once acknowledged). |
+| Spread parent | Setup → **Spread parent** (e.g. EURUSD for USDCHF) adds a column next to ATM: this pair's ATM minus the parent's published ATM. Type either: a new ATM updates the spread, a spread sets ATM = parent + spread. When the parent is published the spreads update and your marks stay. No parent, no column. Tick **Move with parent** to keep the spreads instead: every publish of the parent then moves this pair's ATMs (an automatic version, like a derived cross), typing an ATM recalibrates that tenor's spread, and the ATMs show in blue. `P` in the sidebar. |
+| Marked in Excel | For pairs still marked in the Excel workbook: tick **Marked in Excel** in Setup and publish. From then on one running app reads the pair's Front Arena export file (`excel_dir`, by default `frontarena_dir`) whenever Excel writes a newer one, and publishes it as a new version (ATM and spread from bid/ask, RR, BF, 10D). Derived crosses, spread columns, staleness and alerts all follow. VolMarker never writes that pair's files; its marks are read-only here. If a pair that is *not* marked in Excel gets its file changed by someone else, every app raises an alert (Excel and VolMarker would overwrite each other). |
+| Sidebar | `K` = key pair, `D` = derived, `XL` = marked in Excel (red: last file unreadable; `XL?` = its file was changed outside VolMarker), `FMD` = follows the market (green ok, amber a move is held, red not updating), `skew` = skew active, `stale` = not marked within the limit (2h for key pairs, 24h for others; set in `config.json`), `!n` = number of failed checks, `⚠n` = market alerts (grey once acknowledged). |
 
 ## Market data (Fenics Market Data)
 
@@ -133,10 +134,10 @@ Every publish writes the vol files in the layout of the Excel marking workbook (
 
 | File | `config.json` | Macro folder | Content |
 |---|---|---|---|
-| `<CCY1><CCY2>volsurface.txt` | `frontarena_dir` | the export folder | `vol,EUR,USD,1mo,<ATM bid>,<ATM ask>`, then `vol25`/`vol10` `strangle`/`riskreversal` mids. Pure mids, never skewed. Tenors `1d 1wk 2wk 1mo … 1yr … 5yr`. |
+| `<CCY1><CCY2>volsurface.txt` | `frontarena_dir` | the export folder (also where pairs marked in Excel are read from, unless `excel_dir` is set) | `vol,EUR,USD,1mo,<ATM bid>,<ATM ask>`, then `vol25`/`vol10` `strangle`/`riskreversal` mids. Pure mids, never skewed. Tenors `1d 1wk 2wk 1mo … 1yr … 5yr`. |
 | `<CCY1><CCY2>volsurface.txt` | `fenics_dir` | `…\FENICSVOLS\` | `vol,atm\|s25\|rr25\|s10\|rr10,EUR,USD,1m,<bid>,<ask>`, quoted surface (skew included). RR and BF go out with bid = ask = mid, since Fenics only uses the mid. Tenors `1d 1w 2w 1m … 1y … 5y`. |
 | `<CCY1><CCY2>spreads.txt` | `dc_spread_dir` | `…\DC_SPRD\` | `1m,<ATM spread × 0.5 × DC factor>`, only for pairs with a **DC spread factor** of at least 0.01 (Setup). |
-| `<CCY1><CCY2>_yyyymmdd_hhmmss.csv` | `history_dir` | `…\History\` | A copy of the Fenics file, as the macro made. Not for the Follow FMD feed's publishes (every 15 s); the pair's history keeps every version anyway. |
+| `<CCY1><CCY2>_yyyymmdd_hhmmss.csv` | `history_dir` | `…\History\` | A copy of the Fenics file for every manual publish, as the macro made. Not for automatic versions (FMD feed, derived and parent follow-ups); the pair's history keeps every version anyway. |
 
 Numbers are written like VBA (up to 15 significant digits), and lines end in CRLF. Files are written under a temporary name and then renamed, so the readers never see a half-written file.
 

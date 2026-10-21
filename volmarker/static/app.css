@@ -162,9 +162,6 @@ table.grid { border-collapse: collapse; width: 100%; font-variant-numeric: tabul
 .below { display: grid; grid-template-columns: minmax(0, 2fr) minmax(220px, 1fr); gap: 12px; margin-top: 12px; }
 .below.even { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .mono { font-family: var(--mono); }
-.grid td.fmd.off { color: var(--critical); font-weight: 600; }
-.grid td.fmd.stale { font-style: italic; opacity: .6; }
-#sp-grid input.cell { min-width: 56px; }
 @media (max-width: 900px) { .below, .below.even { grid-template-columns: 1fr; } .sidebar { width: 190px; } }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
 .cardhead { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
@@ -252,11 +249,6 @@ p.small { font-size: 12px; margin: 6px 0 0; }
 .followbar.down { border-left-color: var(--critical); }
 .followbar.held { border-left-color: var(--warning); }
 
-/* spread reference chips */
-.chips { display: inline-flex; gap: 4px; flex-wrap: wrap; }
-.chip { padding: 2px 8px; border-radius: 12px; font-family: var(--mono); font-size: 12px; background: transparent; }
-.chip.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
-
 /* weights tab */
 .wgrid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 12px; }
 .wgrid .card { margin-bottom: 12px; }
@@ -292,3 +284,6 @@ label.btnlike:hover { border-color: var(--accent); }
 #events input.ev.ovr { background: var(--dirty); color: var(--dirty-ink); padding: 2px 4px; }
 #events input.ev.bad { outline: 2px solid var(--critical); }
 #events input.evdate { width: 10.5ch; min-width: 10.5ch; }
+.tag.xl { color: var(--s2); }
+.tag.xl.bad { color: var(--critical); font-weight: 700; }
+.setup .su-indent { margin-left: 18px; }

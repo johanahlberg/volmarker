@@ -25,6 +25,7 @@ import io
 import json
 import os
 import socket
+import threading
 import time
 from contextlib import contextmanager
 from datetime import date
@@ -50,6 +51,7 @@ DEFAULT_CONFIG = {
     "frontarena_dir": "exports/frontarena",
     "dc_spread_dir": "exports/dc_spread",      # the macro's DC_SPRD folder
     "history_dir": "exports/history",          # the macro's History folder
+    "excel_dir": "",                           # where Excel writes the files of pairs marked in Excel (empty: frontarena_dir)
     "stale_minutes_key": 120,
     "stale_minutes_other": 1440,
     # Fenics Market Data FIX feed (password: FMD_PASSWORD env var or a local password_file)
@@ -89,6 +91,9 @@ DEFAULT_CONFIG = {
         # the macro wrote the PC's regional date format: yyyy-mm-dd on the desk PCs in Oct 2026, dd.mm.yyyy before
         "date_format": "%Y-%m-%d",
     },
+    # derived pairs and pairs moving with their parent, after an FMD-driven (or catch-up) move:
+    # republish only when an ATM moves at least min_change, at most every min_interval_s
+    "propagation": {"min_change": 0.005, "min_interval_s": 5},
     # option expiry cuts: an event released after the cut weighs on the next expiry
     "cuts": {"NYC": {"tz": "America/New_York", "time": "10:00"},
              "TOK": {"tz": "Asia/Tokyo", "time": "15:00"}},
@@ -401,15 +406,18 @@ def _tail_lines(path: Path, n: int) -> list[str]:
     return [l.decode("utf-8") for l in reversed(lines[-n:])]
 
 
-def atomic_write(path: Path, text: str) -> None:
+def atomic_write(path: Path, text: str, fsync: bool = True) -> None:
     """Write via a temp file + rename so readers (e.g. Fenics) never see a
-    half-written file. Retries briefly on Windows sharing violations."""
+    half-written file. Retries briefly on Windows sharing violations.
+    fsync=False skips the flush to disk (export files: the rename alone keeps
+    readers safe, and they are rewritten on the next publish anyway)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     with open(tmp, "w", encoding="utf-8", newline="") as f:
         f.write(text)
         f.flush()
-        os.fsync(f.fileno())
+        if fsync:
+            os.fsync(f.fileno())
     for attempt in range(50):
         try:
             os.replace(tmp, path)

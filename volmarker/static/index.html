@@ -45,7 +45,6 @@
       <nav class="tabs">
         <button data-tab="surface" class="active">Surface</button>
         <button data-tab="s3d">3D</button>
-        <button data-tab="spread">Spread</button>
         <button data-tab="weights">Event weights</button>
         <button data-tab="setup">Setup</button>
         <button data-tab="history">History</button>
@@ -99,37 +98,6 @@
           <div id="surf3d" class="surf3d"></div>
           <div id="s3-scale" class="scale"></div>
           <p class="muted small">Pillar vols approximated as ATM + BF ± RR/2 from broker-strangle BFs (display only; Fenics applies the exact conventions).</p>
-        </div>
-      </div>
-
-      <div data-panel="spread" hidden>
-        <div class="toolbar">
-          <b id="sp-pair" class="mono"></b><span class="lbl">minus</span>
-          <span id="sp-chips" class="chips"></span>
-          <select id="sp-ref" title="Any other pair"></select>
-          <button id="sp-default" class="ghost" hidden></button>
-          <button id="sp-hide" class="ghost" title="Don't show the Spread tab for this pair (for the whole desk; can be switched back in Setup)">No spread for this pair</button>
-          <span id="sp-note" class="muted"></span>
-          <div class="spacer"></div>
-          <span class="lbl">Charts</span>
-          <select id="sp-mark"><option value="atm">ATM</option><option value="rr25">25D RR</option><option value="rr10">10D RR</option><option value="bf25">25D BF</option><option value="bf10">10D BF</option></select>
-        </div>
-        <div class="gridwrap"><table id="sp-grid" class="grid"></table></div>
-        <p class="muted small">Spread = this pair's draft mid − the reference's published mid. Type a spread to set this pair to reference + spread in the draft.
-          FMD = the same spread on FMD mids; red when your spread is further from it than the alert tolerance.</p>
-        <div class="below even">
-          <div class="card chartcard">
-            <div class="cardhead"><b id="sp-ts-title">Spread by tenor</b><span id="sp-legend" class="legend"></span></div>
-            <div id="sp-chart" class="chart"></div>
-          </div>
-          <div class="card chartcard">
-            <div class="cardhead"><b id="sp-h-title">Spread history</b><div class="spacer"></div>
-              <select id="sp-tenor"></select>
-              <select id="sp-days"><option value="1">1 day</option><option value="3">3 days</option><option value="5" selected>5 days</option><option value="10">10 days</option><option value="31">1 month</option></select>
-            </div>
-            <div id="sp-hist" class="chart"></div>
-            <p id="sp-h-note" class="muted small"></p>
-          </div>
         </div>
       </div>
 
@@ -232,13 +200,15 @@
           <label class="su-derived">Base 2 <select id="su-b2"></select></label>
           <label title="Front Arena DC spread file: ATM spread × 0.5 × factor per tenor. Empty or below 0.01: no file (as in the Excel workbook)">DC spread factor <input id="su-dc" class="num" inputmode="decimal" placeholder="none"></label>
           <label>Expiry cut <select id="su-cut" title="Events released after the cut weigh on the next expiry"></select></label>
-          <label>Spread reference <select id="su-spref" title="The pair shown by default in the Spread tab"></select></label>
+          <label title="Shows a column next to ATM with this pair's ATM minus the parent's ATM. Type either the ATM or the spread.">Spread parent <select id="su-spref"></select></label>
+          <label class="check su-indent"><input id="su-follow-parent" type="checkbox"><span><b>Move with parent</b>: keep the spread per tenor; every publish of the parent moves this pair's ATMs (typing an ATM recalibrates that tenor's spread)</span></label>
           <label>Group <input id="su-group" list="group-list" placeholder="e.g. Scandies" maxlength="40" autocomplete="off"></label>
           <label class="check"><input id="su-key" type="checkbox"> Key pair (auto-quoted, tighter staleness limit)</label>
           <label>ATM convention (for broker ATM quotes)
             <select id="su-atm"><option value="DNS">DNS (delta-neutral straddle)</option><option value="ATMF">ATMF (at-the-money forward)</option></select>
           </label>
           <label class="check"><input id="su-follow" type="checkbox"><span><b>Follow FMD</b> (market mode): the feed publishes FMD mids for ATM, 25D/10D RR and BF to Fenics and Front Arena automatically</span></label>
+          <label class="check"><input id="su-excel" type="checkbox"><span><b>Marked in Excel</b>: VolMarker reads the marks from the pair's Excel export file (Front Arena volsurface file) whenever Excel writes a newer one, and never writes this pair's files itself</span></label>
           <p class="muted su-follow-note">You keep the spread, skew and event weights. Moves bigger than the jump limit are held for a minute first. If the feed stops, nothing is published and every app raises an alert. Untick to take the surface back.</p>
           <div class="su-tol">
             <div class="lbl">Alert tolerance (vol pts; empty = desk default)</div>

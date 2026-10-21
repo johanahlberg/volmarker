@@ -102,15 +102,6 @@ def make_handler(svc: Service):
                 return self._json(svc.weights_status(m.group(1)))
             if p == "/api/event-defaults":
                 return self._json(svc.event_defaults())
-            m = re.fullmatch(r"/api/pairs/([A-Z]{6})/spread", p)
-            if m:
-                q = parse_qs(url.query)
-                try:
-                    return self._json(svc.spread_history(
-                        m.group(1), q.get("ref", [""])[0], q.get("tenor", ["1M"])[0],
-                        float(q.get("days", ["5"])[0])))
-                except ValueError as e:
-                    return self._json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
             return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
         def do_POST(self):

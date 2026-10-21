@@ -25,17 +25,16 @@ from .conventions import split_pair
 from .fmd.book import daily_n
 from .market import compare, market_view, parse_fix_time
 from .store import LockTimeout, Store, atomic_write
-from .surface import (ALERT_MARKS, FOLLOW_FIELDS, apply_derivation, check_surface, clean_state,
+from .surface import (ALERT_MARKS, FOLLOW_FIELDS, apply_derivation, apply_parent, check_surface, clean_state,
                       new_state, now_iso, resolve, skew_active)
 
 log = logging.getLogger("volmarker")
 
 STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type",
-              "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "group", "spread_ref", "spread_off", "cut", "dc_factor", "tenors"]
+              "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "tenors"]
 LEADER_STALE = 45.0
 FEED_STALE = 15.0
 FOLLOW_STALE = 30.0
-SPREAD_SCAN = 5000      # versions read per pair for the spread history
 MAX_TEST_DATES = 60
 
 
@@ -63,6 +62,13 @@ class Service:
         self._market_mtimes: dict[str, float] = {}
         self.alerts = AlertEngine()
         self._leader = False
+        self.excel_foreign: dict[str, float] = {}     # pair -> mtime of a file changed outside VolMarker
+        self.excel_errors: dict[str, str] = {}
+        self._prop_cv = threading.Condition()
+        self._prop_pending: dict[tuple, str] = {}               # (kind, pair) -> source, coalesced
+        self._prop_deferred: dict[str, tuple[float, str]] = {}  # dependent -> (due, source)
+        self._prop_thread = None
+        self._prop_busy = False
         self.poll_market(notify=False)
 
     # ---- read side ----------------------------------------------------
@@ -89,7 +95,10 @@ class Service:
             alerts = [a for a in active if a["pair"] == r["pair"]]
             out.append({
                 "pair": r["pair"], "mode": r["mode"], "bases": r.get("bases"),
-                "key": r.get("key", False), "group": r.get("group"), "spread_ref": r.get("spread_ref"), "version": r["version"],
+                "key": r.get("key", False), "group": r.get("group"), "spread_ref": r.get("spread_ref"),
+                "follow_parent": bool(r.get("follow_parent")),
+                "excel": bool(r.get("excel")), "excel_foreign": r["pair"] in self.excel_foreign,
+                "excel_error": self.excel_errors.get(r["pair"]), "version": r["version"],
                 "ts": r["ts"], "user": r["user"], "source": r.get("source"),
                 "marked_ts": r["marked_ts"], "age_minutes": round(age_min, 1),
                 "stale": follow == "down" if follow else r["mode"] == "marked" and age_min > limit,
@@ -106,7 +115,8 @@ class Service:
     def dependents(self, pair: str) -> list[str]:
         with self._lock:
             return sorted(p for p, r in self.cache.items()
-                          if r["mode"] == "derived" and pair in (r.get("bases") or []))
+                          if (r["mode"] == "derived" and pair in (r.get("bases") or []))
+                          or (r.get("follow_parent") and r.get("spread_ref") == pair))
 
     def view(self, pair: str) -> dict | None:
         """Everything the UI needs for one pair."""
@@ -550,52 +560,6 @@ class Service:
         return {"state": state, "resolved": resolve(state),
                 "warnings": warnings + check_surface(state)}
 
-    def spread_history(self, pair: str, ref: str, tenor: str, days: float = 5.0,
-                       points: int = 480) -> dict:
-        """Published mid of `pair` minus `ref` per mark at one tenor, sampled on
-        a regular time grid over the last `days` (each pair's value is the
-        version live at that moment)."""
-        if tenor not in TENORS:
-            raise ValueError(f"Unknown tenor {tenor}")
-        for p in (pair, ref):
-            if p not in self.cache:
-                raise ValueError(f"Unknown pair {p}")
-        days = min(max(float(days), 0.05), 31.0)
-        now = datetime.now(timezone.utc)
-        start = now - timedelta(days=days)
-        truncated = False
-
-        def steps(p: str) -> list[tuple[datetime, dict]]:
-            nonlocal truncated
-            out, recs = [], self.store.history(p, SPREAD_SCAN)      # newest first
-            for r in recs:
-                ts = datetime.fromisoformat(r["ts"])
-                out.append((ts, resolve(r)[tenor]["mid"]))
-                if ts <= start:
-                    break
-            else:
-                truncated |= len(recs) == SPREAD_SCAN
-            return out[::-1]
-
-        a, b = steps(pair), steps(ref)
-        step = (now - start) / (points - 1)
-        out, ia, ib = [], -1, -1
-        for k in range(points):
-            t = start + step * k
-            while ia + 1 < len(a) and a[ia + 1][0] <= t:
-                ia += 1
-            while ib + 1 < len(b) and b[ib + 1][0] <= t:
-                ib += 1
-            if ia < 0 or ib < 0:
-                continue
-            va, vb = a[ia][1], b[ib][1]
-            out.append([t.isoformat(timespec="seconds"),
-                        {m: None if va[m] is None or vb[m] is None else round(va[m] - vb[m], 4)
-                         for m in ALERT_MARKS}])
-        return {"pair": pair, "ref": ref, "tenor": tenor, "from": start.isoformat(timespec="seconds"),
-                "to": now.isoformat(timespec="seconds"), "points": out, "truncated": truncated,
-                "versions": sum(ts > start for ts, _ in a) + sum(ts > start for ts, _ in b)}
-
     # ---- per-user preferences (sidebar layout, spread references) -----
     def _prefs_path(self) -> Path:
         name = re.sub(r"[^A-Za-z0-9._-]", "_", self.user).strip(".") or "user"
@@ -648,7 +612,7 @@ class Service:
             state, warnings = self._derive(state)
             rec = self._append(state, warnings, expected_version, comment, source,
                                marked=source == "manual")
-        self._propagate(pair, set())
+        self._schedule(pair, source)
         return rec
 
     def _rebase_over_market(self, state: dict, expected: int) -> tuple[dict, int]:
@@ -660,11 +624,11 @@ class Service:
         if latest is None or latest["version"] <= expected:
             return state, expected
         newer = self.store.history(state["pair"], latest["version"] - expected)
-        if any(r.get("source") not in ("market", "propagation") for r in newer):
+        if any(r.get("source") not in ("market", "propagation", "excel") for r in newer):
             return state, expected                    # a real conflict - reported by append
-        if state.get("follow_market"):
+        if state.get("follow_market") or state.get("excel"):
             for t in TENORS:
-                for f in FOLLOW_FIELDS:
+                for f in FOLLOW_FIELDS + (["spread"] if state.get("excel") else []):
                     state["tenors"][t][f] = latest["tenors"][t][f]
         return state, latest["version"]
 
@@ -713,6 +677,12 @@ class Service:
                         "dev": round(dev, 4), "tol": round(tol, 4), "source": rec.get("source"),
                         "msg": f"{pair} {t} {m.upper()}: ours {v:.2f}, FMD {q.get('mid'):.2f} "
                                f"({dev:+.2f}, tol {tol:.2f})"}
+        for pair, mt in self.excel_foreign.items():
+            at = datetime.fromtimestamp(mt).strftime("%H:%M")
+            cands[(pair, "", "excel")] = {
+                "level": "breach", "kind": "excel", "confirm": 0, "pair": pair, "tenor": "", "mark": "excel",
+                "msg": f"{pair}: its export file was changed outside VolMarker at {at}. If Excel still marks "
+                       f"this pair, tick Marked in Excel in Setup, or the two overwrite each other"}
         new, cleared = self.alerts.update(cands, now, acfg.get("confirm_s", 20))
         if new or cleared:
             self._log_alerts(new, cleared, now)
@@ -765,21 +735,38 @@ class Service:
             log.warning("alert log: %s", e)
 
     def _derive(self, state: dict) -> tuple[dict, list[str]]:
-        if state["mode"] != "derived":
-            return state, []
-        bases = {b: self.store.latest(b) for b in state["bases"]}
-        return apply_derivation(state, bases)
+        """Derived pairs from their bases, pairs moving with their parent from the parent."""
+        if state["mode"] == "derived":
+            return apply_derivation(state, {b: self.store.latest(b) for b in state["bases"]})
+        if state.get("follow_parent"):
+            return apply_parent(state, self.store.latest(state["spread_ref"]))
+        return state, []
 
     def _append(self, state: dict, warnings: list[str], expected_version: int | None,
-                comment: str, source: str, marked: bool) -> dict:
+                comment: str, source: str, marked: bool, extra: dict | None = None,
+                marked_ts: str | None = None, user: str | None = None) -> dict:
         prev = self.store.latest(state["pair"])
         record = {k: state.get(k) for k in STATE_KEYS}
         record.update({
-            "ts": now_iso(), "user": self.user, "comment": comment, "source": source,
+            "ts": now_iso(), "user": user or self.user, "comment": comment, "source": source,
             "warnings": warnings + check_surface(state),
         })
         # marked_ts = last time a person touched it (staleness); propagation keeps it
-        record["marked_ts"] = record["ts"] if marked or prev is None else prev["marked_ts"]
+        record["marked_ts"] = marked_ts or (record["ts"] if marked or prev is None else prev["marked_ts"])
+        if state.get("excel") and prev:               # which Excel export the marks come from
+            for k in ("excel_mtime", "excel_file"):
+                if prev.get(k) is not None:
+                    record[k] = prev[k]
+            if not prev.get("excel"):
+                # switched to Excel: a file VolMarker wrote itself is the baseline, not an Excel export
+                c1, c2 = split_pair(state["pair"])
+                try:
+                    mt = (self._excel_dir() / f"{c1}{c2}volsurface.txt").stat().st_mtime
+                    if mt <= datetime.fromisoformat(prev["ts"]).timestamp() + 30:
+                        record["excel_mtime"] = mt
+                except OSError:
+                    pass
+        record.update(extra or {})
         if marked:
             snap = self._market_snapshot(record)
             if snap:
@@ -787,6 +774,8 @@ class Service:
         if state["mode"] == "derived":
             record["base_versions"] = {b: (self.store.latest(b) or {}).get("version")
                                        for b in state["bases"]}
+        if state.get("follow_parent"):
+            record["parent_version"] = (self.store.latest(state["spread_ref"]) or {}).get("version")
         rec = self.store.append(record, expected_version)
         self._export(rec)
         with self._lock:
@@ -799,35 +788,231 @@ class Service:
         return rec
 
     def _export(self, rec: dict) -> None:
+        if rec.get("excel"):            # Excel writes this pair's files; never overwrite them
+            return
         dirs = {k: self.store.path_from_config(f"{k}_dir") for k in ("fenics", "frontarena", "dc_spread", "history")}
-        # no history copy for the FMD follower's publishes (every 15 s); the pair's history.jsonl has them all
-        exports.write_exports(rec, resolve(rec), dirs, history=rec.get("source") != "market")
+        # a history copy for manual publishes, as the Excel macro made; the pair's history.jsonl keeps every version
+        exports.write_exports(rec, resolve(rec), dirs, history=rec.get("source") == "manual")
 
-    def _propagate(self, pair: str, seen: set) -> None:
-        """Recompute every derived pair that uses `pair`, recursively."""
-        for dep in self.dependents(pair):
-            if dep in seen:
+    # ---- pairs marked in Excel ------------------------------------------
+    def _excel_dir(self) -> Path:
+        cfg = self.store.config()
+        return self.store.path_from_config("excel_dir" if cfg.get("excel_dir") else "frontarena_dir")
+
+    def poll_excel(self, now: float | None = None) -> None:
+        """Pairs marked in Excel: read a newer export file in as a new version
+        (one app does it, the leader). Other pairs: note when their file was
+        changed outside VolMarker, i.e. Excel still exports it too."""
+        now = time.time() if now is None else now
+        d = self._excel_dir()
+        foreign = {}
+        with self._lock:
+            recs = list(self.cache.values())
+        for rec in recs:
+            c1, c2 = split_pair(rec["pair"])
+            path = d / f"{c1}{c2}volsurface.txt"
+            try:
+                mt = path.stat().st_mtime
+            except OSError:
                 continue
-            seen.add(dep)
-            with self.store.lock(dep, self.user):
-                latest = self.store.latest(dep)
-                state = {k: latest.get(k) for k in STATE_KEYS}
-                new, warnings = apply_derivation(state, {b: self.store.latest(b)
-                                                         for b in state["bases"]})
-                if new["tenors"] == latest["tenors"]:
-                    continue
-                self._append(new, warnings, latest["version"],
-                             f"{pair} moved", "propagation", marked=False)
-            self._propagate(dep, seen)
+            if rec.get("excel"):
+                if mt > (rec.get("excel_mtime") or 0) + 1e-6 and now - mt >= 2 and self._leader:
+                    self._import_excel(rec["pair"], path, mt)        # 2 s: Excel may still be writing it
+            elif mt > datetime.fromisoformat(rec["ts"]).timestamp() + 30:
+                foreign[rec["pair"]] = mt
+        if foreign.keys() != self.excel_foreign.keys():
+            self._notify({"type": "alerts", "new": [], "cleared": [], "count": len(self.alerts.active)})
+        self.excel_foreign = foreign
+
+    def _import_excel(self, pair: str, path: Path, mtime: float) -> dict | None:
+        try:
+            marks = exports.read_frontarena(path.read_text(encoding="utf-8", errors="replace"), pair)
+        except (OSError, ValueError) as e:
+            if self.excel_errors.get(pair) != str(e):
+                log.warning("Excel file %s: %s", path, e)
+            self.excel_errors[pair] = str(e)
+            return None
+        self.excel_errors.pop(pair, None)
+        local = datetime.fromtimestamp(mtime).strftime("%d.%m. %H:%M:%S")
+        with self.store.lock(pair, self.user):
+            latest = self.store.latest(pair)
+            if not latest or not latest.get("excel") or (latest.get("excel_mtime") or 0) >= mtime:
+                return None
+            state = {k: copy.deepcopy(latest.get(k)) for k in STATE_KEYS}
+            for t in TENORS:
+                row, m = state["tenors"][t], marks[t]
+                row.update(atm=m["atm"], spread=m["spread"], rr25=m["rr25"], rr10=m["rr10"],
+                           bf25=m["bf25"], bf10=m["bf10"])
+                for w in ("rr", "bf"):
+                    if abs(m[f"{w}25"]) > 1e-12:
+                        row[f"{w}10f"] = m[f"{w}10"] / m[f"{w}25"]
+            state, warnings = self._derive(clean_state(state))
+            rec = self._append(state, warnings, latest["version"], f"Excel export {local} ({path.name})",
+                               "excel", marked=True, user="Excel",
+                               marked_ts=datetime.fromtimestamp(mtime, timezone.utc).isoformat(timespec="seconds"),
+                               extra={"excel_mtime": mtime, "excel_file": str(path)})
+        self._schedule(pair, "excel")
+        return rec
+
+    # ---- propagation to derived pairs and pairs moving with their parent --
+    # A publish saves and exports the pair itself and queues its dependents; a
+    # worker thread recomputes them (start_propagation). Without the worker
+    # (tests, scripts) this happens straight away. Moves of the same pair
+    # waiting in the queue collapse into one, computed from the latest versions.
+    THROTTLED = ("market", "reconcile")      # FMD-driven moves and catch-ups: min_change / min_interval_s
+
+    def _schedule(self, pair: str, source: str, kind: str = "deps") -> None:
+        """kind "deps": recompute the pairs that depend on `pair`; "self": `pair` itself, then its dependents."""
+        if self._prop_thread is None:
+            self._run_propagation(kind, pair, source)
+            return
+        with self._prop_cv:
+            prev = self._prop_pending.get((kind, pair))
+            # a manual publish is never throttled, even if an FMD move of the same pair is waiting
+            self._prop_pending[(kind, pair)] = source if prev is None or prev in self.THROTTLED else prev
+            self._prop_cv.notify()
+
+    def start_propagation(self) -> None:
+        def loop():
+            while not self._stop.is_set():
+                with self._prop_cv:
+                    now = time.time()
+                    for dep, (due, src) in list(self._prop_deferred.items()):
+                        if due <= now:
+                            del self._prop_deferred[dep]
+                            self._prop_pending.setdefault(("self", dep), src)
+                    if not self._prop_pending:
+                        nxt = min((d for d, _ in self._prop_deferred.values()), default=now + 1.0)
+                        self._prop_cv.wait(max(0.05, min(1.0, nxt - now)))
+                        continue
+                    (kind, pair), source = next(iter(self._prop_pending.items()))
+                    del self._prop_pending[(kind, pair)]
+                    self._prop_busy = True       # set while still holding the lock: idle checks can't miss it
+                try:
+                    self._run_propagation(kind, pair, source)
+                except Exception:
+                    log.exception("propagation from %s failed", pair)
+        self._prop_thread = threading.Thread(target=loop, daemon=True, name="propagation")
+        self._prop_thread.start()
+
+    def propagation_idle(self, timeout: float = 10.0) -> bool:
+        """Wait until nothing is queued (deferred moves aside); for tests and shutdown."""
+        end = time.time() + timeout
+        while time.time() < end:
+            with self._prop_cv:
+                if not self._prop_pending and not self._prop_busy:
+                    return True
+            time.sleep(0.02)
+        return False
+
+    def _run_propagation(self, kind: str, pair: str, source: str) -> None:
+        self._prop_busy = True
+        try:
+            if kind == "self":
+                self._recompute(pair, None, source)
+            self._propagate(pair, source)
+        finally:
+            self._prop_busy = False
+
+    @staticmethod
+    def _ups(r: dict) -> list[str]:
+        """The pairs this one is computed from."""
+        return (list(r.get("bases") or []) if r["mode"] == "derived" else []) + \
+               ([r["spread_ref"]] if r.get("follow_parent") and r.get("spread_ref") else [])
+
+    def _downstream(self, pair: str) -> list[str]:
+        """Every pair computed (directly or not) from `pair`, each after the
+        pairs it is computed from: EURCHF from EURUSD and USDCHF comes after USDCHF."""
+        with self._lock:
+            ups = {p: self._ups(r) for p, r in self.cache.items()}
+        down, stack = set(), [pair]
+        while stack:
+            p = stack.pop()
+            for q, u in ups.items():
+                if p in u and q not in down and q != pair:
+                    down.add(q)
+                    stack.append(q)
+        order, done = [], set()
+        def visit(p, path=()):
+            if p in done or p in path:
+                return
+            for u in ups.get(p, []):
+                if u in down:
+                    visit(u, path + (p,))
+            done.add(p)
+            order.append(p)
+        for p in sorted(down):
+            visit(p)
+        return order
+
+    def _propagate(self, pair: str, source: str = "manual") -> None:
+        """Recompute every derived pair, and every pair moving with its parent, that uses `pair`."""
+        for dep in self._downstream(pair):
+            self._recompute(dep, pair, source)
+
+    def _recompute(self, dep: str, cause: str | None, source: str) -> None:
+        # decide without the lock (most FMD-driven follow-ups are skipped), lock only to write
+        plan = self._plan_recompute(dep, source)
+        if plan is None:
+            return
+        with self.store.lock(dep, self.user):
+            plan = self._plan_recompute(dep, source)        # again: someone may have published meanwhile
+            if plan is None:
+                return
+            latest, new, warnings = plan
+            ups = (new.get("bases") or []) if new["mode"] == "derived" else [new.get("spread_ref")]
+            self._append(new, warnings, latest["version"], f"{cause or ' / '.join(u for u in ups if u)} moved",
+                         "propagation", marked=False)
+
+    def _plan_recompute(self, dep: str, source: str):
+        """(latest, new state, warnings) if `dep` should get a new version now, else None."""
+        latest = self.store.latest(dep)
+        if latest is None:
+            return None
+        new, warnings = self._derive({k: latest.get(k) for k in STATE_KEYS})
+        if new["tenors"] == latest["tenors"]:
+            return None
+        if source in self.THROTTLED:
+            pc = self.store.config().get("propagation") or {}
+            move = max((abs((new["tenors"][t]["atm"] or 0) - (latest["tenors"][t]["atm"] or 0)) for t in TENORS),
+                       default=0.0)
+            if move < pc.get("min_change", 0.005):
+                return None             # too small to republish; it adds up until it isn't
+            wait = pc.get("min_interval_s", 5) - (time.time() - datetime.fromisoformat(latest["ts"]).timestamp())
+            if latest.get("source") == "propagation" and wait > 0:
+                with self._prop_cv:     # taken later, from the then latest versions
+                    self._prop_deferred.setdefault(dep, (time.time() + wait, source))
+                return None
+        return latest, new, warnings
+
+    def reconcile(self) -> int:
+        """Catch-up (leader, from housekeeping): a pair computed from others that
+        is behind their latest versions gets recomputed, e.g. after an app was
+        closed with work still queued. Returns how many were queued."""
+        n = 0
+        with self._lock:
+            recs = {p: r for p, r in self.cache.items()}
+        for p, r in recs.items():
+            if r["mode"] == "derived":
+                behind = any((recs.get(b) or {}).get("version") != (r.get("base_versions") or {}).get(b)
+                             for b in r.get("bases") or [])
+            elif r.get("follow_parent") and r.get("spread_ref") in recs:
+                behind = recs[r["spread_ref"]]["version"] != r.get("parent_version")
+            else:
+                continue
+            if behind and p not in self._prop_deferred:
+                self._schedule(p, "reconcile", kind="self")
+                n += 1
+        return n
 
     def _check_cycle(self, state: dict) -> None:
-        if state["mode"] != "derived":
+        ups = self._ups
+        if not ups(state):
             return
         with self._lock:
-            graph = {p: (r.get("bases") or []) for p, r in self.cache.items()
-                     if r["mode"] == "derived"}
-        graph[state["pair"]] = state["bases"]
-        stack, seen = list(state["bases"]), set()
+            graph = {p: ups(r) for p, r in self.cache.items()}
+        graph[state["pair"]] = ups(state)
+        stack, seen = list(graph[state["pair"]]), set()
         while stack:
             p = stack.pop()
             if p == state["pair"]:
@@ -902,6 +1087,7 @@ class Service:
         self._leader = self.is_leader()
         if not self._leader:
             return
+        self.reconcile()
         now = now_iso()
         for pair, rec in list(self.cache.items()):
             exp = rec.get("skew_expiry")
@@ -916,11 +1102,18 @@ class Service:
                     log.info("skew expiry for %s deferred: %s", pair, e)
 
     def start_background(self) -> None:
+        self.start_propagation()
+
         def journal_loop():
             n = 0
             while not self._stop.wait(0.5):
                 self.poll_journal()
                 n += 1
+                if n % 10 == 0:
+                    try:
+                        self.poll_excel()
+                    except Exception:
+                        log.exception("Excel file check failed")
                 if n % 2 == 0:
                     self.poll_market()
                     try:

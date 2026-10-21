@@ -5,7 +5,7 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type", "lock_rr10f", "lock_bf10f",
-  "follow_market", "alert_tol", "alerts_off", "group", "spread_ref", "spread_off", "cut", "dc_factor", "tenors"];
+  "follow_market", "alert_tol", "alerts_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "tenors"];
 const MKT_FIELDS = { atm: "atm", rr25: "rr25", rr10: "rr10", bf25: "bf25", bf10: "bf10" };
 const FOLLOW_FIELDS = ["atm", "rr25", "rr10f", "rr10", "bf25", "bf10f", "bf10"];   // owned by the feed on Follow FMD pairs
 const MARK_LABEL = { atm: "ATM", rr25: "25D RR", rr10: "10D RR", bf25: "25D BF", bf10: "10D BF" };
@@ -28,8 +28,6 @@ const app = {
   draft: null, preview: null, dirty: false, tab: "surface",
   alerts: [], alertCfg: null,
   prefs: {},         // this user's own settings (sidebar layout, spread references), saved on the shared drive
-  spread: null,      // Spread tab: reference pair data
-  spreadView: {},    // reference picked in the Spread tab this session, per pair (the default is the pair's spread_ref)
 };
 
 // ---------------------------------------------------------------- api
@@ -108,6 +106,9 @@ function pairRow(p, flashPair) {
     p.stale ? `<span class="tag stale" title="Not marked for ${age(p.age_minutes)}">stale</span>` : "",
     p.warnings ? `<span class="tag" title="${p.warnings} check(s)">!${p.warnings}</span>` : "",
     p.follow ? `<span class="tag follow ${p.follow}" title="Follows FMD (${p.follow})">FMD</span>` : "",
+    p.follow_parent ? `<span class="tag" title="Moves with ${esc(p.spread_ref)}">P</span>` : "",
+    p.excel ? `<span class="tag xl${p.excel_error ? " bad" : ""}" title="${esc(p.excel_error ? "Excel file not readable: " + p.excel_error : "Marked in Excel, read from its export file")}">XL</span>` : "",
+    p.excel_foreign ? `<span class="tag xl bad" title="Its export file was changed outside VolMarker: is it still marked in Excel?">XL?</span>` : "",
     p.alerts ? `<span class="tag alert${p.alerts_new ? "" : " acked"}" title="${p.alerts} market alert(s)${p.alerts_new ? "" : ", acknowledged"}">⚠${p.alerts}</span>` : "",
   ].join("");
   const ageTitle = `Marked ${localTime(p.marked_ts)} · last update ${localTime(p.ts)} by ${p.user}`;
@@ -216,12 +217,21 @@ async function reloadView() {
   app.dirty = false;
   hideBanner();
   $("#empty").hidden = true; $("#pane").hidden = false;
-  await loadMarket(false);
+  await Promise.all([loadMarket(false), loadParent()]);
   buildGrid(); renderAll();
   if (app.tab === "weights") renderWeights(true);
   if (app.tab === "history") renderHistory();
   if (app.tab === "setup") renderSetup();
-  if (app.tab === "spread") { if (app.spread?.pair === app.current && app.spread.ref === spreadRef()) { renderSpread(); loadSpreadHistory(); } else loadSpreadRef(); }
+}
+// spread parent: the grid shows this pair's ATM minus the parent's published ATM
+async function loadParent() {
+  const ref = app.draft?.spread_ref;
+  if (!ref) { app.parent = null; return; }
+  try {
+    const v = await api(`/api/pairs/${ref}`);
+    app.parent = { pair: ref, version: v.record.version, ts: v.record.ts,
+      atm: Object.fromEntries(app.tenors.map((t) => [t, v.resolved[t].mid.atm])) };
+  } catch { app.parent = { pair: ref, atm: {}, missing: true }; }
 }
 function pick(rec) {
   const s = {};
@@ -242,6 +252,7 @@ const COLS = [
   { f: "corr", label: "Corr", dp: 3, derived: true, group: "" },
   { f: "pin", label: "Pin", derived: true, check: true },
   { f: "atm", label: "ATM", dp: 3, group: "ATM", sep: true },
+  { f: "psprd", label: "vs", dp: 3, parentCol: true },
   { f: "spread", label: "Spread", dp: 2 },
   { calc: (r) => r.quoted.atm_bid, label: "Bid", dp: 3, q: true, title: "Fenics ATM bid (incl. skew)" },
   { calc: (r) => r.quoted.atm_offer, label: "Offer", dp: 3, q: true, title: "Fenics ATM offer (incl. skew)" },
@@ -255,7 +266,9 @@ const COLS = [
   { f: "skew_rr", label: "RR", dp: 2, skew: true },
   { f: "skew_bf", label: "BF", dp: 2, skew: true },
 ];
-function visibleCols() { return COLS.filter((c) => !c.derived || app.draft.mode === "derived"); }
+function visibleCols() {
+  return COLS.filter((c) => (!c.derived || app.draft.mode === "derived") && (!c.parentCol || app.draft.spread_ref));
+}
 
 function buildGrid() {
   const cols = visibleCols();
@@ -268,7 +281,7 @@ function buildGrid() {
   const lockTitle = "Ticked: type the factor; 10D = 25D × factor (10D locked).\nUnticked: type the 10D quote; factor = 10D / 25D.";
   h += `<tr><th class="tn">Tenor</th>${cols.map((c) => `<th class="${c.sep ? "sep" : ""}" title="${esc(c.title || "")}">` +
     (c.role === "factor" ? `<label class="lock" title="${esc(lockTitle)}"><input type="checkbox" data-lock="${c.lock}"> lock</label>` : "") +
-    `${c.label}</th>`).join("")}</tr></thead><tbody>`;
+    `${c.parentCol ? `vs ${esc(app.draft.spread_ref)}` : c.label}</th>`).join("")}</tr></thead><tbody>`;
   for (const t of app.tenors) {
     h += `<tr data-t="${t}"><td class="tn">${t}</td>`;
     cols.forEach((c, i) => {
@@ -303,23 +316,27 @@ function renderGrid() {
   }
   for (const el of $$("#grid tbody input")) {
     const t = el.dataset.t, f = el.dataset.f;
+    if (f === "psprd") { renderParentCell(el, t); continue; }
     const v = app.draft.tenors[t][f];
     const changed = !same(v, publishedRow(t)[f]);
     if (el.type === "checkbox") { el.checked = !!v; el.parentElement.classList.toggle("dirty", changed); continue; }
     const col = cols.find((c) => c.f === f);
     if (document.activeElement !== el) el.value = col.skew && !v ? "" : fmt(v, col.dp);
     el.classList.toggle("dirty", changed);
-    const fol = app.draft.follow_market && FOLLOW_FIELDS.includes(f);
+    const xl = !!app.draft.excel && (FOLLOW_FIELDS.includes(f) || f === "spread");
+    const fol = (app.draft.follow_market && FOLLOW_FIELDS.includes(f)) || xl;
     if (col.lock || fol || el.readOnly) {
       const lockRo = !!col.lock && (col.role === "factor") !== !!app.draft[col.lock];
       const ro = fol || lockRo;
       el.readOnly = ro; el.tabIndex = ro ? -1 : 0;
       el.classList.toggle("ro", ro);
-      el.title = fol ? "Follows FMD: published by the feed (untick Follow FMD in Setup to mark by hand)" :
+      el.title = xl ? "Marked in Excel: read from its export file (untick Marked in Excel in Setup to mark here)" :
+        fol ? "Follows FMD: published by the feed (untick Follow FMD in Setup to mark by hand)" :
         lockRo ? (col.role === "factor" ? "Calibrated from the 10D quote (untick lock to edit)" : "25D × factor (untick lock to type the 10D)") : "";
     }
     el.classList.toggle("follow", fol);
-    if (f === "atm") el.classList.toggle("derived", app.draft.mode === "derived" && !app.draft.tenors[t].pin);
+    if (f === "atm") el.classList.toggle("derived", (app.draft.mode === "derived" && !app.draft.tenors[t].pin) || !!app.draft.follow_parent);
+    if (f === "atm" && app.draft.follow_parent) el.title = `Moves with ${app.draft.spread_ref}: ATM = ${app.draft.spread_ref} + spread. Type an ATM to recalibrate the spread`;
     if (f === "atm" && app.draft.mode === "derived") {
       el.title = app.draft.tenors[t].pin ? "Pinned: kept as typed" : "Derived from bases; type a value to calibrate the correlation";
     }
@@ -330,18 +347,43 @@ function renderGrid() {
   }
 }
 
+function parentSpread(t, atm) {
+  const pa = app.parent?.atm?.[t];
+  return pa == null || atm == null ? null : atm - pa;
+}
+function renderParentCell(el, t) {
+  const p = app.parent, pa = p?.atm?.[t], row = app.draft.tenors[t], fp = !!app.draft.follow_parent;
+  const v = fp && row.psprd != null ? row.psprd : parentSpread(t, row.atm);
+  if (document.activeElement !== el) el.value = fmt(v, 3);
+  const pub = fp && publishedRow(t).psprd != null ? publishedRow(t).psprd : parentSpread(t, app.view.resolved[t].mid.atm);
+  el.classList.toggle("dirty", !same(v, pub));
+  const ro = app.draft.follow_market || !!app.draft.excel || pa == null;
+  el.readOnly = ro; el.tabIndex = ro ? -1 : 0; el.classList.toggle("ro", ro);
+  el.title = pa == null ? `${app.draft.spread_ref} has no ${t} ATM` :
+    `${app.current} ATM − ${p.pair} ATM ${fmt(pa, 3)} (published v${p.version})\nType a spread to set the ATM to ${p.pair} + spread` +
+    (fp ? `\nMoves with ${p.pair}: the spread is kept when ${p.pair} is published` : "");
+}
 function onCellInput(el) {
   const t = el.dataset.t, f = el.dataset.f, row = app.draft.tenors[t];
   if (el.type === "checkbox") { row[f] = el.checked; return changed(); }
   const txt = el.value.trim();
   const v = txt === "" ? null : Number(txt);
   if (txt !== "" && !Number.isFinite(v)) { el.classList.add("dirty"); return; }
+  if (f === "psprd") {                    // ATM = parent ATM + spread
+    const pa = app.parent?.atm?.[t];
+    if (v === null || pa == null) return;
+    setDraftValue(t, "atm", Math.round((pa + v) * 1e6) / 1e6);
+    if (app.draft.follow_parent) app.draft.tenors[t].psprd = v;      // kept when the parent moves
+    return changed();
+  }
   setDraftValue(t, f, v);
   changed();
 }
 function setDraftValue(t, f, v) {
   const row = app.draft.tenors[t];
-  if (f === "atm" && app.draft.mode === "derived" && !row.pin) {
+  if (f === "atm" && app.draft.follow_parent) {
+    row.atm = v; row.psprd = null;         // calibrate the spread to the parent to this ATM
+  } else if (f === "atm" && app.draft.mode === "derived" && !row.pin) {
     row.atm = v; row.corr = null;          // calibrate correlation to this ATM
   } else if (f === "corr") {
     row.corr = v;
@@ -352,6 +394,7 @@ function setDraftValue(t, f, v) {
 function revertDraftValue(t, f) {
   app.draft.tenors[t][f] = clone(publishedRow(t)[f]);
   if (f === "atm" && app.draft.mode === "derived") app.draft.tenors[t].corr = clone(publishedRow(t).corr);
+  if (f === "atm" && app.draft.follow_parent) app.draft.tenors[t].psprd = clone(publishedRow(t).psprd);
 }
 
 function moveFocus(el, dRow) {
@@ -380,6 +423,13 @@ async function runPreview() {
     for (const t of app.tenors) {                 // sync the calculated side of each 10D pair
       if (document.activeElement?.dataset?.t === t) continue;
       for (const f of ["rr10", "rr10f", "bf10", "bf10f"]) app.draft.tenors[t][f] = p.state.tenors[t][f];
+    }
+    if (app.draft.follow_parent) {               // sync ATM/spread computed from the parent
+      for (const t of app.tenors) {
+        if (document.activeElement?.dataset?.t === t) continue;
+        app.draft.tenors[t].atm = p.state.tenors[t].atm;
+        app.draft.tenors[t].psprd = p.state.tenors[t].psprd;
+      }
     }
     if (app.draft.mode === "derived") {          // sync derived ATM/corr into the draft
       for (const t of app.tenors) {
@@ -456,7 +506,8 @@ function renderHeader() {
   const by = r.source === "propagation" ? `auto-updated (${esc(r.comment)})` : `by ${esc(r.user)}`;
   $("#ph-sub").innerHTML = `${d.group ? esc(d.group) + " · " : ""}${mode}${d.key ? " · key pair" : ""} · v${r.version} ${by} at ${localTime(r.ts)}` +
     (r.source === "propagation" ? ` · last marked ${localTime(r.marked_ts)}` : "") +
-    (app.view.dependents.length ? ` · feeds ${app.view.dependents.join(", ")}` : "");
+    (app.view.dependents.length ? ` · feeds ${app.view.dependents.join(", ")}` : "") +
+    (d.spread_ref ? (d.follow_parent ? ` · moves with ${esc(d.spread_ref)}` : ` · spread vs ${esc(d.spread_ref)}`) : "");
 }
 function renderWarnings() {
   const w = app.preview.warnings || [];
@@ -523,7 +574,7 @@ function renderMarket() {
 }
 function setFromMarket(t, m, v, force = false) {
   const row = app.draft.tenors[t];
-  if (v == null || (app.draft.follow_market && !force)) return;
+  if (v == null || ((app.draft.follow_market || app.draft.excel) && !force)) return;
   if (m === "atm") { row.atm = v; if (app.draft.mode === "derived" && !row.pin) row.corr = null; }
   else if (m === "rr10" || m === "bf10") {
     const w = m.slice(0, 2);
@@ -534,6 +585,17 @@ function setFromMarket(t, m, v, force = false) {
 
 function renderFollow() {
   const bar = $("#followbar"), d = app.draft, pub = app.published;
+  if (d.excel || pub.excel) {
+    const r = app.view.record, sum = app.pairs.find((p) => p.pair === app.current) || {};
+    let html = !pub.excel ? "<b>Marked in Excel</b> is switched on in the draft. Publish to hand the marks to Excel: from then on VolMarker reads the pair's export file and stops writing it."
+      : !d.excel ? "<b>Marked in Excel</b> switched off in the draft. Publish to mark the pair here again; VolMarker then writes its export files."
+      : `<b>Marked in Excel</b> · ` + (r.excel_file ? `last export read ${localTime(new Date(r.excel_mtime * 1000).toISOString())}`
+        : `waiting for Excel's next export of ${app.current.slice(0, 3)}${app.current.slice(3)}volsurface.txt`) +
+        (r.excel_file ? ` <span class="muted">(${esc(r.excel_file.split(/[\\/]/).pop())})</span>` : "") +
+        ` · VolMarker doesn't write this pair's files.` + (sum.excel_error ? ` <span class="warn">Last file not readable: ${esc(sum.excel_error)}</span>` : "");
+    bar.className = "followbar" + (sum.excel_error ? " down" : ""); bar.innerHTML = html; bar.hidden = false;
+    return;
+  }
   if (!d.follow_market && !pub.follow_market) { bar.hidden = true; return; }
   bar.hidden = false;
   const f = (app.market && app.market.follow) || {};
@@ -556,16 +618,9 @@ function renderFollow() {
   bar.className = "followbar " + cls; bar.innerHTML = html;
 }
 
-function renderSpreadTab() {      // pairs set to "no spread" don't get the tab
-  const off = !!app.draft?.spread_off, btn = $('.tabs button[data-tab="spread"]');
-  btn.hidden = off;
-  if (off && app.tab === "spread") $('.tabs button[data-tab="surface"]').click();
-}
 function renderAll() {
-  renderSpreadTab();
   renderHeader(); renderFollow(); renderGrid(); renderMarket(); renderWarnings(); renderSkewExpiry(); renderTermChart(); updateButtons();
   if (app.tab === "s3d") render3D();
-  if (app.tab === "spread") renderSpreadValues();
 }
 
 // ---------------------------------------------------------------- charts
@@ -651,6 +706,8 @@ function renderTermChart() {
       if (bv) series.push({ name: b, color, values: T.map((t) => bv.atm[t]) });
     });
   }
+  if (app.parent && app.draft.mode !== "derived" && !app.parent.missing)
+    series.push({ name: app.parent.pair, color: "var(--s3)", values: T.map((t) => app.parent.atm[t] ?? null) });
   if (T.some((t) => mktQuote(t, "atm")))
     series.push({ name: "Market", color: "var(--s5)", noLine: true, label: false,
       values: T.map((t) => mktQuote(t, "atm")?.mid ?? null),
@@ -813,207 +870,6 @@ function wire3d() {
   $$('input[name="s3-src"]').forEach((r) => (r.onchange = render3D));
   $("#s3-axis").onchange = render3D;
   $("#s3-reset").onclick = () => { view3d.yaw = -0.65; view3d.pitch = 0.55; render3D(); };
-}
-
-// ---------------------------------------------------------------- spread tab (this pair − a reference pair)
-const SP_MARKS = ["atm", "rr25", "rr10", "bf25", "bf10"];
-const havePair = (p) => app.pairs.some((x) => x.pair === p);
-function spreadRef() {
-  const v = app.spreadView[app.current];
-  return v !== undefined && (v === "" || havePair(v)) ? v : spreadDefault();
-}
-function spreadDefault() {
-  // the pair's setting (in the draft, so "Make default" shows at once) ...
-  const set = app.draft?.pair === app.current ? app.draft.spread_ref : null;
-  if (set && havePair(set)) return set;
-  // ... else a pair from the same sidebar group, key and marked pairs first (EURUSD for USDCHF)
-  const me = app.pairs.find((p) => p.pair === app.current);
-  if (!me) return "";
-  const rank = (p) => (p.key ? 0 : 2) + (p.mode === "marked" ? 0 : 1);
-  const cands = orderedPairs(groupOf(me), app.pairs).filter((p) => p.pair !== app.current);
-  return cands.sort((a, b) => rank(a) - rank(b))[0]?.pair || "";
-}
-function mktMid(market, t, m) {
-  const q = market?.view?.[t]?.[m];
-  return q && q.mid != null && !q.alt_atm && market.feed?.state !== "off" ? q : null;
-}
-async function loadSpreadRef() {
-  const pair = app.current, ref = spreadRef();
-  app.spread = { pair, ref, view: null, market: null, hist: null };
-  if (ref) {
-    const brand = encodeURIComponent($("#mkt-brand").value);
-    const [v, m] = await Promise.all([api(`/api/pairs/${ref}`).catch(() => null),
-      api(`/api/pairs/${ref}/market?brand=${brand}`).catch(() => null)]);
-    if (app.spread.pair !== pair || app.spread.ref !== ref) return;
-    Object.assign(app.spread, { view: v, market: m });
-  }
-  renderSpread();
-  loadSpreadHistory();
-}
-function renderSpread() {
-  if (app.tab !== "spread" || !app.view) return;
-  const sp = app.spread || {}, ref = sp.ref;
-  $("#sp-pair").textContent = app.current;
-  const chips = relatedPairs();
-  $("#sp-chips").innerHTML = chips.map((p) => `<button class="chip${p === ref ? " on" : ""}" data-ref="${p}"` +
-    ` title="${p === spreadDefault() ? "Default reference for " + app.current : "Show " + app.current + " − " + p}">${p}${p === spreadDefault() ? " ★" : ""}</button>`).join("");
-  $("#sp-ref").innerHTML = `<option value="">${chips.length ? "Other…" : "— choose —"}</option>` +
-    app.pairs.filter((p) => p.pair !== app.current).map((p) => `<option>${p.pair}</option>`).join("");
-  $("#sp-ref").value = ref && !chips.includes(ref) ? ref : "";
-  const def = spreadDefault(), btn = $("#sp-default");
-  btn.hidden = !ref || ref === def;
-  btn.textContent = `Make ${ref} the default`;
-  btn.title = `Set ${ref} as ${app.current}'s spread reference for the whole desk (into the draft; publish to save)`;
-  if (!ref || !sp.view) {
-    $("#sp-note").textContent = ref ? "Loading…" : "Pick a reference pair";
-    $("#sp-grid").innerHTML = ""; $("#sp-chart").innerHTML = ""; $("#sp-hist").innerHTML = ""; $("#sp-legend").innerHTML = "";
-    $("#sp-h-note").textContent = "";
-    return;
-  }
-  const r = sp.view.record;
-  $("#sp-note").textContent = `${ref} v${r.version} at ${localTime(r.ts)}`;
-  let h = `<thead><tr><th class="tn"></th>${SP_MARKS.map((m) => `<th class="grp" colspan="3">${MARK_LABEL[m]}</th>`).join("")}</tr>`;
-  h += `<tr><th class="tn">Tenor</th>${SP_MARKS.map(() => `<th class="sep">${ref}</th><th>Spread</th><th title="FMD ${app.current} − FMD ${ref}">FMD</th>`).join("")}</tr></thead><tbody>`;
-  for (const t of app.tenors) {
-    h += `<tr><td class="tn">${t}</td>` + SP_MARKS.map((m) =>
-      `<td class="calc sep" data-t="${t}" data-m="${m}" data-k="ref"></td>` +
-      `<td><input class="cell" data-t="${t}" data-f="${m}" inputmode="decimal" autocomplete="off"></td>` +
-      `<td class="calc fmd" data-t="${t}" data-m="${m}" data-k="fmd"></td>`).join("") + `</tr>`;
-  }
-  $("#sp-grid").innerHTML = h + "</tbody>";
-  renderSpreadValues();
-}
-// pairs sharing a currency with this one: bases and the default first, then the same group, then key pairs
-function relatedPairs() {
-  const [c1, c2] = [app.current.slice(0, 3), app.current.slice(3)], me = app.pairs.find((p) => p.pair === app.current);
-  const bases = app.draft?.bases || [], def = spreadDefault();
-  const score = (p) => (p.pair === def ? 0 : 10) + (bases.includes(p.pair) ? 0 : 5) + (me && groupOf(p) === groupOf(me) ? 0 : 2) + (p.key ? 0 : 1);
-  const out = app.pairs.filter((p) => p.pair !== app.current && [c1, c2].some((c) => p.pair.includes(c)))
-    .sort((a, b) => score(a) - score(b) || a.pair.localeCompare(b.pair)).slice(0, 8).map((p) => p.pair);
-  if (def && !out.includes(def)) out.unshift(def);
-  return out;
-}
-function spreadAt(t, m, resolved) {
-  const a = resolved?.[t]?.mid?.[m], b = app.spread?.view?.resolved?.[t]?.mid?.[m];
-  return a == null || b == null ? null : a - b;
-}
-function spreadTol(t, m) {
-  const c = app.alertCfg; if (!c) return null;
-  return ((app.draft.alert_tol || {})[m] || c.tolerance[m]) * ((c.tenor_scale || {})[t] || 1);
-}
-function renderSpreadValues() {
-  const sp = app.spread;
-  if (app.tab !== "spread" || !sp?.view || sp.pair !== app.current) return;
-  const res = app.preview.resolved, rres = sp.view.resolved, d = app.draft;
-  for (const el of $$("#sp-grid input")) {
-    const t = el.dataset.t, m = el.dataset.f, v = spreadAt(t, m, res);
-    if (document.activeElement !== el) el.value = fmt(v, 3);
-    const pub = spreadAt(t, m, app.view.resolved);
-    el.classList.toggle("dirty", !same(v, pub));
-    const ro = d.follow_market || (m === "rr10" && d.lock_rr10f) || (m === "bf10" && d.lock_bf10f) || rres[t].mid[m] == null;
-    el.readOnly = ro; el.tabIndex = ro ? -1 : 0; el.classList.toggle("ro", ro);
-    el.title = `${app.current} ${fmt(res[t].mid[m], 3)} − ${sp.ref} ${fmt(rres[t].mid[m], 3)}` +
-      (pub != null && !same(v, pub) ? ` · published spread ${fmt(pub, 3)}` : "") +
-      (d.follow_market ? "\nFollows FMD: set by the feed" : ro && rres[t].mid[m] != null ? "\nUntick the 10D factor lock to type the 10D" : "");
-  }
-  for (const td of $$("#sp-grid td.calc")) {
-    const t = td.dataset.t, m = td.dataset.m;
-    if (td.dataset.k === "ref") { td.textContent = fmt(rres[t].mid[m], 3); continue; }
-    const a = mktMid(app.market, t, m), b = mktMid(sp.market, t, m);
-    const f = a && b ? a.mid - b.mid : null, ours = spreadAt(t, m, res), tol = spreadTol(t, m);
-    td.textContent = fmt(f, 3);
-    const off = f != null && ours != null && tol != null && Math.abs(ours - f) > tol;
-    td.classList.toggle("off", off);
-    td.classList.toggle("stale", !!(a?.stale || b?.stale));
-    td.title = f == null ? "No FMD quote for one of the pairs" :
-      `FMD ${app.current} ${fmt(a.mid, 3)} − ${sp.ref} ${fmt(b.mid, 3)}` + (ours != null ? ` · yours ${ours - f > 0 ? "+" : ""}${fmt(ours - f, 3)} vs FMD` : "") +
-      (tol != null ? ` (tol ${fmt(tol, 2)})` : "") + (a.stale || b.stale ? " · stale quote" : "");
-  }
-  renderSpreadChart();
-}
-function renderSpreadChart() {
-  const T = app.tenors, m = $("#sp-mark").value, sp = app.spread;
-  $("#sp-ts-title").textContent = `${MARK_LABEL[m]} spread by tenor`;
-  const series = [{ name: app.dirty ? "Draft" : "Spread", color: "var(--s1)", values: T.map((t) => spreadAt(t, m, app.preview.resolved)), dots: true }];
-  if (app.dirty) series.push({ name: "Published", color: "var(--muted)", dash: true, values: T.map((t) => spreadAt(t, m, app.view.resolved)) });
-  const fv = T.map((t) => { const a = mktMid(app.market, t, m), b = mktMid(sp.market, t, m); return a && b ? a.mid - b.mid : null; });
-  if (fv.some((v) => v != null)) series.push({ name: "FMD", color: "var(--s5)", noLine: true, label: false, values: fv });
-  $("#sp-legend").innerHTML = series.map((s) => `<span><i class="${s.dash ? "dash" : ""}" style="background:${s.color}"></i>${esc(s.name)}</span>`).join("");
-  lineChart($("#sp-chart"), { n: T.length, xLabel: (i) => `${T[i]} · ${app.current} − ${sp.ref}`, xTicks: T.map((t, i) => [i, t]), series, yLabel: "Spread by tenor" });
-}
-let spHistSeq = 0, spHistTimer = null;
-function loadSpreadHistory(delay = 0) {
-  clearTimeout(spHistTimer);
-  spHistTimer = setTimeout(async () => {
-    const sp = app.spread;
-    if (app.tab !== "spread" || !sp?.ref || !sp.view) return;
-    const seq = ++spHistSeq;
-    let h;
-    try {
-      h = await api(`/api/pairs/${sp.pair}/spread?ref=${sp.ref}&tenor=${$("#sp-tenor").value}&days=${$("#sp-days").value}`);
-    } catch (e) { h = { points: [], error: e.message }; }
-    if (seq !== spHistSeq || app.spread !== sp) return;
-    sp.hist = h; renderSpreadHistory();
-  }, delay);
-}
-function renderSpreadHistory() {
-  const sp = app.spread, h = sp?.hist, m = $("#sp-mark").value;
-  if (!h) return;
-  $("#sp-h-title").textContent = `${$("#sp-tenor").value} ${MARK_LABEL[m]} spread, published`;
-  const pts = h.points || [];
-  $("#sp-h-note").textContent = h.error ? h.error :
-    `${app.current} − ${sp.ref} as published at each moment · ${h.versions} version(s) in the window` + (h.truncated ? " · older versions not read" : "");
-  if (!pts.length) { $("#sp-hist").innerHTML = `<div class="muted" style="padding:20px">No history in this window</div>`; return; }
-  const day = (iso) => new Date(iso).toDateString(), ticks = [];
-  pts.forEach(([ts], i) => {
-    if (i && day(ts) !== day(pts[i - 1][0])) ticks.push([i, new Date(ts).toLocaleDateString(undefined, { weekday: "short", day: "numeric" })]);
-  });
-  if (!ticks.length) ticks.push([0, new Date(pts[0][0]).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })],
-    [pts.length - 1, new Date(pts[pts.length - 1][0]).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })]);
-  lineChart($("#sp-hist"), {
-    n: pts.length, xLabel: (i) => localTime(pts[i][0]), xTicks: ticks, yLabel: "Spread history",
-    series: [{ name: "Spread", color: "var(--s1)", values: pts.map((p) => p[1][m]), label: false, dots: pts.length < 40 }],
-  });
-}
-function wireSpread() {
-  const pick = (ref) => { app.spreadView[app.current] = ref; loadSpreadRef(); };
-  $("#sp-ref").onchange = () => { if ($("#sp-ref").value) pick($("#sp-ref").value); };
-  $("#sp-chips").addEventListener("click", (e) => { const b = e.target.closest(".chip"); if (b) pick(b.dataset.ref); });
-  $("#sp-hide").onclick = () => {
-    app.draft.spread_off = true;
-    changed(); renderSpreadTab();
-    showBanner(`No Spread tab for ${app.current} in the draft. Publish to save it for the desk; switch it back under Setup → Spread reference.`, [["OK", () => hideBanner()]]);
-  };
-  $("#sp-default").onclick = () => {
-    app.draft.spread_ref = app.spread.ref; delete app.spreadView[app.current];
-    changed(); renderSpread();
-    showBanner(`${app.spread.ref} is now ${app.current}'s spread reference in the draft. Publish to save it for the desk.`, [["OK", () => hideBanner()]]);
-  };
-  $("#sp-mark").onchange = () => { renderSpreadChart(); renderSpreadHistory(); };
-  $("#sp-tenor").onchange = $("#sp-days").onchange = () => loadSpreadHistory();
-  const g = $("#sp-grid");
-  g.addEventListener("input", (e) => {
-    const el = e.target; if (!el.matches("input.cell") || el.readOnly) return;
-    const t = el.dataset.t, m = el.dataset.f, txt = el.value.trim(), v = Number(txt);
-    const ref = app.spread?.view?.resolved?.[t]?.mid?.[m];
-    if (txt === "" || !Number.isFinite(v) || ref == null) { el.classList.add("dirty"); return; }
-    setDraftValue(t, m, Math.round((ref + v) * 1e6) / 1e6);
-    changed();
-  });
-  g.addEventListener("focusin", (e) => { if (e.target.matches("input.cell")) e.target.select(); });
-  g.addEventListener("focusout", () => setTimeout(renderSpreadValues, 0));
-  g.addEventListener("keydown", (e) => {
-    const el = e.target; if (!el.matches("input.cell")) return;
-    const step = e.key === "ArrowDown" || e.key === "Enter" ? 1 : e.key === "ArrowUp" ? -1 : 0;
-    if (step) {
-      e.preventDefault();
-      const i = app.tenors.indexOf(el.dataset.t) + step;
-      const next = i >= 0 && i < app.tenors.length && $(`#sp-grid input[data-t="${app.tenors[i]}"][data-f="${el.dataset.f}"]`);
-      if (next) { next.focus(); next.select(); }
-    } else if (e.key === "Escape") {
-      revertDraftValue(el.dataset.t, el.dataset.f); el.blur(); changed();
-    }
-  });
 }
 
 // ---------------------------------------------------------------- weights tab
@@ -1430,9 +1286,12 @@ function renderSetup() {
   $("#su-b1").value = d.bases?.[0] || ""; $("#su-b2").value = d.bases?.[1] || "";
   $("#su-key").checked = !!d.key;
   if (document.activeElement !== $("#su-group")) $("#su-group").value = d.group || "";
-  $("#su-spref").innerHTML = `<option value="">Automatic (same group)</option><option value="-">None (no Spread tab)</option>` +
+  $("#su-spref").innerHTML = `<option value="">None</option>` +
     app.pairs.filter((p) => p.pair !== app.current).map((p) => `<option>${p.pair}</option>`).join("");
-  $("#su-spref").value = d.spread_off ? "-" : d.spread_ref || "";
+  $("#su-spref").value = d.spread_ref || "";
+  $("#su-follow-parent").checked = !!d.follow_parent;
+  $("#su-follow-parent").disabled = !d.spread_ref || d.mode !== "marked" || !!d.follow_market || !!d.excel;
+  $("#su-follow-parent").parentElement.title = $("#su-follow-parent").disabled ? "Needs a spread parent, on a marked pair that doesn't follow FMD and isn't marked in Excel" : "";
   const cuts = app.me.cuts || {};
   $("#su-cut").innerHTML = Object.entries(cuts).map(([k, c]) => `<option value="${k}">${k} (${c.time} ${c.tz.split("/").pop().replace("_", " ")})</option>`).join("");
   $("#su-cut").value = d.cut || "NYC";
@@ -1440,7 +1299,9 @@ function renderSetup() {
   $("#su-atm").value = d.atm_type || "DNS";
   $$(".su-derived").forEach((el) => (el.hidden = d.mode !== "derived"));
   $("#su-follow").checked = !!d.follow_market;
-  $("#su-follow").disabled = d.mode !== "marked";
+  $("#su-follow").disabled = d.mode !== "marked" || !!d.excel;
+  $("#su-excel").checked = !!d.excel;
+  $("#su-excel").disabled = d.mode !== "marked" || !!d.follow_market;
   $("#su-follow").parentElement.title = d.mode !== "marked" ? "Only marked pairs can follow FMD" : "";
   const def = (app.alertCfg && app.alertCfg.tolerance) || {};
   const own = d.alert_tol || {};
@@ -1457,9 +1318,11 @@ function onSetupChange() {
   if ($("#su-cut").value && $("#su-cut").value !== (d.cut || "NYC")) { d.cut = $("#su-cut").value; app.defEvents = []; loadDefEvents(); }
   const dcTxt = $("#su-dc").value.trim(), dcv = Number(dcTxt);
   d.dc_factor = dcTxt === "" || !Number.isFinite(dcv) ? null : dcv;
-  const spv = $("#su-spref").value;
-  d.spread_off = spv === "-";
-  if (!d.spread_off) d.spread_ref = spv || null;      // switching it off keeps the reference for later
+  const parentChanged = ($("#su-spref").value || null) !== (d.spread_ref || null);
+  d.spread_ref = $("#su-spref").value || null;
+  const fp = !!d.spread_ref && mode === "marked" && !$("#su-follow").checked && !$("#su-excel").checked && $("#su-follow-parent").checked;
+  if (fp !== !!d.follow_parent || parentChanged) for (const t of app.tenors) d.tenors[t].psprd = null;   // (re)calibrate to the current ATMs
+  d.follow_parent = fp;
   d.atm_type = $("#su-atm").value;
   if (mode === "derived") {
     if (!bases[0] || !bases[1]) { $$(".su-derived").forEach((el) => (el.hidden = false)); return; }
@@ -1494,9 +1357,17 @@ function onSetupChange() {
     }
   }
   d.follow_market = follow;
+  const wasExcel = !!d.excel;
+  d.excel = mode === "marked" && !follow && $("#su-excel").checked;
+  if (wasExcel && !d.excel) {
+    // Excel's 10D quotes can give factors a locked factor can't hold
+    for (const w of ["rr", "bf"]) {
+      if (d[`lock_${w}10f`] && app.tenors.some((t) => !(d.tenors[t][`${w}10f`] > 0))) d[`lock_${w}10f`] = false;
+    }
+  }
   d.alerts_off = $("#su-alerts-off").checked;
   renderSetup();
-  renderSpreadTab();
+  if (parentChanged) loadParent().then(() => { buildGrid(); renderAll(); });
   if (rebuild) buildGrid();
   changed();
 }
@@ -1533,19 +1404,15 @@ function connect() {
     if (ev.type === "market") {
       clearTimeout(t); t = setTimeout(() => loadPairs(), 400);
       if (app.current && (ev.pairs.includes(app.current) || ev.follow) && !mktBusy) {
-        mktBusy = true; setTimeout(async () => { await loadMarket(); loadDailies(); renderSpreadValues(); mktBusy = false; }, 300);
+        mktBusy = true; setTimeout(async () => { await loadMarket(); loadDailies(); mktBusy = false; }, 300);
       }
-      if (app.tab === "spread" && app.spread?.ref && ev.pairs.includes(app.spread.ref)) refreshSpreadRef();
       return;
     }
     flash = ev.pair;
     clearTimeout(t); t = setTimeout(() => loadPairs(flash), 150);
     if (!app.current) return;
-    if (app.tab === "spread" && app.spread?.ref) {
-      if (ev.pair === app.spread.ref) refreshSpreadRef();
-      else if (ev.pair === app.current) loadSpreadHistory(1500);
-    }
-    const auto = (ev.source === "market" && app.published.follow_market) || ev.source === "propagation";
+    const auto = (ev.source === "market" && app.published.follow_market) || ev.source === "propagation" ||
+      (ev.source === "excel" && app.published.excel);
     if (ev.pair === app.current && ev.version > app.baseVersion && auto) {
       await quietUpdate(ev.source);   // no banner; keeps focus and the trader's edits (server rebases on publish)
     } else if (ev.pair === app.current && ev.version > app.baseVersion) {
@@ -1559,6 +1426,8 @@ function connect() {
           ["Keep editing mine", () => hideBanner()],
         ]);
       }
+    } else if (app.parent && ev.pair === app.parent.pair) {      // keep the marks, update the spreads
+      await loadParent(); renderGrid(); renderTermChart();
     } else if (app.view && (app.draft.bases || []).includes(ev.pair)) {
       const v = await api(`/api/pairs/${app.current}`);
       app.view.bases = v.bases;
@@ -1567,35 +1436,16 @@ function connect() {
   };
 }
 
-let spRefBusy = false;
-function refreshSpreadRef() {        // the reference pair was published or its market moved: keep the draft, update the spreads
-  if (spRefBusy) return;
-  spRefBusy = true;
-  setTimeout(async () => {
-    const sp = app.spread;
-    try {
-      const brand = encodeURIComponent($("#mkt-brand").value);
-      const [v, m] = await Promise.all([api(`/api/pairs/${sp.ref}`), api(`/api/pairs/${sp.ref}/market?brand=${brand}`).catch(() => null)]);
-      if (app.spread === sp) {
-        const moved = sp.view?.record?.version !== v.record.version;
-        Object.assign(sp, { view: v, market: m });
-        if (!$("#sp-grid input")) renderSpread(); else { $("#sp-note").textContent = `${sp.ref} v${v.record.version} at ${localTime(v.record.ts)}`; renderSpreadValues(); }
-        if (moved) loadSpreadHistory(1500);
-      }
-    } catch {}
-    spRefBusy = false;
-  }, 300);
-}
-
 async function quietUpdate(source) {
   const v = await api(`/api/pairs/${app.current}`);
   if (!app.dirty) {
     app.view = v; app.baseVersion = v.record.version; app.published = pick(v.record); app.draft = pick(v.record);
     app.preview = { state: v.record, resolved: v.resolved, warnings: v.record.warnings || [] };
     renderAll();
-  } else if (source === "market") {     // take the feed's fields, keep the trader's spread/skew/weights edits
+  } else if (source === "market" || source === "excel") {   // take the feed's / Excel's fields, keep the trader's other edits
     const pub = pick(v.record);
-    for (const t of app.tenors) for (const f of FOLLOW_FIELDS) app.draft.tenors[t][f] = pub.tenors[t][f];
+    const fields = source === "excel" ? FOLLOW_FIELDS.concat("spread") : FOLLOW_FIELDS;
+    for (const t of app.tenors) for (const f of fields) app.draft.tenors[t][f] = pub.tenors[t][f];
     app.view = v; app.baseVersion = v.record.version; app.published = pub;
     runPreview();
   } else {                              // propagation: re-derive the draft on the new bases
@@ -1706,8 +1556,8 @@ function wire() {
     else if (e.key === "ArrowUp") { e.preventDefault(); moveFocus(el, -1); }
     else if (e.key === "Escape") {
       const t = el.dataset.t, f = el.dataset.f;
-      revertDraftValue(t, f);
-      el.value = fmt(app.draft.tenors[t][f], 3); changed();
+      revertDraftValue(t, f === "psprd" ? "atm" : f);
+      el.value = fmt(f === "psprd" ? parentSpread(t, app.draft.tenors[t].atm) : app.draft.tenors[t][f], 3); changed();
     }
   });
 
@@ -1717,10 +1567,11 @@ function wire() {
     setFromMarket(el.dataset.t, el.dataset.m, q.mid); changed(); renderGrid();
   });
   $("#mkt-show").onchange = () => { renderMarket(); renderTermChart(); };
-  $("#mkt-brand").onchange = async () => { await loadMarket(); if (app.tab === "spread") refreshSpreadRef(); };
+  $("#mkt-brand").onchange = () => loadMarket();
   const followBlock = () => {
-    if (!app.draft.follow_market) return false;
-    showBanner("This pair follows FMD: ATM, RR and BF come from the feed. Untick Follow FMD in Setup to mark by hand.", [["OK", () => hideBanner()]]);
+    if (!app.draft.follow_market && !app.draft.excel) return false;
+    showBanner(app.draft.excel ? "This pair is marked in Excel: the marks come from its export file. Untick Marked in Excel in Setup to mark here."
+      : "This pair follows FMD: ATM, RR and BF come from the feed. Untick Follow FMD in Setup to mark by hand.", [["OK", () => hideBanner()]]);
     return true;
   };
   $("#sh-mkt").onclick = () => {
@@ -1801,11 +1652,10 @@ function wire() {
     if (app.tab === "setup") renderSetup();
     if (app.tab === "surface") renderTermChart();
     if (app.tab === "s3d") render3D();
-    if (app.tab === "spread") loadSpreadRef();
   }));
 
   // setup
-  ["#su-mode", "#su-b1", "#su-b2", "#su-key", "#su-group", "#su-spref", "#su-cut", "#su-dc", "#su-atm", "#su-follow", "#su-alerts-off"].forEach((id) => $(id).addEventListener("change", onSetupChange));
+  ["#su-mode", "#su-b1", "#su-b2", "#su-key", "#su-group", "#su-spref", "#su-cut", "#su-dc", "#su-atm", "#su-follow", "#su-excel", "#su-follow-parent", "#su-alerts-off"].forEach((id) => $(id).addEventListener("change", onSetupChange));
   $("#su-tol").addEventListener("change", (e) => {
     const m = e.target.dataset.m; if (!m) return;
     const txt = e.target.value.trim(), v = Number(txt);
@@ -1856,7 +1706,6 @@ function wire() {
   window.addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => { if (!app.view) return; renderTermChart(); if (app.tab === "s3d") render3D(); }, 100); });
   wire3d();
   wireAlerts();
-  wireSpread();
   wireWeights();
 }
 
@@ -1868,7 +1717,6 @@ async function init() {
   const opts = app.tenors.map((t) => `<option>${t}</option>`).join("");
   $("#sh-from").innerHTML = opts; $("#sh-to").innerHTML = opts;
   $("#sh-from").value = "1M"; $("#sh-to").value = "1Y";
-  $("#sp-tenor").innerHTML = opts; $("#sp-tenor").value = "1M";
   try { app.prefs = await api("/api/prefs"); } catch { app.prefs = {}; }
   wire();
   await loadPairs();

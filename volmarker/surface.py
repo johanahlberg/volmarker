@@ -12,6 +12,7 @@ file). Per tenor the trader-owned inputs are:
     bf10f    10D/25D BF factor
     bf10     10D butterfly
     corr     derived pairs only: correlation between the two base pairs
+    psprd    pairs moving with their spread parent: ATM minus the parent's ATM
     pin      derived pairs only: true = keep the typed ATM, ignore the bases
     skew_atm, skew_rr, skew_bf   quoted-only shifts (Fenics file only)
 
@@ -21,8 +22,9 @@ Pair-level flags lock_rr10f / lock_bf10f (default True) decide which of the
     unlocked:  factor = 10D / 25D          (10D quote typed, factor calibrated)
 
 Other pair-level settings: group (sidebar group, e.g. "Scandies"), spread_ref
-(default reference pair in the Spread tab), spread_off (no Spread tab), cut (option expiry
-cut, e.g. NYC or TOK: decides which expiry an event weighs on), dc_factor
+(spread parent: the grid shows ATM minus the parent's ATM), cut (option expiry
+cut, e.g. NYC or TOK: decides which expiry an event weighs on), excel (marked
+in Excel: read from Excel's export file, never written by VolMarker), dc_factor
 (Front Arena DC spread file = ATM spread x 0.5 x factor; none below 0.01), follow_market (the feed process publishes FMD
 mids into FOLLOW_FIELDS), alert_tol (per-mark alert tolerance overrides) and
 alerts_off.
@@ -39,7 +41,7 @@ from .conventions import TENOR_DAYS, TENORS, normalise_pair, split_pair
 from .derived import cross_vol, implied_corr, orientation
 
 TENOR_FIELDS = ["atm", "spread", "rr25", "rr10f", "rr10", "bf25", "bf10f", "bf10",
-                "corr", "pin", "skew_atm", "skew_rr", "skew_bf"]
+                "corr", "pin", "psprd", "skew_atm", "skew_rr", "skew_bf"]
 
 ALERT_MARKS = ["atm", "rr25", "rr10", "bf25", "bf10"]
 # fields the market follower owns on a pair with follow_market (trader keeps spread, skew, weights)
@@ -47,7 +49,7 @@ FOLLOW_FIELDS = ["atm", "rr25", "rr10f", "rr10", "bf25", "bf10f", "bf10"]
 
 DEFAULT_TENOR = {
     "atm": None, "spread": 0.5, "rr25": 0.0, "rr10f": 1.9, "rr10": None,
-    "bf25": 0.2, "bf10f": 3.3, "bf10": None, "corr": None, "pin": False,
+    "bf25": 0.2, "bf10f": 3.3, "bf10": None, "corr": None, "pin": False, "psprd": None,
     "skew_atm": 0.0, "skew_rr": 0.0, "skew_bf": 0.0,
 }
 
@@ -90,9 +92,15 @@ def clean_state(state: dict) -> dict:
     s["follow_market"] = bool(s.get("follow_market"))
     if s["follow_market"] and s["mode"] != "marked":
         raise ValueError("Only a marked pair can follow the market (set Mode to Marked)")
+    s["excel"] = bool(s.get("excel"))
+    if s["excel"] and (s["mode"] != "marked" or s["follow_market"]):
+        raise ValueError("Marked in Excel: the pair must be Marked and not follow FMD")
     s["alerts_off"] = bool(s.get("alerts_off"))
     s["group"] = " ".join(str(s.get("group") or "").split())[:40] or None
-    s["spread_off"] = bool(s.get("spread_off"))
+    s["follow_parent"] = bool(s.get("follow_parent"))
+    if s["follow_parent"] and (not s["spread_ref"] or s["mode"] != "marked" or s["follow_market"] or s.get("excel")):
+        raise ValueError("Move with parent needs a spread parent, on a marked pair that doesn't follow FMD "
+                         "and isn't marked in Excel")
     s["cut"] = str(s.get("cut") or "NYC").strip().upper()[:8]
     dc = s.get("dc_factor")
     s["dc_factor"] = None if dc in (None, "") else float(dc)
@@ -138,7 +146,7 @@ def clean_state(state: dict) -> dict:
         for w, lock in (("rr", s["lock_rr10f"]), ("bf", s["lock_bf10f"])):
             # market mode: FMD quotes the 10D directly (it may even have the other sign than the 25D),
             # so the 10D is the input and the factor is for information only
-            lock = lock and not s["follow_market"]
+            lock = lock and not s["follow_market"] and not s["excel"]
             v25, f, v10 = f"{w}25", f"{w}10f", f"{w}10"
             if lock or row[v10] is None:
                 if row[f] <= 0:
@@ -147,6 +155,8 @@ def clean_state(state: dict) -> dict:
             elif abs(row[v25]) > 1e-12:
                 row[f] = row[v10] / row[v25]
             # 25D of zero with an unlocked 10D: factor undefined, keep the last one
+        if not s["follow_parent"]:
+            row["psprd"] = None
         if row["corr"] is not None and not -1 <= row["corr"] <= 1:
             raise ValueError(f"{t}: correlation must be between -1 and 1")
         tenors[t] = {f: row[f] for f in TENOR_FIELDS}
@@ -201,6 +211,31 @@ def apply_derivation(state: dict, base_states: dict[str, dict]) -> tuple[dict, l
                 row["atm"] = cross_vol(v1, v2, row["corr"], s1, s2)
             except ValueError as e:
                 warnings.append(f"{t}: {e}")
+    return s, warnings
+
+
+def apply_parent(state: dict, parent: dict | None) -> tuple[dict, list[str]]:
+    """A pair that moves with its spread parent: ATM = parent ATM + spread per
+    tenor. A tenor whose spread is unset but whose ATM is typed gets the spread
+    calibrated to it (like the correlation of a derived pair)."""
+    s = copy.deepcopy(state)
+    if not s.get("follow_parent"):
+        return s, []
+    if parent is None:
+        return s, [f"Spread parent {s['spread_ref']} missing"]
+    warnings = []
+    for t in TENORS:
+        row, pa = s["tenors"][t], parent["tenors"][t]["atm"]
+        if pa is None:
+            warnings.append(f"{t}: {s['spread_ref']} has no ATM; ATM kept")
+            continue
+        if row["psprd"] is None:
+            if row["atm"] is not None:
+                row["psprd"] = row["atm"] - pa
+        else:
+            row["atm"] = pa + row["psprd"]
+            if row["atm"] <= 0:
+                warnings.append(f"{t}: {s['spread_ref']} + spread is not positive")
     return s, warnings
 
 

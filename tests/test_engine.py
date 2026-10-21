@@ -1,4 +1,5 @@
 import csv
+import json
 import math
 import tempfile
 import unittest
@@ -245,9 +246,8 @@ class TestGroupsPrefsSpread(unittest.TestCase):
         # kept by automatic versions (propagation, skew expiry, market mode) via STATE_KEYS
         st = {k: rec.get(k) for k in STATE_KEYS}
         self.assertEqual(clean_state(st)["group"], "EUR & CHF")
-        st.update(spread_ref="usdchf", spread_off=1)
-        cs = clean_state(st)
-        self.assertEqual((cs["spread_ref"], cs["spread_off"]), ("USDCHF", True))
+        st.update(spread_ref="usdchf")
+        self.assertEqual(clean_state(st)["spread_ref"], "USDCHF")
         with self.assertRaises(ValueError):
             clean_state(dict(st, spread_ref="EURUSD"))
 
@@ -262,22 +262,6 @@ class TestGroupsPrefsSpread(unittest.TestCase):
         self.assertTrue((Path(self.tmp.name) / "users" / "DOMAIN_j.doe.json").exists())
         with self.assertRaises(ValueError):
             self.svc.save_prefs(["not", "a", "dict"])
-
-    def test_spread_history(self):
-        self._marked("EURUSD", 7.0, rr25=0.2)
-        self._marked("USDCHF", 7.8, rr25=-0.4)
-        st = flat_state("USDCHF", 8.0, rr25=-0.4)
-        self.svc.publish("USDCHF", st, expected_version=2)
-        h = self.svc.spread_history("USDCHF", "EURUSD", "1M", days=1)
-        self.assertTrue(h["points"])
-        last = h["points"][-1][1]
-        self.assertAlmostEqual(last["atm"], 1.0)
-        self.assertAlmostEqual(last["rr25"], -0.6)
-        self.assertEqual(h["versions"], 5)          # 2 + 3 versions, all inside the window
-        with self.assertRaises(ValueError):
-            self.svc.spread_history("USDCHF", "EURUSD", "7M")
-        with self.assertRaises(ValueError):
-            self.svc.spread_history("USDCHF", "XAUUSD", "1M")
 
 
 class TestEventDefaults(unittest.TestCase):
@@ -368,3 +352,141 @@ class TestEventDefaults(unittest.TestCase):
             self.assertEqual(row["events"], ["big (+3)"])
             c = svc.curve("EURUSD", draft)
             self.assertTrue(any(p[2] != p[1] for p in c["points"]))
+
+
+class TestMoveWithParent(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(self.tmp.name)
+        self.svc = Service(self.store, "anna")
+        for pair, atm in (("EURUSD", 7.0), ("USDCHF", 7.6)):
+            self.svc.create_pair(pair, "marked", None, True)
+            self.svc.publish(pair, flat_state(pair, atm), expected_version=1)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_child_follows_parent(self):
+        st = self.svc.get("USDCHF")
+        st.update(spread_ref="EURUSD", follow_parent=True)
+        rec = self.svc.publish("USDCHF", st, st["version"])
+        self.assertAlmostEqual(rec["tenors"]["1M"]["psprd"], 0.6)          # calibrated to the current ATMs
+        # EURUSD up 0.2 -> USDCHF follows with the same spread, as an automatic version
+        eu = self.svc.get("EURUSD")
+        for t in eu["tenors"]:
+            eu["tenors"][t]["atm"] = 7.2
+        self.svc.publish("EURUSD", eu, eu["version"])
+        ch = self.store.latest("USDCHF")
+        self.assertEqual((ch["source"], ch["comment"]), ("propagation", "EURUSD moved"))
+        self.assertAlmostEqual(ch["tenors"]["1M"]["atm"], 7.8)
+        self.assertEqual(ch["marked_ts"], rec["marked_ts"])                 # not a new mark
+        # typing a spread, or an ATM (the spread recalibrates)
+        st = self.svc.get("USDCHF")
+        st["tenors"]["1M"]["psprd"] = 0.5
+        st["tenors"]["3M"].update(atm=8.1, psprd=None)
+        rec = self.svc.publish("USDCHF", st, st["version"])
+        self.assertAlmostEqual(rec["tenors"]["1M"]["atm"], 7.7)
+        self.assertAlmostEqual(rec["tenors"]["3M"]["psprd"], 0.9)
+        # switched off: the marks stay where they are and no longer move
+        st = self.svc.get("USDCHF")
+        st["follow_parent"] = False
+        rec = self.svc.publish("USDCHF", st, st["version"])
+        self.assertIsNone(rec["tenors"]["1M"]["psprd"])
+        self.svc.publish("EURUSD", flat_state("EURUSD", 6.0), self.svc.get("EURUSD")["version"])
+        self.assertAlmostEqual(self.store.latest("USDCHF")["tenors"]["1M"]["atm"], 7.7)
+
+    def test_rules_and_cycles(self):
+        st = self.svc.get("USDCHF")
+        with self.assertRaises(ValueError):                                  # no parent
+            self.svc.publish("USDCHF", dict(st, follow_parent=True), st["version"])
+        self.svc.publish("USDCHF", dict(st, spread_ref="EURUSD", follow_parent=True), st["version"])
+        eu = self.svc.get("EURUSD")
+        with self.assertRaises(ValueError):                                  # EURUSD would follow itself
+            self.svc.publish("EURUSD", dict(eu, spread_ref="USDCHF", follow_parent=True), eu["version"])
+
+
+class TestBackgroundPropagation(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(self.tmp.name)
+        self.svc = Service(self.store, "anna")
+        for pair, atm in (("EURUSD", 7.0), ("USDCHF", 7.6)):
+            self.svc.create_pair(pair, "marked", None, True)
+            self.svc.publish(pair, flat_state(pair, atm), expected_version=1)
+        st = self.svc.get("USDCHF")
+        self.svc.publish("USDCHF", dict(st, spread_ref="EURUSD", follow_parent=True), st["version"])
+        self.svc.create_pair("EURCHF", "derived", ["EURUSD", "USDCHF"], False)
+        cfg = json.loads((Path(self.tmp.name) / "config.json").read_text())
+        cfg["propagation"] = {"min_change": 0.05, "min_interval_s": 5}
+        (Path(self.tmp.name) / "config.json").write_text(json.dumps(cfg))
+
+    def tearDown(self):
+        self.svc.stop()
+        self.tmp.cleanup()
+
+    def _move_eurusd(self, d, source="manual"):
+        st = self.svc.get("EURUSD")
+        for t in TENORS:
+            st["tenors"][t]["atm"] += d
+        return self.svc.publish("EURUSD", st, st["version"], source=source)
+
+    def test_publish_returns_and_dependents_follow(self):
+        self.svc.start_propagation()
+        self._move_eurusd(0.2)
+        self.assertTrue(self.svc.propagation_idle())
+        self.assertAlmostEqual(self.store.latest("USDCHF")["tenors"]["1M"]["atm"], 7.8)
+        ec = self.store.latest("EURCHF")
+        self.assertEqual(ec["source"], "propagation")
+        self.assertEqual(ec["base_versions"]["USDCHF"], self.store.latest("USDCHF")["version"])   # after USDCHF
+        hist = list((Path(self.tmp.name) / "exports" / "history").glob("USDCHF_*.csv"))
+        self.assertTrue(hist)                # manual USDCHF publishes get a copy, the follow-up (1M 7.8) doesn't
+        self.assertFalse(any("vol,atm,USD,CHF,1m,7.55,8.05" in h.read_text() for h in hist))
+
+    def test_queue_collapses_and_manual_wins(self):
+        self.svc._prop_thread = object()      # worker "busy": things only queue up
+        self._move_eurusd(0.1, "market")
+        self._move_eurusd(0.1)
+        self._move_eurusd(0.1, "market")
+        self.assertEqual(self.svc._prop_pending, {("deps", "EURUSD"): "manual"})
+        self.svc._prop_thread = None
+        self.svc.start_propagation()
+        self.assertTrue(self.svc.propagation_idle())
+        self.assertAlmostEqual(self.store.latest("USDCHF")["tenors"]["1M"]["atm"], 7.9)   # one step to the latest
+
+    def test_fmd_moves_are_throttled(self):
+        v = self.store.latest("USDCHF")["version"]
+        self._move_eurusd(0.01, "market")                        # below min_change: no new USDCHF version
+        self.assertEqual(self.store.latest("USDCHF")["version"], v)
+        self._move_eurusd(0.10, "market")                        # 0.11 in total now: republished
+        self.assertAlmostEqual(self.store.latest("USDCHF")["tenors"]["1M"]["atm"], 7.71)
+        v = self.store.latest("USDCHF")["version"]
+        self._move_eurusd(0.10, "market")                        # too soon after the last follow-up: deferred
+        self.assertEqual(self.store.latest("USDCHF")["version"], v)
+        self.assertIn("USDCHF", self.svc._prop_deferred)
+        self._move_eurusd(0.0001)                                # a manual publish is never throttled
+        self.assertAlmostEqual(self.store.latest("USDCHF")["tenors"]["1M"]["atm"], 7.8101)
+
+    def test_reconcile_catches_up(self):
+        self.svc._prop_thread = object()      # the app "closes" with the follow-ups still queued
+        self._move_eurusd(0.3)
+        self.svc._prop_thread, self.svc._prop_pending = None, {}
+        self.assertAlmostEqual(self.store.latest("USDCHF")["tenors"]["1M"]["atm"], 7.6)
+        self.assertEqual(self.svc.reconcile(), 2)                # USDCHF and EURCHF are behind
+        self.assertAlmostEqual(self.store.latest("USDCHF")["tenors"]["1M"]["atm"], 7.9)
+        self.assertEqual(self.svc.reconcile(), 0)
+
+    def test_deferred_moves_are_applied_later(self):
+        cfg = json.loads((Path(self.tmp.name) / "config.json").read_text())
+        cfg["propagation"] = {"min_change": 0.05, "min_interval_s": 2.5}      # version times are whole seconds
+        (Path(self.tmp.name) / "config.json").write_text(json.dumps(cfg))
+        self.svc.start_propagation()
+        self._move_eurusd(0.10, "market")
+        self.assertTrue(self.svc.propagation_idle())
+        self._move_eurusd(0.10, "market")                        # within 2.5 s of the last follow-up
+        self.assertTrue(self.svc.propagation_idle())
+        self.assertAlmostEqual(self.store.latest("USDCHF")["tenors"]["1M"]["atm"], 7.7)
+        import time as _t
+        _t.sleep(3.2)
+        self.assertTrue(self.svc.propagation_idle())
+        self.assertAlmostEqual(self.store.latest("USDCHF")["tenors"]["1M"]["atm"], 7.8)   # taken a little later
+        self.assertEqual(self.svc._prop_deferred, {})

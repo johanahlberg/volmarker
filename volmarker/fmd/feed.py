@@ -145,7 +145,9 @@ class Feed:
             # market mode: this process is the one that publishes FMD levels for "Follow FMD" pairs
             from ..follow import Follower
             from ..service import Service
-            follower = Follower(Service(self.store, "FMD"))
+            fsvc = Service(self.store, "FMD")
+            fsvc.start_propagation()          # follower publishes don't wait for the crosses to be recomputed
+            follower = Follower(fsvc)
             threading.Thread(target=follower.run_forever, args=(stop,), daemon=True).start()
         try:
             self.session.run_forever()
