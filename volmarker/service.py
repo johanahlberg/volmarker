@@ -596,10 +596,89 @@ class Service:
         state["key"] = bool(key)
         state["group"] = group
         if mode == "derived":
-            # start from the base-implied ATM at zero correlation
+            # start from the base-implied ATM at zero correlation; a tenor whose ATM comes
+            # from an existing export file keeps it and gets its correlation calibrated
             for t in TENORS:
                 state["tenors"][t]["corr"] = 0.0
-        return self.publish(pair, state, expected_version=0, comment="created")
+        seeded = self._seed_from_export(state)
+        comment = f"created from {seeded}" if seeded else "created"
+        return self.publish(pair, state, expected_version=0, comment=comment)
+
+    def _seed_from_export(self, state: dict) -> str | None:
+        """A new pair starts from the Front Arena file already in the export folder
+        (e.g. copied there from the Excel workbook's exports), so its first publish
+        rewrites that file with the same marks instead of blanking it. Returns the
+        file name it read, or None."""
+        found = self._read_export_file(state["pair"])
+        if not found:
+            return None
+        self._apply_marks(state, found[2])
+        return found[0].name
+
+    def _read_export_file(self, pair: str) -> tuple[Path, float, dict] | None:
+        """The pair's newest readable Front Arena file (export folder, or Excel's
+        folder if one is set): (path, mtime, marks per tenor, possibly partial)."""
+        c1, c2 = split_pair(pair)
+        cfg = self.store.config()
+        dirs = [self.store.path_from_config("frontarena_dir")]
+        if cfg.get("excel_dir"):
+            dirs.append(self.store.path_from_config("excel_dir"))
+        best = None
+        for d in dirs:
+            path = d / f"{c1}{c2}volsurface.txt"
+            try:
+                mt = path.stat().st_mtime
+                marks = exports.read_frontarena(path.read_text(encoding="utf-8", errors="replace"),
+                                                pair, partial=True)
+            except (OSError, ValueError):
+                continue
+            if any(marks.values()) and (best is None or mt > best[1]):
+                best = (path, mt, marks)
+        return best
+
+    @staticmethod
+    def _apply_marks(state: dict, marks: dict) -> None:
+        """Put a file's marks into a state; 10D factors are calibrated to them."""
+        for t in TENORS:
+            row, m = state["tenors"][t], marks[t]
+            row.update(m)
+            if "atm" in m:
+                if state["mode"] == "derived" and not row.get("pin"):
+                    row["corr"] = None                   # calibrated to the file's ATM
+                if state.get("follow_parent"):
+                    row["psprd"] = None                  # spread to the parent calibrated to it
+            for w in ("rr", "bf"):
+                v25, v10 = row[f"{w}25"], row.get(f"{w}10")
+                if v10 is None:
+                    continue
+                f = v10 / v25 if abs(v25) > 1e-12 else None
+                if f is not None and f > 0:
+                    row[f"{w}10f"] = f
+                elif abs(v10) > 1e-12:
+                    state[f"lock_{w}10f"] = False   # no positive factor gives this 10D: keep it as typed
+
+    def load_export_file(self, pair: str, draft: dict | None = None) -> dict:
+        """The draft with the marks of the pair's current Front Arena file, e.g.
+        after someone marked it in Excel meanwhile. Nothing is saved: the trader
+        checks the draft and publishes it."""
+        pair = normalise_pair(pair)
+        rec = self.get(pair)
+        if rec is None:
+            raise ValueError(f"Unknown pair {pair}")
+        state = self._prepare(pair, draft or rec)
+        if state.get("excel"):
+            raise ValueError(f"{pair} is marked in Excel: VolMarker already reads its file")
+        if state.get("follow_market"):
+            raise ValueError(f"{pair} follows FMD: switch off Follow FMD in Setup to load a file")
+        found = self._read_export_file(pair)
+        if not found:
+            c1, c2 = split_pair(pair)
+            raise ValueError(f"No readable {c1}{c2}volsurface.txt in the Front Arena folder")
+        path, mt, marks = found
+        self._apply_marks(state, marks)
+        return {"state": clean_state(state), "file": path.name, "mtime": mt,
+                "missing": [t for t in TENORS if not marks[t]],
+                "ours": mt <= datetime.fromisoformat(rec["ts"]).timestamp() + 30}
 
     def publish(self, pair: str, draft: dict, expected_version: int | None,
                 comment: str = "", source: str = "manual") -> dict:

@@ -234,6 +234,66 @@ class TestExcelPairs(unittest.TestCase):
         self.assertIn("incomplete", self.svc.excel_errors["USDCHF"])
         self.assertEqual(self.store.latest("USDCHF")["version"], rec["version"])
 
+    def test_create_reads_existing_file(self):
+        from volmarker.exports import read_frontarena
+        import time as _t
+        p = self._excel_file(7.8, _t.time() - 3600)                            # copied in before setup
+        before = read_frontarena(p.read_text(), "USDCHF")
+        rec = self.svc.create_pair("USDCHF", "marked", None, True)
+        self.assertEqual(rec["comment"], "created from USDCHFvolsurface.txt")
+        self.assertAlmostEqual(rec["tenors"]["1M"]["atm"], 7.8)
+        self.assertAlmostEqual(rec["tenors"]["1M"]["rr10"], -0.95)
+        after = read_frontarena(p.read_text(), "USDCHF")                       # rewritten with the same marks
+        for t in before:
+            for m, v in before[t].items():
+                self.assertAlmostEqual(after[t][m], v, places=9)
+
+    def test_create_derived_reads_existing_file(self):
+        from volmarker.exports import frontarena_lines
+        from volmarker.surface import clean_state, new_state, resolve
+        for pair, atm in (("EURUSD", 7.0), ("USDCHF", 7.5)):
+            st = clean_state(new_state(pair))
+            for t in st["tenors"]:
+                st["tenors"][t]["atm"] = atm
+            self.svc.create_pair(pair, "marked", None, True)
+            self.svc.publish(pair, st, 1)
+        s = new_state("EURCHF")
+        for t in s["tenors"]:
+            s["tenors"][t].update(atm=5.2, rr25=-0.3)
+        s = clean_state(s)
+        (self.fa / "EURCHFvolsurface.txt").write_text(
+            "\r\n".join(frontarena_lines("EURCHF", resolve(s), {t: 0.5 for t in s["tenors"]})))
+        rec = self.svc.create_pair("EURCHF", "derived", ["EURUSD", "USDCHF"], False)
+        self.assertAlmostEqual(rec["tenors"]["3M"]["atm"], 5.2)
+        self.assertAlmostEqual(rec["tenors"]["3M"]["rr25"], -0.3)
+        self.assertIsNotNone(rec["tenors"]["3M"]["corr"])                     # calibrated to the file's ATM
+
+    def test_create_keeps_10d_of_other_sign(self):
+        p = self._excel_file(7.8, 0)
+        p.write_text(p.read_text().replace("riskreversal,1mo,-0.95", "riskreversal,1mo,0.1"))
+        rec = self.svc.create_pair("USDCHF", "marked", None, True)
+        self.assertFalse(rec["lock_rr10f"])
+        self.assertAlmostEqual(rec["tenors"]["1M"]["rr10"], 0.1)
+
+    def test_load_export_file_into_draft(self):
+        import time as _t
+        self.svc.create_pair("USDCHF", "marked", None, True)
+        rec = self.store.latest("USDCHF")
+        self.assertTrue(self.svc.load_export_file("USDCHF")["ours"])            # VolMarker's own export
+        self._excel_file(7.8, _t.time() + 120)                                 # someone marks it in Excel
+        r = self.svc.load_export_file("USDCHF", rec)
+        self.assertFalse(r["ours"])
+        self.assertEqual((r["file"], r["missing"]), ("USDCHFvolsurface.txt", []))
+        self.assertAlmostEqual(r["state"]["tenors"]["1M"]["atm"], 7.8)
+        self.assertAlmostEqual(r["state"]["tenors"]["1M"]["rr10"], -0.95)
+        self.assertEqual(self.store.latest("USDCHF")["version"], rec["version"])   # nothing saved yet
+        pub = self.svc.publish("USDCHF", r["state"], rec["version"], "from file")
+        self.assertAlmostEqual(pub["tenors"]["1M"]["spread"], 0.6)
+        st = dict(pub, excel=True)
+        self.svc.publish("USDCHF", st, pub["version"])
+        with self.assertRaises(ValueError):                                    # Excel pairs import by themselves
+            self.svc.load_export_file("USDCHF")
+
     def test_foreign_write_alert(self):
         from volmarker.surface import clean_state, new_state
         import time as _t

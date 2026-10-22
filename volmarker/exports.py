@@ -88,10 +88,11 @@ def write_exports(rec: dict, resolved: dict, dirs: dict[str, Path], history: boo
         atomic_write(Path(dirs["history"]) / f"{c1}{c2}_{stamp}.csv", fen, fsync=False)
 
 
-def read_frontarena(text: str, pair: str) -> dict[str, dict]:
+def read_frontarena(text: str, pair: str, partial: bool = False) -> dict[str, dict]:
     """Parse a Front Arena volsurface file (as the Excel macro writes it) back
     into marks per tenor: atm (mid), spread (ask - bid), rr25, rr10, bf25, bf10.
-    Raises ValueError if the file is incomplete, e.g. while Excel is writing it."""
+    Raises ValueError if the file is incomplete, e.g. while Excel is writing it;
+    partial=True returns whatever marks the file has instead."""
     c1, c2 = split_pair(pair)
     tenor = {v: k for k, v in FA_TENORS.items()}
     num = lambda x: None if x.strip() == "" else float(x)
@@ -109,6 +110,6 @@ def read_frontarena(text: str, pair: str) -> dict[str, dict]:
             if mark and num(f[5]) is not None:
                 out[tenor[f[4]]][f"{mark}{f[0][3:]}"] = num(f[5])
     missing = [t for t in TENORS if set(out[t]) != {"atm", "spread", "rr25", "rr10", "bf25", "bf10"}]
-    if missing:
+    if missing and not partial:
         raise ValueError(f"incomplete file: {', '.join(missing)} missing")
     return out

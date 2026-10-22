@@ -134,6 +134,9 @@ def make_handler(svc: Service):
                                           body.get("bases"), body.get("key", False),
                                           body.get("group"))
                     return self._json(rec)
+                m = re.fullmatch(r"/api/pairs/([A-Z]{6})/load-export", p)
+                if m:
+                    return self._json(svc.load_export_file(m.group(1), body.get("state")))
                 m = re.fullmatch(r"/api/pairs/([A-Z]{6})/preview", p)
                 if m:
                     return self._json(svc.preview(m.group(1), body["state"]))

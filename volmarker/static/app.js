@@ -185,6 +185,7 @@ async function loadPairs(flashPair) {
   app.pairs = await api("/api/pairs");
   renderPairs(flashPair);
   fillPairSelects();
+  if (app.view) renderFollow();      // the changed-outside-VolMarker bar
 }
 function fillPairSelects() {
   $("#group-list").innerHTML = [...new Set(app.pairs.map((p) => p.group).filter(Boolean))].sort()
@@ -483,6 +484,21 @@ async function rebase(latest) {
   hideBanner(); renderAll(); changed();
 }
 
+async function loadExportFile() {
+  if (app.dirty && !confirmDiscard()) return;
+  let r;
+  try { r = await api(`/api/pairs/${app.current}/load-export`, { state: app.draft }); }
+  catch (e) { showBanner(`Load FA file: ${esc(e.message)}`, [["OK", () => hideBanner()]], "error"); return; }
+  app.draft = pick(r.state);
+  const at = localTime(new Date(r.mtime * 1000).toISOString());
+  $("#comment").value = `From ${r.file} (${at})`;
+  changed(); buildGrid(); renderAll();
+  showBanner(`Loaded ${esc(r.file)}, written ${at}` +
+    (r.ours ? " <span class=\"muted\">(VolMarker's own last export)</span>" : "") +
+    (r.missing.length ? `. <span class="warn">Not in the file, kept as they were: ${r.missing.join(", ")}</span>` : "") +
+    ". Check the draft and Publish to take it over.", [["OK", () => hideBanner()]]);
+}
+
 // ---------------------------------------------------------------- banner
 function showBanner(html, actions = [], kind = "") {
   const b = $("#banner");
@@ -594,6 +610,15 @@ function renderFollow() {
         (r.excel_file ? ` <span class="muted">(${esc(r.excel_file.split(/[\\/]/).pop())})</span>` : "") +
         ` · VolMarker doesn't write this pair's files.` + (sum.excel_error ? ` <span class="warn">Last file not readable: ${esc(sum.excel_error)}</span>` : "");
     bar.className = "followbar" + (sum.excel_error ? " down" : ""); bar.innerHTML = html; bar.hidden = false;
+    return;
+  }
+  const sum = app.pairs.find((p) => p.pair === app.current) || {};
+  if (sum.excel_foreign && !d.follow_market && !pub.follow_market) {
+    bar.className = "followbar held";
+    bar.innerHTML = "<b>The export file was changed outside VolMarker</b> (Excel?). Load it into the draft to take those marks over, " +
+      "or tick Marked in Excel in Setup if Excel keeps marking this pair. ";
+    const btn = document.createElement("button"); btn.textContent = "Load FA file"; btn.onclick = loadExportFile;
+    bar.appendChild(btn); bar.hidden = false;
     return;
   }
   if (!d.follow_market && !pub.follow_market) { bar.hidden = true; return; }
@@ -1601,6 +1626,7 @@ function wire() {
   setInterval(async () => { try { renderFeed(await api("/api/market/status")); } catch {} }, 10000);
   $("#publish").onclick = publish;
   $("#discard").onclick = () => reloadView();
+  $("#load-fa").onclick = loadExportFile;
   document.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); publish(); }
     if (e.key === "/" && !e.target.matches("input, select, textarea")) { e.preventDefault(); $("#filter").focus(); }
