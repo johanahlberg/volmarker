@@ -23,6 +23,7 @@ import csv
 import hashlib
 import io
 import json
+import logging
 import os
 import socket
 import threading
@@ -45,6 +46,8 @@ class ConflictError(Exception):
 class LockTimeout(Exception):
     pass
 
+
+log = logging.getLogger(__name__)
 
 DEFAULT_CONFIG = {
     "fenics_dir": "exports/fenics",
@@ -124,6 +127,7 @@ DEFAULT_CONFIG = {
 class Store:
     def __init__(self, root: str | os.PathLike):
         self.root = Path(root)
+        self.config_error: str | None = None     # why config.json was not (fully) used, shown in the app
         for sub in ("pairs", "locks", "calendar"):
             (self.root / sub).mkdir(parents=True, exist_ok=True)
         self.journal_path = self.root / "journal.jsonl"
@@ -142,10 +146,23 @@ class Store:
         cached = getattr(self, "_cfg_cache", None)
         if cached is None or cached[0] != mtime:
             cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+            error = None
             try:
-                _merge(cfg, json.loads(path.read_text()))
-            except (OSError, ValueError):
+                own = json.loads(path.read_text(encoding="utf-8-sig"))
+                unknown = sorted(set(own) - set(DEFAULT_CONFIG)) if isinstance(own, dict) else []
+                _merge(cfg, own)
+                if unknown:
+                    error = f"config.json: unknown setting(s) {', '.join(unknown)}, ignored"
+            except OSError:
                 pass
+            except ValueError as e:
+                # the usual cause: a Windows path with single backslashes ("S:\Matrix\...")
+                error = (f"config.json could not be read ({e}), so every setting is at its default. "
+                         "Write Windows paths with double backslashes (\"S:\\\\Matrix\\\\IXCR_IHD\") "
+                         "or forward slashes (\"S:/Matrix/IXCR_IHD\")")
+            if error and error != self.config_error:
+                log.warning("%s", error)
+            self.config_error = error
             cached = self._cfg_cache = (mtime, json.dumps(cfg))
         return json.loads(cached[1])
 

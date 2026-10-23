@@ -1,6 +1,7 @@
 import csv
 import json
 import math
+import os
 import tempfile
 import unittest
 from datetime import date, timedelta
@@ -218,6 +219,20 @@ class TestServiceAndStore(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestConfigFile(unittest.TestCase):
+    def test_bad_json_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            cfg = Path(tmp) / "config.json"
+            cfg.write_text('{"frontarena_dir": "S:\\Matrix\\IXCR-IHD\\"}')  # as typed in Notepad
+            self.assertEqual(store.config()["frontarena_dir"], "exports/frontarena")     # defaults...
+            self.assertIn("double backslashes", store.config_error)                      # ...but said so
+            cfg.write_text('{"frontarena_dir": "S:/Matrix/IXCR_IHD", "export_dir": "x"}')
+            os.utime(cfg, (1, 1))
+            self.assertEqual(store.config()["frontarena_dir"], "S:/Matrix/IXCR_IHD")
+            self.assertIn("export_dir", store.config_error)
 
 
 class TestGroupsPrefsSpread(unittest.TestCase):

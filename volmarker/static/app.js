@@ -1740,6 +1740,12 @@ async function init() {
   app.tenors = app.me.tenors;
   $("#me").textContent = app.me.user;
   $("#datadir").textContent = app.me.data;
+  $("#datadir").title = "Exports: " + Object.entries(app.me.exports || {}).map(([k, v]) => `${k} ${v}`).join(" · ");
+  if (app.me.config_error) {
+    const w = document.createElement("span");
+    w.className = "warn"; w.textContent = " · config.json problem (hover)"; w.title = app.me.config_error;
+    $("#datadir").after(w);
+  }
   const opts = app.tenors.map((t) => `<option>${t}</option>`).join("");
   $("#sh-from").innerHTML = opts; $("#sh-to").innerHTML = opts;
   $("#sh-from").value = "1M"; $("#sh-to").value = "1Y";
