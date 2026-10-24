@@ -31,7 +31,7 @@ from .surface import (ALERT_MARKS, FOLLOW_FIELDS, apply_derivation, apply_parent
 log = logging.getLogger("volmarker")
 
 STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type",
-              "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "tenors"]
+              "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "follow_bases", "tenors"]
 LEADER_STALE = 45.0
 FEED_STALE = 15.0
 FOLLOW_STALE = 30.0
@@ -96,7 +96,7 @@ class Service:
             out.append({
                 "pair": r["pair"], "mode": r["mode"], "bases": r.get("bases"),
                 "key": r.get("key", False), "group": r.get("group"), "spread_ref": r.get("spread_ref"),
-                "follow_parent": bool(r.get("follow_parent")),
+                "follow_parent": bool(r.get("follow_parent")), "rr_put": bool(r.get("rr_put")),
                 "excel": bool(r.get("excel")), "excel_foreign": r["pair"] in self.excel_foreign,
                 "excel_error": self.excel_errors.get(r["pair"]), "version": r["version"],
                 "ts": r["ts"], "user": r["user"], "source": r.get("source"),
@@ -643,7 +643,7 @@ class Service:
             row, m = state["tenors"][t], marks[t]
             row.update(m)
             if "atm" in m:
-                if state["mode"] == "derived" and not row.get("pin"):
+                if state["mode"] == "derived":
                     row["corr"] = None                   # calibrated to the file's ATM
                 if state.get("follow_parent"):
                     row["psprd"] = None                  # spread to the parent calibrated to it

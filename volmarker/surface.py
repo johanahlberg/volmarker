@@ -13,7 +13,6 @@ file). Per tenor the trader-owned inputs are:
     bf10     10D butterfly
     corr     derived pairs only: correlation between the two base pairs
     psprd    pairs moving with their spread parent: ATM minus the parent's ATM
-    pin      derived pairs only: true = keep the typed ATM, ignore the bases
     skew_atm, skew_rr, skew_bf   quoted-only shifts (Fenics file only)
 
 Pair-level flags lock_rr10f / lock_bf10f (default True) decide which of the
@@ -26,8 +25,11 @@ Other pair-level settings: group (sidebar group, e.g. "Scandies"), spread_ref
 cut, e.g. NYC or TOK: decides which expiry an event weighs on), excel (marked
 in Excel: read from Excel's export file, never written by VolMarker), dc_factor
 (Front Arena DC spread file = ATM spread x 0.5 x factor; none below 0.01), follow_market (the feed process publishes FMD
-mids into FOLLOW_FIELDS), alert_tol (per-mark alert tolerance overrides) and
-alerts_off.
+mids into FOLLOW_FIELDS), alert_tol (per-mark alert tolerance overrides),
+alerts_off, follow_bases (derived pairs, default on: the ATMs move with the
+bases at a fixed correlation; off: the ATMs stay put and the correlation is
+recalculated as the bases move) and rr_put (favour puts: the GUI shows and takes RRs as put - call;
+stored and exported RRs stay call - put).
 
 Vols are in percentage points, as typed by the desk (7.25 means 7.25%).
 """
@@ -41,7 +43,7 @@ from .conventions import TENOR_DAYS, TENORS, normalise_pair, split_pair
 from .derived import cross_vol, implied_corr, orientation
 
 TENOR_FIELDS = ["atm", "spread", "rr25", "rr10f", "rr10", "bf25", "bf10f", "bf10",
-                "corr", "pin", "psprd", "skew_atm", "skew_rr", "skew_bf"]
+                "corr", "psprd", "skew_atm", "skew_rr", "skew_bf"]
 
 ALERT_MARKS = ["atm", "rr25", "rr10", "bf25", "bf10"]
 # fields the market follower owns on a pair with follow_market (trader keeps spread, skew, weights)
@@ -49,7 +51,7 @@ FOLLOW_FIELDS = ["atm", "rr25", "rr10f", "rr10", "bf25", "bf10f", "bf10"]
 
 DEFAULT_TENOR = {
     "atm": None, "spread": 0.5, "rr25": 0.0, "rr10f": 1.9, "rr10": None,
-    "bf25": 0.2, "bf10f": 3.3, "bf10": None, "corr": None, "pin": False, "psprd": None,
+    "bf25": 0.2, "bf10f": 3.3, "bf10": None, "corr": None, "psprd": None,
     "skew_atm": 0.0, "skew_rr": 0.0, "skew_bf": 0.0,
 }
 
@@ -96,6 +98,8 @@ def clean_state(state: dict) -> dict:
     if s["excel"] and (s["mode"] != "marked" or s["follow_market"]):
         raise ValueError("Marked in Excel: the pair must be Marked and not follow FMD")
     s["alerts_off"] = bool(s.get("alerts_off"))
+    s["rr_put"] = bool(s.get("rr_put"))
+    s["follow_bases"] = s.get("follow_bases") is not False
     s["group"] = " ".join(str(s.get("group") or "").split())[:40] or None
     s["follow_parent"] = bool(s.get("follow_parent"))
     if s["follow_parent"] and (not s["spread_ref"] or s["mode"] != "marked" or s["follow_market"] or s.get("excel")):
@@ -131,10 +135,7 @@ def clean_state(state: dict) -> dict:
         row = dict(DEFAULT_TENOR)
         row.update((s.get("tenors") or {}).get(t, {}))
         for f in TENOR_FIELDS:
-            if f == "pin":
-                row[f] = bool(row[f])
-            else:
-                row[f] = _num(row[f])
+            row[f] = _num(row[f])
         for f in ("spread", "rr25", "rr10f", "bf25", "bf10f",
                   "skew_atm", "skew_rr", "skew_bf"):
             if row[f] is None:
@@ -176,8 +177,8 @@ def apply_derivation(state: dict, base_states: dict[str, dict]) -> tuple[dict, l
     """Compute ATM (or implied corr) of a derived state from its bases.
 
     For each tenor:
-      * pin = True:  ATM is kept as typed; corr is set to the implied value
-                     (shown for information).
+      * follow_bases off: ATM is kept as typed; corr is set to the implied
+                     value (shown for information).
       * corr set:    ATM = triangle(base ATMs, corr).
       * corr unset but ATM typed: corr is calibrated to the ATM.
     Returns (new_state, warnings).
@@ -187,6 +188,7 @@ def apply_derivation(state: dict, base_states: dict[str, dict]) -> tuple[dict, l
     if s["mode"] != "derived":
         return s, warnings
     b1, b2 = s["bases"]
+    hold = s.get("follow_bases") is False
     s1, s2 = orientation(s["pair"], b1, b2)
     st1, st2 = base_states.get(b1), base_states.get(b2)
     if st1 is None or st2 is None:
@@ -198,7 +200,7 @@ def apply_derivation(state: dict, base_states: dict[str, dict]) -> tuple[dict, l
         if v1 is None or v2 is None:
             warnings.append(f"{t}: base ATM missing")
             continue
-        if row["pin"] or (row["corr"] is None and row["atm"] is not None):
+        if hold or (row["corr"] is None and row["atm"] is not None):
             if row["atm"] is not None:
                 rho = implied_corr(row["atm"], v1, v2, s1, s2)
                 if not -1 <= rho <= 1:
@@ -245,7 +247,6 @@ def calibrate(state: dict, base_states: dict[str, dict], targets: dict[str, floa
     for t, target in targets.items():
         s["tenors"][t]["atm"] = float(target)
         s["tenors"][t]["corr"] = None
-        s["tenors"][t]["pin"] = False
     s, _ = apply_derivation(s, base_states)
     s, _ = apply_derivation(s, base_states)  # second pass turns corr into ATM
     return s

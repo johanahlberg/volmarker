@@ -5,10 +5,17 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type", "lock_rr10f", "lock_bf10f",
-  "follow_market", "alert_tol", "alerts_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "tenors"];
+  "follow_market", "alert_tol", "alerts_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "follow_bases", "tenors"];
 const MKT_FIELDS = { atm: "atm", rr25: "rr25", rr10: "rr10", bf25: "bf25", bf10: "bf10" };
 const FOLLOW_FIELDS = ["atm", "rr25", "rr10f", "rr10", "bf25", "bf10f", "bf10"];   // owned by the feed on Follow FMD pairs
 const MARK_LABEL = { atm: "ATM", rr25: "25D RR", rr10: "10D RR", bf25: "25D BF", bf10: "10D BF" };
+// favour puts (pair setting rr_put): the GUI shows and takes RRs as put − call; stored and exported RRs stay call − put
+const RR_FIELDS = ["rr25", "rr10", "skew_rr"];
+function rrSign(f, put = app.draft?.rr_put) { return put && RR_FIELDS.includes(f) ? -1 : 1; }
+function rrFlip(q) {               // a call − put quote in put − call terms: bid and offer swap
+  const neg = (v) => (v == null ? v : -v);
+  return { ...q, bid: neg(q.offer), offer: neg(q.bid), mid: neg(q.mid) };
+}
 const DEFAULT_WEIGHTS = { weekdays: [1, 1, 1, 1, 1, 0, 0], holiday1: 0.4, holiday2: 0.4, events: [] };
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 function normaliseWeights(w) {     // as calendar.normalise_weights: old weekend1/weekend2 -> weekday weights
@@ -240,7 +247,8 @@ function pick(rec) {
   s.weights = normaliseWeights(s.weights);
   for (const k of ["lock_rr10f", "lock_bf10f"]) s[k] = s[k] === null ? true : !!s[k];
   s.atm_type = s.atm_type || "DNS";
-  s.follow_market = !!s.follow_market; s.alerts_off = !!s.alerts_off;
+  s.follow_market = !!s.follow_market; s.alerts_off = !!s.alerts_off; s.rr_put = !!s.rr_put;
+  s.follow_bases = s.follow_bases !== false;
   for (const r of Object.values(s.tenors)) {   // records from before the 10D values were stored
     if (r.rr10 == null) r.rr10 = r.rr25 * r.rr10f;
     if (r.bf10 == null) r.bf10 = r.bf25 * r.bf10f;
@@ -251,18 +259,17 @@ function pick(rec) {
 // ---------------------------------------------------------------- grid
 const COLS = [
   { f: "corr", label: "Corr", dp: 3, derived: true, group: "" },
-  { f: "pin", label: "Pin", derived: true, check: true },
   { f: "atm", label: "ATM", dp: 3, group: "ATM", sep: true },
   { f: "psprd", label: "vs", dp: 3, parentCol: true },
   { f: "spread", label: "Spread", dp: 2 },
   { calc: (r) => r.quoted.atm_bid, label: "Bid", dp: 3, q: true, title: "Fenics ATM bid (incl. skew)" },
   { calc: (r) => r.quoted.atm_offer, label: "Offer", dp: 3, q: true, title: "Fenics ATM offer (incl. skew)" },
-  { f: "rr25", label: "25D", dp: 3, group: "Risk reversal", sep: true },
-  { f: "rr10f", label: "10D fac", dp: 3, lock: "lock_rr10f", role: "factor" },
+  { f: "rr25", label: "25D", dp: 3, group: "Risk reversal", sep: true, groupToggle: true },
   { f: "rr10", label: "10D", dp: 3, lock: "lock_rr10f", role: "tenD" },
+  { f: "rr10f", label: "10D fac", dp: 3, lock: "lock_rr10f", role: "factor" },
   { f: "bf25", label: "25D", dp: 3, group: "Butterfly", sep: true },
-  { f: "bf10f", label: "10D fac", dp: 3, lock: "lock_bf10f", role: "factor" },
   { f: "bf10", label: "10D", dp: 3, lock: "lock_bf10f", role: "tenD" },
+  { f: "bf10f", label: "10D fac", dp: 3, lock: "lock_bf10f", role: "factor" },
   { f: "skew_atm", label: "ATM", dp: 2, group: "Skew → Fenics only", sep: true, skew: true },
   { f: "skew_rr", label: "RR", dp: 2, skew: true },
   { f: "skew_bf", label: "BF", dp: 2, skew: true },
@@ -275,10 +282,13 @@ function buildGrid() {
   const cols = visibleCols();
   const groups = [];
   for (const c of cols) {
-    if (c.group !== undefined || !groups.length) groups.push({ label: c.group || "", n: 1, sep: c.sep });
+    if (c.group !== undefined || !groups.length) groups.push({ label: c.group || "", n: 1, sep: c.sep, toggle: c.groupToggle });
     else groups[groups.length - 1].n++;
   }
-  let h = `<thead><tr><th class="tn"></th>${groups.map((g) => `<th class="grp" colspan="${g.n}">${esc(g.label)}</th>`).join("")}</tr>`;
+  const putTitle = "Favour puts (this pair, for everyone): RRs are shown and typed as put − call.\nExports and FMD stay call − put.";
+  let h = `<thead><tr><th class="tn"></th>${groups.map((g) => `<th class="grp" colspan="${g.n}">` + (g.toggle ?
+    `<span id="rr-head">${esc(g.label)}</span><label class="lock put" title="${esc(putTitle)}"><input type="checkbox" data-lock="rr_put"> favour puts</label>` :
+    esc(g.label)) + `</th>`).join("")}</tr>`;
   const lockTitle = "Ticked: type the factor; 10D = 25D × factor (10D locked).\nUnticked: type the 10D quote; factor = 10D / 25D.";
   h += `<tr><th class="tn">Tenor</th>${cols.map((c) => `<th class="${c.sep ? "sep" : ""}" title="${esc(c.title || "")}">` +
     (c.role === "factor" ? `<label class="lock" title="${esc(lockTitle)}"><input type="checkbox" data-lock="${c.lock}"> lock</label>` : "") +
@@ -287,8 +297,7 @@ function buildGrid() {
     h += `<tr data-t="${t}"><td class="tn">${t}</td>`;
     cols.forEach((c, i) => {
       const cls = c.sep ? "sep" : "";
-      if (c.check) h += `<td class="pin ${cls}"><input type="checkbox" data-t="${t}" data-f="${c.f}" title="Keep the typed ATM fixed; ignore the bases"></td>`;
-      else if (c.calc) h += `<td class="calc ${c.q ? "q" : ""} ${cls}" data-t="${t}" data-c="${i}"></td>`;
+      if (c.calc) h += `<td class="calc ${c.q ? "q" : ""} ${cls}" data-t="${t}" data-c="${i}"></td>`;
       else {
         const mk = MKT_FIELDS[c.f];
         h += `<td class="${cls}${mk ? " mk" : ""}"${mk ? ` data-t="${t}" data-m="${mk}"` : ""}><input class="cell${c.skew ? " skew" : ""}" data-t="${t}" data-f="${c.f}" inputmode="decimal" autocomplete="off" ${c.skew ? 'placeholder=" "' : ""}>` +
@@ -315,31 +324,36 @@ function renderGrid() {
     el.checked = !!app.draft[k];
     el.parentElement.classList.toggle("dirty", app.draft[k] !== app.published[k]);
   }
+  $("#rr-head").textContent = app.draft.rr_put ? "Risk reversal (put − call)" : "Risk reversal";
   for (const el of $$("#grid tbody input")) {
     const t = el.dataset.t, f = el.dataset.f;
     if (f === "psprd") { renderParentCell(el, t); continue; }
-    const v = app.draft.tenors[t][f];
-    const changed = !same(v, publishedRow(t)[f]);
-    if (el.type === "checkbox") { el.checked = !!v; el.parentElement.classList.toggle("dirty", changed); continue; }
+    const v = app.draft.tenors[t][f], pub = publishedRow(t)[f];
+    const changed = !same(v, pub);
     const col = cols.find((c) => c.f === f);
-    if (document.activeElement !== el) el.value = col.skew && !v ? "" : fmt(v, col.dp);
+    if (document.activeElement !== el) el.value = col.skew && !v ? "" : fmt(v == null ? v : rrSign(f) * v, col.dp);
     el.classList.toggle("dirty", changed);
+    // ATM, RR and BF: green above the published value, red below (as shown, so in put − call on favour-puts pairs)
+    const dir = changed && MKT_FIELDS[f] && v != null && pub != null ? Math.sign(rrSign(f) * (v - pub)) : 0;
+    el.classList.toggle("up", dir > 0); el.classList.toggle("down", dir < 0);
     const xl = !!app.draft.excel && (FOLLOW_FIELDS.includes(f) || f === "spread");
     const fol = (app.draft.follow_market && FOLLOW_FIELDS.includes(f)) || xl;
-    if (col.lock || fol || el.readOnly) {
+    const held = f === "corr" && !app.draft.follow_bases;
+    if (col.lock || fol || held || el.readOnly) {
       const lockRo = !!col.lock && (col.role === "factor") !== !!app.draft[col.lock];
-      const ro = fol || lockRo;
+      const ro = fol || lockRo || held;
       el.readOnly = ro; el.tabIndex = ro ? -1 : 0;
       el.classList.toggle("ro", ro);
       el.title = xl ? "Marked in Excel: read from its export file (untick Marked in Excel in Setup to mark here)" :
+        held ? "Implied by the ATM and the bases (tick Move with bases in Setup to keep the correlation instead)" :
         fol ? "Follows FMD: published by the feed (untick Follow FMD in Setup to mark by hand)" :
         lockRo ? (col.role === "factor" ? "Calibrated from the 10D quote (untick lock to edit)" : "25D × factor (untick lock to type the 10D)") : "";
     }
     el.classList.toggle("follow", fol);
-    if (f === "atm") el.classList.toggle("derived", (app.draft.mode === "derived" && !app.draft.tenors[t].pin) || !!app.draft.follow_parent);
+    if (f === "atm") el.classList.toggle("derived", (app.draft.mode === "derived" && app.draft.follow_bases) || !!app.draft.follow_parent);
     if (f === "atm" && app.draft.follow_parent) el.title = `Moves with ${app.draft.spread_ref}: ATM = ${app.draft.spread_ref} + spread. Type an ATM to recalibrate the spread`;
     if (f === "atm" && app.draft.mode === "derived") {
-      el.title = app.draft.tenors[t].pin ? "Pinned: kept as typed" : "Derived from bases; type a value to calibrate the correlation";
+      el.title = app.draft.follow_bases ? "Moves with the bases; type a value to calibrate the correlation" : "Kept as typed while the bases move; the correlation follows";
     }
   }
   for (const td of $$("#grid td.calc")) {
@@ -366,7 +380,6 @@ function renderParentCell(el, t) {
 }
 function onCellInput(el) {
   const t = el.dataset.t, f = el.dataset.f, row = app.draft.tenors[t];
-  if (el.type === "checkbox") { row[f] = el.checked; return changed(); }
   const txt = el.value.trim();
   const v = txt === "" ? null : Number(txt);
   if (txt !== "" && !Number.isFinite(v)) { el.classList.add("dirty"); return; }
@@ -377,14 +390,14 @@ function onCellInput(el) {
     if (app.draft.follow_parent) app.draft.tenors[t].psprd = v;      // kept when the parent moves
     return changed();
   }
-  setDraftValue(t, f, v);
+  setDraftValue(t, f, v === null ? v : rrSign(f) * v);
   changed();
 }
 function setDraftValue(t, f, v) {
   const row = app.draft.tenors[t];
   if (f === "atm" && app.draft.follow_parent) {
     row.atm = v; row.psprd = null;         // calibrate the spread to the parent to this ATM
-  } else if (f === "atm" && app.draft.mode === "derived" && !row.pin) {
+  } else if (f === "atm" && app.draft.mode === "derived" && app.draft.follow_bases) {
     row.atm = v; row.corr = null;          // calibrate correlation to this ATM
   } else if (f === "corr") {
     row.corr = v;
@@ -488,7 +501,7 @@ async function loadExportFile() {
   if (app.dirty && !confirmDiscard()) return;
   let r;
   try { r = await api(`/api/pairs/${app.current}/load-export`, { state: app.draft }); }
-  catch (e) { showBanner(`Load FA file: ${esc(e.message)}`, [["OK", () => hideBanner()]], "error"); return; }
+  catch (e) { showBanner(`Last export: ${esc(e.message)}`, [["OK", () => hideBanner()]], "error"); return; }
   app.draft = pick(r.state);
   const at = localTime(new Date(r.mtime * 1000).toISOString());
   $("#comment").value = `From ${r.file} (${at})`;
@@ -567,14 +580,15 @@ function mktQuote(t, m) {
 function renderMarket() {
   const res = app.preview.resolved;
   for (const td of $$("#grid td.mk")) {
-    const t = td.dataset.t, m = td.dataset.m, q = mktQuote(t, m), el = $(".mq", td);
+    const t = td.dataset.t, m = td.dataset.m, sg = rrSign(m), mq = mktQuote(t, m), el = $(".mq", td);
     td.classList.remove("out");
-    if (!q) { el.textContent = ""; el.title = ""; continue; }
+    if (!mq) { el.textContent = ""; el.title = ""; continue; }
+    const q = sg < 0 ? rrFlip(mq) : mq;
     const two = (v) => (v == null ? "–" : (Math.abs(v) < 0.005 ? 0 : v).toFixed(2));
     el.textContent = q.bid != null || q.offer != null ? `${two(q.bid)} / ${two(q.offer)}` : `mid ${two(q.mid)}`;
     if (q.alt_atm) el.textContent += "*";
     el.classList.toggle("stale", !!q.stale);
-    const v = res[t].mid[m];
+    const v = res[t].mid[m] == null ? null : sg * res[t].mid[m];
     let side = "";
     if (v != null && q.bid != null && v < q.bid - 1e-9) side = `below bid by ${(q.bid - v).toFixed(3)}`;
     if (v != null && q.offer != null && v > q.offer + 1e-9) side = `above offer by ${(v - q.offer).toFixed(3)}`;
@@ -584,14 +598,14 @@ function renderMarket() {
     el.title = `${q.brand}${q.ptype ? " " + q.ptype : ""} · mid ${fmt(q.mid, 3)}` +
       (q.age_min != null ? ` · ${age(q.age_min)} old` : "") + (q.alt_atm ? ` · *other ATM convention than ${app.draft.atm_type}` : "") +
       (side ? `\nYour mark is ${side}` : "") +
-      (al ? `\nALERT since ${localTime(al.since)}: published ${fmt(al.value, 2)} vs FMD ${fmt(al.mkt, 2)} (${al.dev > 0 ? "+" : ""}${fmt(al.dev, 2)}, tol ${fmt(al.tol, 2)})` : "") +
+      (al ? `\nALERT since ${localTime(al.since)}: published ${fmt(sg * al.value, 2)} vs FMD ${fmt(sg * al.mkt, 2)} (${sg * al.dev > 0 ? "+" : ""}${fmt(sg * al.dev, 2)}, tol ${fmt(al.tol, 2)})` : "") +
       (app.draft.follow_market ? "" : "\nClick to set the draft to the broker mid");
   }
 }
 function setFromMarket(t, m, v, force = false) {
   const row = app.draft.tenors[t];
   if (v == null || ((app.draft.follow_market || app.draft.excel) && !force)) return;
-  if (m === "atm") { row.atm = v; if (app.draft.mode === "derived" && !row.pin) row.corr = null; }
+  if (m === "atm") { row.atm = v; if (app.draft.mode === "derived" && app.draft.follow_bases) row.corr = null; }
   else if (m === "rr10" || m === "bf10") {
     const w = m.slice(0, 2);
     row[m] = v;                                     // the 10D quote itself (input when unlocked or following FMD)
@@ -617,7 +631,7 @@ function renderFollow() {
     bar.className = "followbar held";
     bar.innerHTML = "<b>The export file was changed outside VolMarker</b> (Excel?). Load it into the draft to take those marks over, " +
       "or tick Marked in Excel in Setup if Excel keeps marking this pair. ";
-    const btn = document.createElement("button"); btn.textContent = "Load FA file"; btn.onclick = loadExportFile;
+    const btn = document.createElement("button"); btn.textContent = "Last export"; btn.onclick = loadExportFile;
     bar.appendChild(btn); bar.hidden = false;
     return;
   }
@@ -637,7 +651,7 @@ function renderFollow() {
         (f.waiting ? " · next publish due (throttled)" : "");
     if (h !== "down" && f.missing) html += ` · <span title="${esc((f.missing_list || []).join(", "))}">${f.missing} mark(s) without a fresh FMD quote keep their last value</span>`;
     for (const j of (h !== "down" && f.held) || [])
-      html += `<br>Held: ${j.tenor} ${MARK_LABEL[j.mark]} ${fmt(j.from, 2)} → ${fmt(j.to, 2)}, taken in ${j.accept_in}s unless it reverts`;
+      html += `<br>Held: ${j.tenor} ${MARK_LABEL[j.mark]}${rrSign(j.mark) < 0 ? " (P−C)" : ""} ${fmt(rrSign(j.mark) * j.from, 2)} → ${fmt(rrSign(j.mark) * j.to, 2)}, taken in ${j.accept_in}s unless it reverts`;
     html += " · You keep spread, skew and event weights.";
   }
   bar.className = "followbar " + cls; bar.innerHTML = html;
@@ -1253,11 +1267,11 @@ function renderDailies() {
     yLabel: "Forward vol per daily expiry",
   });
   const f2 = (v) => (v == null ? "" : fmt(Math.abs(v) < 0.005 ? 0 : v, 2));
-  $("#dl-table").innerHTML = `<thead><tr><th class="tn">Expiry</th><th class="tn">Day</th><th>Mkt ATM</th><th>Your ATM</th><th>Mkt fwd</th><th>Your fwd</th><th>RR25</th><th>BF25</th><th>Implied event</th><th>Your event</th><th class="tn">Events</th></tr></thead><tbody>` +
+  $("#dl-table").innerHTML = `<thead><tr><th class="tn">Expiry</th><th class="tn">Day</th><th>Mkt ATM</th><th>Your ATM</th><th>Mkt fwd</th><th>Your fwd</th><th>RR25${rrSign("rr25") < 0 ? " P−C" : ""}</th><th>BF25</th><th>Implied event</th><th>Your event</th><th class="tn">Events</th></tr></thead><tbody>` +
     rows.map((r) => {
       const diff = Math.abs(r.implied_event - r.current_event) >= 0.1;
       return `<tr><td class="tn">${r.n}D</td><td class="tn">${r.weekday} ${r.date}</td><td>${f2(r.mkt_atm)}</td><td>${f2(r.model_atm)}</td>
-        <td>${f2(r.mkt_fwd)}</td><td>${f2(r.model_fwd)}</td><td>${f2(r.rr25)}</td><td>${f2(r.bf25)}</td>
+        <td>${f2(r.mkt_fwd)}</td><td>${f2(r.model_fwd)}</td><td>${f2(r.rr25 == null ? null : rrSign("rr25") * r.rr25)}</td><td>${f2(r.bf25)}</td>
         <td${diff ? ' style="color:var(--critical);font-weight:600"' : ""}>${f2(r.implied_event)}</td><td>${f2(r.current_event)}</td>
         <td class="tn">${esc(r.labels.join(", "))}</td></tr>`;
     }).join("") + "</tbody>";
@@ -1323,6 +1337,7 @@ function renderSetup() {
   if (document.activeElement !== $("#su-dc")) $("#su-dc").value = d.dc_factor == null ? "" : fmt(d.dc_factor, 2);
   $("#su-atm").value = d.atm_type || "DNS";
   $$(".su-derived").forEach((el) => (el.hidden = d.mode !== "derived"));
+  $("#su-follow-bases").checked = d.follow_bases !== false;
   $("#su-follow").checked = !!d.follow_market;
   $("#su-follow").disabled = d.mode !== "marked" || !!d.excel;
   $("#su-excel").checked = !!d.excel;
@@ -1353,13 +1368,14 @@ function onSetupChange() {
     if (!bases[0] || !bases[1]) { $$(".su-derived").forEach((el) => (el.hidden = false)); return; }
     if (d.mode !== "derived" || String(d.bases) !== String(bases)) {
       // calibrate correlations to the current ATMs
-      for (const t of app.tenors) { d.tenors[t].corr = null; d.tenors[t].pin = false; }
+      for (const t of app.tenors) d.tenors[t].corr = null;
     }
     d.bases = bases;
   } else {
     d.bases = null;
-    for (const t of app.tenors) { d.tenors[t].corr = null; d.tenors[t].pin = false; }
+    for (const t of app.tenors) d.tenors[t].corr = null;
   }
+  d.follow_bases = mode !== "derived" || $("#su-follow-bases").checked;
   const rebuild = d.mode !== mode;
   d.mode = mode;
   const follow = mode === "marked" && $("#su-follow").checked;
@@ -1493,7 +1509,8 @@ function alertSort(a, b) {
 }
 function alertText(a) {
   if (a.kind !== "market") return a.msg;
-  return `${a.tenor} ${MARK_LABEL[a.mark]}: ours ${fmt(a.value, 2)}, FMD ${fmt(a.mkt, 2)} (${a.dev > 0 ? "+" : ""}${fmt(a.dev, 2)}, tol ${fmt(a.tol, 2)})`;
+  const put = a.pair === app.current ? app.draft?.rr_put : app.pairs.find((p) => p.pair === a.pair)?.rr_put, sg = rrSign(a.mark, put);
+  return `${a.tenor} ${MARK_LABEL[a.mark]}${sg < 0 ? " (P−C)" : ""}: ours ${fmt(sg * a.value, 2)}, FMD ${fmt(sg * a.mkt, 2)} (${sg * a.dev > 0 ? "+" : ""}${fmt(sg * a.dev, 2)}, tol ${fmt(a.tol, 2)})`;
 }
 function renderAlerts() {
   const list = [...app.alerts].sort(alertSort);
@@ -1565,13 +1582,12 @@ function wire() {
   const grid = $("#grid");
   grid.addEventListener("input", (e) => { if (e.target.matches("input.cell")) onCellInput(e.target); });
   grid.addEventListener("change", (e) => {
-    if (e.target.type === "checkbox" && e.target.dataset.t) onCellInput(e.target);
-    else if (e.target.matches("input.cell")) renderGrid();
+    if (e.target.matches("input.cell")) renderGrid();
   });
   grid.addEventListener("change", (e) => {
     if (!e.target.dataset.lock) return;
     app.draft[e.target.dataset.lock] = e.target.checked;
-    changed(); renderGrid();
+    changed(); renderGrid(); renderMarket();
   });
   grid.addEventListener("focusin", (e) => { if (e.target.matches("input.cell")) e.target.select(); });
   grid.addEventListener("focusout", () => setTimeout(renderGrid, 0));
@@ -1648,8 +1664,8 @@ function wire() {
       if (f === "corr") { if (row.corr !== null) row.corr = Math.max(-1, Math.min(1, row.corr + amt)); continue; }
       if (row[f] === null) continue;
       if ((f === "rr10" && app.draft.lock_rr10f) || (f === "bf10" && app.draft.lock_bf10f)) continue;
-      row[f] = Math.round((row[f] + amt) * 1e6) / 1e6;
-      if (f === "atm" && app.draft.mode === "derived" && !row.pin) row.corr = null;
+      row[f] = Math.round((row[f] + rrSign(f) * amt) * 1e6) / 1e6;      // amounts in the RR convention shown
+      if (f === "atm" && app.draft.mode === "derived" && app.draft.follow_bases) row.corr = null;
     }
     changed(); renderGrid();
   };
@@ -1681,7 +1697,7 @@ function wire() {
   }));
 
   // setup
-  ["#su-mode", "#su-b1", "#su-b2", "#su-key", "#su-group", "#su-spref", "#su-cut", "#su-dc", "#su-atm", "#su-follow", "#su-excel", "#su-follow-parent", "#su-alerts-off"].forEach((id) => $(id).addEventListener("change", onSetupChange));
+  ["#su-mode", "#su-b1", "#su-b2", "#su-key", "#su-group", "#su-spref", "#su-cut", "#su-dc", "#su-atm", "#su-follow", "#su-excel", "#su-follow-parent", "#su-follow-bases", "#su-alerts-off"].forEach((id) => $(id).addEventListener("change", onSetupChange));
   $("#su-tol").addEventListener("change", (e) => {
     const m = e.target.dataset.m; if (!m) return;
     const txt = e.target.value.trim(), v = Number(txt);

@@ -181,6 +181,50 @@ class TestServiceAndStore(unittest.TestCase):
         bid, ask = (float(x) for x in next(l for l in lines if l.startswith("vol,EUR,CHF,1mo,")).split(",")[4:6])
         self.assertAlmostEqual((bid + ask) / 2, ec["tenors"]["1M"]["atm"], places=9)
 
+    def test_derived_held_off_bases(self):
+        self._marked(self.a, "EURUSD", 7.0)
+        self._marked(self.a, "USDCHF", 7.5)
+        self.a.create_pair("EURCHF", "derived", ["EURUSD", "USDCHF"], False)
+        cur = self.store.latest("EURCHF")
+        self.assertTrue(cur["follow_bases"])                   # default: moves with the bases
+        st = calibrate(cur, {b: self.store.latest(b) for b in ("EURUSD", "USDCHF")},
+                       {t: 4.5 for t in TENORS})
+        st["follow_bases"] = False
+        self.a.publish("EURCHF", st, cur["version"], "held")
+        rho = self.store.latest("EURCHF")["tenors"]["1M"]["corr"]
+
+        self.a.publish("EURUSD", flat_state("EURUSD", 8.0), expected_version=2)
+        ec = self.store.latest("EURCHF")
+        self.assertAlmostEqual(ec["tenors"]["1M"]["atm"], 4.5)  # ATM stays
+        new_rho = ec["tenors"]["1M"]["corr"]
+        self.assertNotAlmostEqual(new_rho, rho)                 # correlation follows the bases
+        self.assertAlmostEqual(cross_vol(8.0, 7.5, new_rho, 1, 1), 4.5, places=6)
+
+        ec["follow_bases"] = True                              # back on: runs off the bases from here
+        self.a.publish("EURCHF", ec, ec["version"])
+        self.a.publish("EURUSD", flat_state("EURUSD", 7.0), expected_version=3)
+        ec = self.store.latest("EURCHF")
+        self.assertAlmostEqual(ec["tenors"]["1M"]["corr"], new_rho)
+        self.assertAlmostEqual(ec["tenors"]["1M"]["atm"], cross_vol(7.0, 7.5, new_rho, 1, 1), places=5)
+
+    def test_favour_puts_is_display_only(self):
+        self._marked(self.a, "USDJPY", 9.0)
+        root = Path(self.tmp.name) / "exports"
+        files = lambda: [(root / d / "USDJPYvolsurface.txt").read_text() for d in ("frontarena", "fenics")]
+        st = self.store.latest("USDJPY")
+        for t in TENORS:
+            st["tenors"][t]["rr25"] = -1.2
+        self.a.publish("USDJPY", st, st["version"])
+        before = files()
+        st = self.store.latest("USDJPY")
+        st["rr_put"] = True
+        self.a.publish("USDJPY", st, st["version"])
+        rec = self.store.latest("USDJPY")
+        self.assertTrue(rec["rr_put"])
+        self.assertEqual(rec["tenors"]["1M"]["rr25"], -1.2)       # stored call - put
+        self.assertEqual(files(), before)
+        self.assertTrue(next(p for p in self.a.summaries() if p["pair"] == "USDJPY")["rr_put"])
+
     def test_skew_goes_to_fenics_only_and_expires(self):
         self._marked(self.a, "EURUSD", 7.0)
         st = self.store.latest("EURUSD")

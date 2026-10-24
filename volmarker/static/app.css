@@ -18,6 +18,8 @@
   --s5: #e87ba4;   /* broker market */
   --dirty: #fff1c9;
   --dirty-ink: #6b4a00;
+  --up: #d9f2d9; --up-ink: #0b5e0b;
+  --down: #fbdcdc; --down-ink: #8a1f1f;
   --calc: #f3f2ee;
   --good: #0ca30c;
   --warning: #fab219;
@@ -31,6 +33,7 @@
     --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, 0.10);
     --accent: #3987e5; --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
     --dirty: #3d3110; --dirty-ink: #ffd77a; --calc: #151514;
+    --up: #133d16; --up-ink: #8fe39a; --down: #45191a; --down-ink: #ffa3a3;
   }
 }
 :root[data-theme="dark"] {
@@ -39,6 +42,7 @@
   --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, 0.10);
   --accent: #3987e5; --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
   --dirty: #3d3110; --dirty-ink: #ffd77a; --calc: #151514;
+  --up: #133d16; --up-ink: #8fe39a; --down: #45191a; --down-ink: #ffa3a3;
 }
 
 * { box-sizing: border-box; }
@@ -131,6 +135,7 @@ main { flex: 1; overflow: auto; padding: 14px 18px 30px; min-width: 0; }
 .tabs button.active { border-bottom-color: var(--accent); color: var(--ink); font-weight: 600; }
 
 .toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.toolbar-row { flex-basis: 100%; display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
 .lbl { color: var(--muted); font-size: 12px; }
 
 .gridwrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
@@ -147,6 +152,8 @@ table.grid { border-collapse: collapse; width: 100%; font-variant-numeric: tabul
   padding: 5px 8px; font-family: var(--mono);
 }
 .grid input.cell.dirty { background: var(--dirty); color: var(--dirty-ink); font-weight: 600; }
+.grid input.cell.dirty.up { background: var(--up); color: var(--up-ink); }
+.grid input.cell.dirty.down { background: var(--down); color: var(--down-ink); }
 .grid input.cell.skew:not(:placeholder-shown) { color: var(--s2); }
 .grid input.cell.derived:not(.dirty) { color: var(--s1); }
 .grid input.cell.ro { background: var(--calc); color: var(--ink-2); cursor: default; }
@@ -154,7 +161,7 @@ table.grid { border-collapse: collapse; width: 100%; font-variant-numeric: tabul
 .grid th label.lock { display: flex; align-items: center; justify-content: flex-end; gap: 3px; font-weight: 500; color: var(--muted); cursor: pointer; margin-bottom: 2px; }
 .grid th label.lock.dirty { color: var(--dirty-ink); background: var(--dirty); border-radius: 3px; }
 .grid th label.lock input { margin: 0; }
-.grid td.pin { text-align: center; }
+.grid th.grp label.lock.put { display: inline-flex; margin: 0 0 0 10px; vertical-align: middle; }
 .grid.small td { padding: 5px 8px; }
 .grid.small input { width: 100%; }
 .grid tr:hover td { background-image: linear-gradient(rgba(127,127,127,.06), rgba(127,127,127,.06)); }

@@ -36,7 +36,7 @@
         </div>
         <div class="spacer"></div>
         <input id="comment" type="text" placeholder="Comment (optional)">
-        <button id="load-fa" class="ghost" title="Load the marks of the pair's current Front Arena export file (e.g. written by Excel) into the draft">Load FA file</button>
+        <button id="load-fa" class="ghost" title="Load the marks of the pair's current Front Arena export file (e.g. written by Excel) into the draft">Last export</button>
         <button id="discard" class="ghost" disabled>Discard</button>
         <button id="publish" class="primary" disabled title="Ctrl/Cmd+S">Publish</button>
       </div>
@@ -65,10 +65,12 @@
           <div class="spacer"></div>
           <label class="check"><input id="mkt-show" type="checkbox" checked> Market</label>
           <select id="mkt-brand" title="Broker source"><option value="auto">Auto (FMD first)</option><option value="best">Best of brands</option></select>
-          <span class="lbl">Skew exp.</span>
-          <input id="skew-exp" type="datetime-local">
-          <button id="skew-eod" class="ghost" title="Expire skew at 17:00 today">EOD</button>
-          <button id="skew-clear" class="ghost" title="Zero all skews">Clear</button>
+          <div class="toolbar-row">
+            <span class="lbl">Skew expiry</span>
+            <input id="skew-exp" type="datetime-local">
+            <button id="skew-eod" class="ghost" title="Expire skew at 17:00 today">EOD</button>
+            <button id="skew-clear" class="ghost" title="Zero all skews">Clear</button>
+          </div>
         </div>
         <div class="gridwrap"><table id="grid" class="grid"></table></div>
         <div class="below">
@@ -199,6 +201,7 @@
           </label>
           <label class="su-derived">Base 1 <select id="su-b1"></select></label>
           <label class="su-derived">Base 2 <select id="su-b2"></select></label>
+          <label class="check su-indent su-derived"><input id="su-follow-bases" type="checkbox"><span><b>Move with bases</b>: keep the correlation per tenor; every publish of a base moves this pair's ATMs (typing an ATM recalibrates that tenor's correlation). Untick to keep the ATMs where they are; the correlation then follows the bases</span></label>
           <label title="Front Arena DC spread file: ATM spread × 0.5 × factor per tenor. Empty or below 0.01: no file (as in the Excel workbook)">DC spread factor <input id="su-dc" class="num" inputmode="decimal" placeholder="none"></label>
           <label>Expiry cut <select id="su-cut" title="Events released after the cut weigh on the next expiry"></select></label>
           <label title="Shows a column next to ATM with this pair's ATM minus the parent's ATM. Type either the ATM or the spread.">Spread parent <select id="su-spref"></select></label>
@@ -217,7 +220,7 @@
             <label class="check"><input id="su-alerts-off" type="checkbox"> Mute market alerts for this pair</label>
           </div>
           <p class="muted">These changes are saved to the draft. Click <b>Publish</b> to apply them.<br>
-          Derived: ATM = triangle(base ATMs, correlation). Type an ATM on a derived pair to calibrate the correlation to it. Tick <i>pin</i> to keep a typed ATM fixed while the bases move.
+          Derived: ATM = triangle(base ATMs, correlation). Type an ATM on a derived pair to calibrate the correlation to it. Untick <i>Move with bases</i> to keep the ATMs fixed while the bases move.
           The correlation is between the two base pairs as quoted (e.g. EURUSD vs USDCHF is typically negative).</p>
         </div>
       </div>
