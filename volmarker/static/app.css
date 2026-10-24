@@ -122,7 +122,8 @@ main { flex: 1; overflow: auto; padding: 14px 18px 30px; min-width: 0; }
 .empty { color: var(--muted); padding: 40px; text-align: center; }
 .pairhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .pairhead h1 { margin: 0; font-size: 22px; font-family: var(--mono); }
-#comment { width: 220px; }
+#comment { flex: 0 1 220px; min-width: 110px; }
+#ph-sub { flex-basis: 100%; margin-top: -6px; }   /* own row under the name and the buttons, full width */
 
 .banner {
   margin: 10px 0; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--warning);
@@ -135,6 +136,8 @@ main { flex: 1; overflow: auto; padding: 14px 18px 30px; min-width: 0; }
 .tabs button.active { border-bottom-color: var(--accent); color: var(--ink); font-weight: 600; }
 
 .toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.setup .su-save { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.grid.small input.tq { width: 64px; text-align: right; font-family: var(--mono); }
 .toolbar-row { flex-basis: 100%; display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
 .lbl { color: var(--muted); font-size: 12px; }
 
@@ -257,9 +260,6 @@ p.small { font-size: 12px; margin: 6px 0 0; }
 .followbar.held { border-left-color: var(--warning); }
 
 /* weights tab */
-.wgrid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 12px; }
-.wgrid .card { margin-bottom: 12px; }
-@media (max-width: 1200px) { .wgrid { grid-template-columns: 1fr; } }
 .gridwrap.tall { max-height: 340px; overflow-y: auto; }
 .grid tr.ev-default td { color: var(--ink-2); }
 .grid input.ovr { background: var(--dirty); color: var(--dirty-ink); }

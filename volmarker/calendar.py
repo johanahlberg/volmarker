@@ -338,3 +338,238 @@ def implied_daily_weights(pair: str, today: date, daily_vols: dict[date, float],
         if abs(ev) >= min_event:
             events.append({"date": r["date"].isoformat(), "weight": round(ev, 2)})
     return {"rows": rows, "ref_var": global_ref, "events": events, "warnings": warnings}
+
+
+# ---- external quotes on test dates -> event weights --------------------------
+
+CHANGE_COST = (0.005 / 0.1) ** 2      # best fit: a weight change of 0.1 weighs like a 0.005 vol gap
+
+
+def calibrate_to_quotes(pair: str, atm_by_tenor: dict[str, float], today: date,
+                        quotes: dict[date, float], weights: dict | None,
+                        holidays: dict[str, set], floor: bool = False) -> dict:
+    """Event weights that make our ATM follow external quotes, at a shift.
+
+    quotes: expiry -> ATM mid from an outside platform (e.g. a tier-1 bank's
+    prices for every day of the next weeks, or around an event). The level
+    stays with the ATM marks: where a quoted date is a tenor expiry, the shift
+    is our mark minus their mid there; between such pillars it is interpolated
+    linearly in calendar days (flat beyond them), and without a quoted pillar
+    it is the shift at the first quoted date. The targets are their mids plus
+    the shift. Between each two consecutive quoted expiries one date takes
+    the weight: the one with the biggest event weight, else the later expiry.
+
+    floor=False: exact fit. The forward variance between each two quoted
+    expiries is matched by bisection on that date's weight (it rises with
+    it), sweeping again because dates between the same two marked tenors
+    share their normalisation. Weights may go negative.
+    floor=True: no event weight below zero, so the fit is a best fit: least
+    squares of the vol gaps at the quoted dates plus a small penalty for
+    moving a weight away from its current value (CHANGE_COST: 0.1 of weight
+    costs as much as a 0.005 vol gap), so that rounding in the quotes doesn't
+    spread weight over plain days. Coordinate descent from the exact fit with
+    its negative weights set to zero.
+    """
+    w = normalise_weights(weights)
+    ccys = split_pair(pair)
+    ev_total: dict[date, float] = {}
+    labels: dict[date, list] = {}
+    for ev in w.get("events", []):
+        d = date.fromisoformat(ev["date"])
+        ev_total[d] = ev_total.get(d, 0.0) + float(ev["weight"])
+        labels.setdefault(d, []).append(ev.get("desc") or "")
+    ext = sorted((d, v) for d, v in quotes.items() if d > today and v and v > 0)
+    warnings: list[str] = []
+    tdates = tenor_dates(pair, today, holidays)
+    pillar = {tdates[t]: t for t in TENORS if atm_by_tenor.get(t) is not None}
+    if not pillar:
+        return {"intervals": [], "events": [], "warnings": ["No ATM marks to interpolate"], "anchors": []}
+    anchors = [(d, atm_by_tenor[pillar[d]] - v) for d, v in ext if d in pillar]   # our mark - their mid
+    if not anchors and ext:
+        first = interpolate_atm(pair, atm_by_tenor, today, [ext[0][0]], w, holidays).get(ext[0][0])
+        anchors = [(ext[0][0], first - ext[0][1])] if first is not None else []
+        if len(ext) > 1 and anchors:
+            warnings.append(f"No tenor expiry among the quoted dates: shift {anchors[0][1]:+.3f} taken at "
+                            f"{ext[0][0]} (quote a pillar date to set it from your marks)")
+
+    def shift(d: date) -> float:
+        if not anchors:
+            return 0.0
+        if d <= anchors[0][0]:
+            return anchors[0][1]
+        for (d0, s0), (d1, s1) in zip(anchors, anchors[1:]):
+            if d <= d1:
+                return s0 + (s1 - s0) * (d - d0).days / (d1 - d0).days
+        return anchors[-1][1]
+
+    qs = [(d, v + shift(d)) for d, v in ext]
+    jobs = []
+    for (a, va), (b, vb) in zip(qs, qs[1:]):
+        if a in pillar and b in pillar:
+            continue                                   # both levels are marks: nothing to fit in between
+        target = (vb ** 2 * (b - today).days - va ** 2 * (a - today).days) / 365.0
+        if target <= 0 and not floor:
+            warnings.append(f"{a} → {b}: the quotes imply negative forward variance; skipped")
+            continue
+        inside = [a + timedelta(days=i) for i in range(1, (b - a).days + 1)]
+        e = max(inside, key=lambda d: (ev_total.get(d, 0.0), d))
+        if ev_total.get(e, 0.0) <= 0:
+            e = b
+        jobs.append({"from": a, "to": b, "date": e, "target": target})
+    if not jobs:
+        return {"intervals": [], "events": [], "warnings": warnings or ["Quote at least two consecutive test dates"],
+                "anchors": []}
+
+    # The interpolation (as interpolate_atm) on the days up to the last quote - or the marked
+    # tenor after it - with the solved dates' weights as a vector: fast enough for the fit.
+    pdates = sorted(pillar)
+    last = qs[-1][0]
+    horizon = next((p for p in pdates if p >= last), last)
+    H = (horizon - today).days
+    base = [0.0] + [day_weight(today + timedelta(days=n), ccys, w, holidays, {}) for n in range(1, H + 1)]
+    fixed = [b + ev_total.get(today + timedelta(days=n), 0.0) if n else 0.0 for n, b in enumerate(base)]
+    knots_in = [((p - today).days, atm_by_tenor[pillar[p]] ** 2 * (p - today).days / 365.0)
+                for p in pdates if (p - today).days <= H]
+    jn = [(j["date"] - today).days for j in jobs]
+    qn = [(d - today).days for d, _ in qs]
+    qi = {d: i for i, (d, _) in enumerate(qs)}
+
+    def vols(xv: list[float]) -> list[float]:
+        dw = fixed[:]
+        for n, v in zip(jn, xv):
+            dw[n] = base[n] + v
+        cum = [0.0] * (H + 1)
+        for n in range(1, H + 1):
+            cum[n] = cum[n - 1] + dw[n]
+        knots = [(0.0, 0.0)] + [(cum[n], var) for n, var in knots_in]
+        out = []
+        for n in qn:
+            tau = cum[n]
+            for (t0, w0), (t1, w1) in zip(knots, knots[1:]):
+                if tau <= t1:
+                    var = w0 + (0.0 if t1 == t0 else (tau - t0) / (t1 - t0)) * (w1 - w0)
+                    break
+            else:
+                (t0, w0), (t1, w1) = knots[-2] if len(knots) > 1 else (0.0, 0.0), knots[-1]
+                var = w1 + (tau - t1) * (w1 - w0) / (t1 - t0) if t1 > t0 else w1
+            out.append(math.sqrt(max(var, 0.0) * 365.0 / n))
+        return out
+
+    def fwd_var(vs: list[float], j: dict) -> float:
+        a, b = j["from"], j["to"]
+        return (vs[qi[b]] ** 2 * (b - today).days - vs[qi[a]] ** 2 * (a - today).days) / 365.0
+
+    x = [ev_total.get(j["date"], 0.0) for j in jobs]
+    vs0 = vols(x)
+    before = [fwd_var(vs0, j) for j in jobs]
+    hi_x = 50.0
+    lows = [-base[n] for n in jn]                        # the day's weight can't go below zero
+    clamp = [None] * len(jobs)
+    for _ in range(30):                                  # exact fit
+        moved = 0.0
+        for k, j in enumerate(jobs):
+            def g(v):
+                xv = x[:]; xv[k] = v
+                return fwd_var(vols(xv), j) - j["target"]
+            lo, hi = lows[k], hi_x
+            if g(lo) >= 0:
+                new, clamp[k] = lo, "low"
+            elif g(hi) <= 0:
+                new, clamp[k] = hi, "high"
+            else:
+                clamp[k] = None
+                for _ in range(50):
+                    mid = (lo + hi) / 2
+                    lo, hi = (mid, hi) if g(mid) < 0 else (lo, mid)
+                new = (lo + hi) / 2
+            moved = max(moved, abs(new - x[k]))
+            x[k] = new
+        if moved < 1e-5:
+            break
+
+    # Between two marked tenors the interpolation only sees each day's share of the weighted
+    # time, so when every weighted day of such a segment is being solved, scaling them all
+    # fits the quotes just as well. Fix the scale as the dailies calibration does: the median
+    # plain weekday (no event before) keeps its base weight.
+    bounds = [0] + [n for n, _ in knots_in]
+    for n0, n1 in zip(bounds, bounds[1:]):
+        ks = [k for k, n in enumerate(jn) if n0 < n <= n1]
+        if not ks:
+            continue
+        solved = {jn[k] for k in ks}
+        pinned = [n for n in range(n0 + 1, n1 + 1) if n not in solved and fixed[n] > 1e-12]
+        plain = sorted((base[jn[k]] + x[k]) / base[jn[k]] for k in ks
+                       if base[jn[k]] > 0 and ev_total.get(jobs[k]["date"], 0.0) <= 0 and jobs[k]["date"].weekday() < 5)
+        if pinned or not plain or plain[len(plain) // 2] <= 1e-9:
+            continue
+        m = plain[len(plain) // 2]
+        for k in ks:
+            x[k] = (base[jn[k]] + x[k]) / m - base[jn[k]]
+
+    targets = [v for _, v in qs]
+    free = [i for i, (d, _) in enumerate(qs) if d not in pillar]      # pillar levels are the marks anyway
+
+    x0 = [ev_total.get(j["date"], 0.0) for j in jobs]   # the weights before calibrating
+
+    def sse(xv: list[float]) -> float:
+        vs = vols(xv)
+        return sum((vs[i] - targets[i]) ** 2 for i in free) + \
+            CHANGE_COST * sum((v - v0) ** 2 for v, v0 in zip(xv, x0))
+
+    held = 0
+    if floor:                                            # best fit with no event weight below zero
+        x = [max(v, 0.0) for v in x]
+        gr = (math.sqrt(5) - 1) / 2
+        for _ in range(40):
+            moved = 0.0
+            for k in range(len(jobs)):
+                lo, hi = 0.0, max(2 * x[k] + 2.0, 4.0)
+                f = lambda v: sse(x[:k] + [v] + x[k + 1:])
+                if f(0.0) <= f(1e-6):                     # rises off zero: stays at zero
+                    new = 0.0
+                else:
+                    while f(hi) < f(hi * 0.9) and hi < hi_x:
+                        hi = min(hi * 2, hi_x)
+                    c, d = hi - gr * (hi - lo), lo + gr * (hi - lo)
+                    fc, fd = f(c), f(d)
+                    for _ in range(40):
+                        if fc < fd:
+                            hi, d, fd = d, c, fc
+                            c = hi - gr * (hi - lo); fc = f(c)
+                        else:
+                            lo, c, fc = c, d, fd
+                            d = lo + gr * (hi - lo); fd = f(d)
+                    new = (lo + hi) / 2
+                moved = max(moved, abs(new - x[k]))
+                x[k] = new
+            if moved < 1e-4:
+                break
+        held = sum(1 for v in x if v <= 1e-6)
+
+    vs1 = vols(x)
+    gaps = [(vs1[i] - targets[i], qs[i][0]) for i in free]
+    worst = max(gaps, key=lambda g: abs(g[0])) if gaps else (0.0, None)
+    fit = {"max_gap": round(abs(worst[0]), 4), "worst": worst[1].isoformat() if worst[1] else None,
+           "rms": round(math.sqrt(sum(g * g for g, _ in gaps) / len(gaps)), 4) if gaps else 0.0,
+           "floor": floor, "held_at_zero": held}
+    intervals, events = [], []
+    for k, j in enumerate(jobs):
+        e, n = j["date"], (j["to"] - j["from"]).days
+        fv_vol = lambda fv: (max(fv, 0) * 365.0 / n) ** 0.5
+        if not floor and clamp[k] == "low":
+            warnings.append(f"{j['from']} → {j['to']}: the quoted jump is smaller than a day without events allows; "
+                            f"weight {e} set to its minimum")
+        elif clamp[k] == "high" or x[k] >= hi_x - 1e-6:
+            warnings.append(f"{j['from']} → {j['to']}: the quoted jump is too big for the ATM marks around it "
+                            f"(check the marked tenors); weight capped at {hi_x:g}")
+        desc = ", ".join(l for l in labels.get(e, []) if l) or "External quotes"
+        intervals.append({"from": j["from"].isoformat(), "to": j["to"].isoformat(), "date": e.isoformat(),
+                          "desc": desc, "ext_fwd": fv_vol(j["target"]), "fwd_before": fv_vol(before[k]),
+                          "fwd_after": fv_vol(fwd_var(vs1, j)), "weight_before": round(ev_total.get(e, 0.0), 4),
+                          "weight": round(x[k], 2)})
+        events.append({"date": e.isoformat(), "desc": desc, "weight": round(x[k], 2)})
+    if floor and held:
+        warnings.append(f"{held} day(s) held at weight 0: the quotes ask for less there (rounding in the quotes, "
+                        f"or a quiet day); best fit within {fit['max_gap']:.3f} vol")
+    return {"intervals": intervals, "events": events, "warnings": warnings, "fit": fit,
+            "anchors": [{"date": d.isoformat(), "tenor": pillar.get(d), "shift": round(sv, 4)} for d, sv in anchors]}

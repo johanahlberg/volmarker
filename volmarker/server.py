@@ -127,6 +127,13 @@ def make_handler(svc: Service):
                 m = re.fullmatch(r"/api/pairs/([A-Z]{6})/curve", p)
                 if m:
                     return self._json(svc.curve(m.group(1), body.get("state")))
+                m = re.fullmatch(r"/api/pairs/([A-Z]{6})/testdates-calibrate", p)
+                if m:
+                    return self._json(svc.calibrate_test_quotes(m.group(1), body.get("quotes") or [], body.get("state"),
+                                                                 body.get("floor", True) is not False))
+                m = re.fullmatch(r"/api/pairs/([A-Z]{6})/settings", p)
+                if m:
+                    return self._json(svc.save_settings(m.group(1), body["state"], body.get("expected_version")))
                 m = re.fullmatch(r"/api/pairs/([A-Z]{6})/testdates", p)
                 if m:
                     return self._json(svc.test_dates(m.group(1), body.get("dates") or [], body.get("state")))

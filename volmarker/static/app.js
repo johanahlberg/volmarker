@@ -6,6 +6,9 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type", "lock_rr10f", "lock_bf10f",
   "follow_market", "alert_tol", "alerts_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "follow_bases", "tenors"];
+// pair settings the Setup tab saves on its own (service.SETTING_KEYS)
+const SETUP_KEYS = ["mode", "bases", "key", "group", "spread_ref", "follow_parent", "follow_bases", "cut", "dc_factor",
+  "atm_type", "follow_market", "excel", "alert_tol", "alerts_off"];
 const MKT_FIELDS = { atm: "atm", rr25: "rr25", rr10: "rr10", bf25: "bf25", bf10: "bf10" };
 const FOLLOW_FIELDS = ["atm", "rr25", "rr10f", "rr10", "bf25", "bf10f", "bf10"];   // owned by the feed on Follow FMD pairs
 const MARK_LABEL = { atm: "ATM", rr25: "25D RR", rr10: "10D RR", bf25: "25D BF", bf10: "10D BF" };
@@ -204,9 +207,20 @@ function fillPairSelects() {
 }
 
 // ---------------------------------------------------------------- pair loading
+function showTab(tab, render = true) {
+  app.tab = tab;
+  $$(".tabs button").forEach((x) => x.classList.toggle("active", x.dataset.tab === tab));
+  $$("[data-panel]").forEach((p) => (p.hidden = p.dataset.panel !== tab));
+  if (!render || !app.view) return;
+  if (tab === "weights") renderWeights(true);
+  if (tab === "history") renderHistory();
+  if (tab === "setup") renderSetup();
+  if (tab === "surface") renderTermChart();
+  if (tab === "s3d") render3D();
+}
 async function selectPair(pair) {
   if (app.dirty && pair !== app.current && !confirmDiscard()) return;
-  if (pair !== app.current) { app.defEvents = []; app.testRows = []; }
+  if (pair !== app.current) { app.defEvents = []; app.testRows = []; showTab("surface", false); }
   app.current = pair;
   history.replaceState(null, "", "#" + pair);
   await reloadView();
@@ -461,13 +475,19 @@ async function runPreview() {
   renderAll();
 }
 function updateButtons() {
-  $("#publish").disabled = !app.dirty;
+  const sd = setupDirty();
+  $("#su-save").disabled = !sd;
+  $("#su-save").textContent = sd ? "Save ●" : "Save";
+  $("#su-status").textContent = sd ? "Unsaved settings" : "";
+  const oe = app.dirty && app.draft ? otherEdits() : null, pd = !!oe && (oe.keys.length + oe.cells.length > 0);
+  $("#publish").disabled = !pd;
   $("#discard").disabled = !app.dirty;
-  $("#publish").textContent = app.dirty ? "Publish ●" : "Publish";
+  $("#publish").textContent = pd ? "Publish ●" : "Publish";
+  $("#publish").title = pd && sd ? "Publishes your edits and the unsaved settings (Ctrl/Cmd+S)" : "Ctrl/Cmd+S";
 }
 
 async function publish() {
-  if (!app.dirty) return;
+  if (!app.dirty || $("#publish").disabled) return;      // settings alone are saved in Setup
   clearTimeout(previewTimer);
   $("#publish").disabled = true;
   try {
@@ -987,10 +1007,37 @@ function weightsCalc(delay = 200) {    // everything on the weights tab that dep
 }
 
 // ---------------------------------------------------------------- test dates
+const MAX_TEST_DATES = 120;    // service.MAX_TEST_DATES
+function addTestDateRange() {
+  const from = $("#td-from").value, to = $("#td-to").value, today = isoToday();
+  if (!from || !to) return;
+  const [a, b] = from <= to ? [from, to] : [to, from], out = [];
+  const p = (n) => String(n).padStart(2, "0");
+  for (const d = new Date(a + "T12:00:00"); ; d.setDate(d.getDate() + 1)) {
+    const iso = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    if (iso > b) break;
+    if (![0, 6].includes(d.getDay()) && iso > today) out.push(iso);
+  }
+  const all = [...new Set([...testDates(), ...out])].sort();
+  if (all.length > MAX_TEST_DATES) {
+    showBanner(`That would make ${all.length} test dates; the limit is ${MAX_TEST_DATES}. Pick a shorter range or clear some dates.`, [["OK", () => hideBanner()]], "error");
+    return;
+  }
+  setTestDates(all);
+}
 function testDates() { return ((app.prefs.test_dates || {})[app.current] || []).filter((d) => d > isoToday()); }
 function setTestDates(list) {
-  (app.prefs.test_dates ||= {})[app.current] = [...new Set(list)].sort();
+  const ds = [...new Set(list)].sort();
+  (app.prefs.test_dates ||= {})[app.current] = ds;
+  const q = testQuotes();                       // drop the quotes of removed dates
+  for (const d of Object.keys(q)) if (!ds.includes(d)) delete q[d];
   savePrefs(); renderTestDates(); loadTestDates();
+}
+// external bid/offer per test date (e.g. from a bank's single-dealer platform), saved for you per pair
+function testQuotes() { return ((app.prefs.test_quotes ||= {})[app.current] ||= {}); }
+function quoteMid(q) {
+  const vs = [q?.bid, q?.offer].filter((v) => v != null);
+  return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null;
 }
 let tdSeq = 0;
 async function loadTestDates() {
@@ -1003,31 +1050,91 @@ async function loadTestDates() {
 }
 function renderTestDates(err) {
   const rows = (app.testRows || []).filter((r) => testDates().includes(r.date));
-  const dirty = app.dirty;
+  const dirty = app.dirty, qs = testQuotes();
+  const act = document.activeElement, focus = act?.matches?.("#td-table input.tq") ? [act.dataset.date, act.dataset.k, act.selectionStart, act.value] : null;
+  // forward vol between two consecutive quoted rows, comparable with Fwd when both rows are quoted
+  const extFwd = rows.map((r, i) => {
+    const m = quoteMid(qs[r.date]), p = rows[i - 1], pm = p ? quoteMid(qs[p.date]) : null;
+    if (m == null || pm == null || r.days <= p.days) return null;
+    const fv = (m * m * r.days - pm * pm * p.days) / (r.days - p.days);
+    return fv > 0 ? Math.sqrt(fv) : NaN;
+  });
+  const nq = rows.filter((r, i) => extFwd[i] != null && !Number.isNaN(extFwd[i])).length;
+  $("#td-calib").disabled = !nq;
+  $("#td-floor").checked = app.prefs.td_no_negative !== false;
+  $("#td-calib").title = nq ? `Set the event weights so the forward vol between each two consecutive quoted dates matches the external quotes (${nq} interval${nq > 1 ? "s" : ""})`
+    : "Type bid/offer on at least two consecutive test dates";
   $("#td-table").innerHTML = `<thead><tr><th class="tn">Expiry</th><th class="tn">Day</th><th title="Calendar days">Days</th><th title="Weighted days from today">W. days</th><th title="Weight of the expiry day itself">Day wt</th>` +
-    `<th>${dirty ? "Draft ATM" : "ATM"}</th>${dirty ? "<th>Published</th><th>Δ</th>" : ""}<th title="Forward vol from the row above">Fwd</th><th class="tn">Events</th><th></th></tr></thead><tbody>` +
-    (rows.length ? rows.map((r) => {
+    `<th>${dirty ? "Draft ATM" : "ATM"}</th>${dirty ? "<th>Published</th><th>Δ</th>" : ""}<th title="Forward vol from the row above">Fwd</th>` +
+    `<th class="sep" title="External bid (typed)">Ext bid</th><th title="External offer (typed)">Ext offer</th><th title="ATM minus the external mid">vs mid</th>` +
+    `<th title="External forward vol from the row above (both rows quoted)">Ext fwd</th><th class="tn">Events</th><th></th></tr></thead><tbody>` +
+    (rows.length ? rows.map((r, i) => {
+      const q = qs[r.date] || {}, m = quoteMid(q), vm = m != null && r.atm != null ? r.atm - m : null, ef = extFwd[i];
+      const ext = `<td class="sep"><input class="tq num" data-date="${r.date}" data-k="bid" value="${q.bid ?? ""}" inputmode="decimal" autocomplete="off"></td>` +
+        `<td><input class="tq num" data-date="${r.date}" data-k="offer" value="${q.offer ?? ""}" inputmode="decimal" autocomplete="off"></td>` +
+        `<td class="${vm == null ? "muted" : ""}">${vm == null ? "" : (vm > 0 ? "+" : "") + fmt(vm, 2)}</td>` +
+        `<td${ef != null && r.fwd != null && Math.abs(ef - r.fwd) >= 0.05 ? ' class="chg"' : ""}>${Number.isNaN(ef) ? '<span class="warn" title="The quotes imply negative forward variance">neg.</span>' : fmt(ef, 3)}</td>`;
       let d = r.atm != null && r.published != null ? r.atm - r.published : null;
       if (d != null && Math.abs(d) < 0.0005) d = 0;
-      return `<tr${r.good_day ? "" : ' class="muted" title="Not a good business day for both currencies"'}><td class="tn">${r.date}</td><td class="tn">${r.weekday}</td><td>${r.days}</td>
+      return `<tr${r.good_day ? "" : ' class="muted" title="Not a good business day for both currencies"'}><td class="tn">${r.date}${r.pillar ? ` <span class="tag" title="Expiry of the ${r.pillar} mark: quote it to set the shift to the external quotes from your mark">${r.pillar}</span>` : ""}</td><td class="tn">${r.weekday}</td><td>${r.days}</td>
         <td>${fmt(r.weighted_days, 2)}</td><td>${fmt(r.day_weight, 2)}</td><td><b>${fmt(r.atm, 3)}</b></td>
         ${dirty ? `<td>${fmt(r.published, 3)}</td><td class="${d && Math.abs(d) >= 0.0005 ? "chg" : "muted"}">${d == null ? "" : (d > 0 ? "+" : "") + fmt(d, 3)}</td>` : ""}
-        <td>${fmt(r.fwd, 3)}</td><td class="tn small">${esc(r.events.join(", "))}</td>
-        <td><button class="ghost td-del" data-date="${r.date}" title="Remove">✕</button></td></tr>`;
-    }).join("") : `<tr><td colspan="11" class="muted tn">${esc(err || "Add an expiry date above, e.g. the day of and the day before an event")}</td></tr>`) + "</tbody>";
+        <td>${fmt(r.fwd, 3)}</td>${ext}<td class="tn small">${esc(r.events.join(", "))}</td>
+        <td><button class="ghost td-del" data-date="${r.date}" title="Remove" tabindex="-1">✕</button></td></tr>`;
+    }).join("") : `<tr><td colspan="15" class="muted tn">${esc(err || "Add expiry dates above, e.g. + Event dates for each event and the weekday before and after it")}</td></tr>`) + "</tbody>";
+  if (focus) {
+    const el = $(`#td-table input.tq[data-date="${focus[0]}"][data-k="${focus[1]}"]`);
+    if (el) { el.value = focus[3]; el.focus(); try { el.setSelectionRange(focus[2], focus[2]); } catch {} }
+  }
 }
+function onTestQuote(el) {
+  const txt = el.value.trim(), v = Number(txt), qs = testQuotes();
+  if (txt !== "" && !(v > 0)) return;
+  const q = { ...(qs[el.dataset.date] || {}) };
+  if (txt === "") delete q[el.dataset.k]; else q[el.dataset.k] = v;
+  if (q.bid == null && q.offer == null) delete qs[el.dataset.date]; else qs[el.dataset.date] = q;
+  savePrefs(); renderTestDates();
+}
+async function calibrateTestQuotes() {
+  const qs = testQuotes(), quotes = testDates().filter((d) => qs[d]).map((d) => ({ date: d, ...qs[d] }));
+  let r;
+  const floor = app.prefs.td_no_negative !== false;
+  try { r = await api(`/api/pairs/${app.current}/testdates-calibrate`, { quotes, state: app.draft, floor }); }
+  catch (e) { showBanner(`Calibrate to quotes: ${esc(e.message)}`, [["OK", () => hideBanner()]], "error"); return; }
+  if (!r.events.length) { showBanner(esc((r.warnings || []).join(" · ") || "Nothing to calibrate"), [["OK", () => hideBanner()]], "error"); return; }
+  const w = app.draft.weights, dates = new Set(r.events.map((e) => e.date));
+  w.events = (w.events || []).filter((e) => !dates.has(e.date)).concat(r.events.map((e) => ({ ...e })));
+  changed(); renderWeights(false);
+  // list the weights that moved (a daily fit touches every day)
+  const moved = r.intervals.filter((iv) => Math.abs(iv.weight - iv.weight_before) >= 0.05);
+  const lines = moved.slice(0, 12).map((iv) => `${iv.date} ${esc(iv.desc)}: ${fmt(iv.weight_before, 2)} → <b>${fmt(iv.weight, 2)}</b>`);
+  if (moved.length > 12) lines.push(`… and ${moved.length - 12} more`);
+  const sh = (r.anchors || []).map((a) => `${(a.shift > 0 ? "+" : "") + fmt(a.shift, 3)} at ${a.tenor || a.date}`).join(", ");
+  const fit = r.fit ? ` ${r.fit.floor ? "Best fit, no negative weights" : "Exact fit"}: within ${fmt(r.fit.max_gap, 3)} vol of every quote (${r.fit.worst}), rms ${fmt(r.fit.rms, 3)}.` : "";
+  showBanner(`Event weights set from the external quotes${sh ? ` (our level vs theirs: ${sh})` : ""}.${fit} ${moved.length} weight(s) changed by 0.05 or more. Review and publish.` +
+    (lines.length ? `<br>${lines.join("<br>")}` : "") +
+    (r.warnings.length ? `<br><span class="warn">${r.warnings.map(esc).join("<br>")}</span>` : ""), [["OK", () => hideBanner()]]);
+}
+// the expiry of each upcoming event (next 3 months) and the weekday before and after it (holidays count)
 function addEventTestDates() {
   const today = isoToday(), lim = new Date(); lim.setMonth(lim.getMonth() + 3);
-  const end = lim.toISOString().slice(0, 10), out = [...testDates()];
-  for (const r of eventRows()) {
-    if (r.date <= today || r.date > end || !(r.weight > 0)) continue;
-    const d = new Date(r.date + "T12:00:00");
-    do d.setDate(d.getDate() - 1); while ([0, 6].includes(d.getDay()));
-    const before = d.toISOString().slice(0, 10);
-    if (before > today) out.push(before);
-    out.push(r.date);
+  const end = lim.toISOString().slice(0, 10);
+  const evs = [...new Set(eventRows().filter((r) => r.date > today && r.date <= end && r.weight > 0).map((r) => r.date))];
+  if (!evs.length) return;
+  const p = (n) => String(n).padStart(2, "0");
+  const weekday = (iso, step) => {
+    const d = new Date(iso + "T12:00:00");
+    do d.setDate(d.getDate() + step); while ([0, 6].includes(d.getDay()));
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  };
+  const out = [...testDates()];
+  for (const d of evs) out.push(weekday(d, -1), d, weekday(d, 1));
+  const all = [...new Set(out.filter((d) => d > today))].sort();
+  if (all.length > MAX_TEST_DATES) {
+    showBanner(`That would make ${all.length} test dates; the limit is ${MAX_TEST_DATES}. Clear some dates first.`, [["OK", () => hideBanner()]], "error");
+    return;
   }
-  setTestDates(out);
+  setTestDates(all);
 }
 
 // ---------------------------------------------------------------- desk defaults for recurring events
@@ -1198,6 +1305,11 @@ function wireWeights() {
   $("#td-date").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#td-add").click(); });
   $("#td-events").onclick = addEventTestDates;
   $("#td-clear").onclick = () => setTestDates([]);
+  $("#td-range").onclick = addTestDateRange;
+  $("#td-from").addEventListener("change", () => { if (!$("#td-to").value || $("#td-to").value < $("#td-from").value) $("#td-to").value = $("#td-from").value; });
+  $("#td-calib").onclick = calibrateTestQuotes;
+  $("#td-floor").addEventListener("change", (e) => { app.prefs.td_no_negative = e.target.checked; savePrefs(); });
+  $("#td-table").addEventListener("input", (e) => { if (e.target.matches("input.tq")) onTestQuote(e.target); });
   $("#td-table").addEventListener("click", (e) => {
     if (e.target.matches(".td-del")) setTestDates(testDates().filter((d) => d !== e.target.dataset.date));
   });
@@ -1319,6 +1431,48 @@ async function renderCurve() {
 }
 
 // ---------------------------------------------------------------- setup tab
+const setting = (v) => (v && typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length ? null : v ?? null);
+// draft edits that aren't settings, leaving out what switching a setting resets itself
+function otherEdits(d = app.draft, p = app.published) {
+  const ck = (k) => JSON.stringify(setting(d[k])) !== JSON.stringify(setting(p[k]));
+  const skip = new Set([...(ck("mode") || ck("bases") ? ["corr"] : []), ...(ck("spread_ref") || ck("follow_parent") ? ["psprd"] : []),
+    ...(!p.follow_market && d.follow_market ? FOLLOW_FIELDS : [])]);
+  const keys = STATE_KEYS.filter((k) => !SETUP_KEYS.includes(k) && k !== "pair" && k !== "tenors" && JSON.stringify(d[k]) !== JSON.stringify(p[k]));
+  const cells = [];
+  for (const t of app.tenors) for (const [f, v] of Object.entries(d.tenors[t]))
+    if (!skip.has(f) && !same(v, p.tenors[t]?.[f])) cells.push([t, f]);
+  return { keys, cells };
+}
+function setupDirty() {
+  return !!app.draft && SETUP_KEYS.some((k) => JSON.stringify(setting(app.draft[k])) !== JSON.stringify(setting(app.published[k])));
+}
+// Save publishes the settings on the latest marks; the trader's other draft edits stay in the draft
+async function saveSettings() {
+  if (!setupDirty()) return;
+  clearTimeout(previewTimer);
+  $("#su-save").disabled = true;
+  const oldDraft = app.draft, edits = otherEdits();
+  try {
+    await api(`/api/pairs/${app.current}/settings`, { state: oldDraft, expected_version: app.baseVersion });
+  } catch (e) {
+    if (e.status === 409) {
+      const l = e.data.latest;
+      showBanner(`<b>${esc(l.user)}</b> changed the settings of ${l.pair} (v${l.version}, ${localTime(l.ts)}) while you were editing. Nothing was saved.`, [
+        ["Load theirs (discard mine)", () => reloadView()], ["Keep editing mine", () => hideBanner()]]);
+    } else showBanner(`Save failed: ${esc(e.message)}`, [["OK", () => hideBanner()]], "error");
+    updateButtons();
+    return;
+  }
+  await reloadView();
+  // put back the trader's other edits (marks, weights, locks) on the saved version
+  let kept = 0;
+  for (const k of edits.keys) if (JSON.stringify(oldDraft[k]) !== JSON.stringify(app.draft[k])) { app.draft[k] = clone(oldDraft[k]); kept++; }
+  for (const [t, f] of edits.cells) if (!same(oldDraft.tenors[t][f], app.draft.tenors[t][f])) { app.draft.tenors[t][f] = oldDraft.tenors[t][f]; kept++; }
+  if (kept) { changed(); renderGrid(); }
+  if (app.tab === "setup") renderSetup();
+  await loadPairs();
+  showBanner(`Settings saved${kept ? ". Your other edits are still in the draft; publish them when ready." : "."}`, [["OK", () => hideBanner()]]);
+}
 function renderSetup() {
   const d = app.draft;
   $("#su-mode").value = d.mode;
@@ -1685,16 +1839,8 @@ function wire() {
   };
 
   // tabs
-  $$(".tabs button").forEach((b) => (b.onclick = () => {
-    app.tab = b.dataset.tab;
-    $$(".tabs button").forEach((x) => x.classList.toggle("active", x === b));
-    $$("[data-panel]").forEach((p) => (p.hidden = p.dataset.panel !== app.tab));
-    if (app.tab === "weights") renderWeights(true);
-    if (app.tab === "history") renderHistory();
-    if (app.tab === "setup") renderSetup();
-    if (app.tab === "surface") renderTermChart();
-    if (app.tab === "s3d") render3D();
-  }));
+  $$(".tabs button").forEach((b) => (b.onclick = () => showTab(b.dataset.tab)));
+  $("#su-save").onclick = saveSettings;
 
   // setup
   ["#su-mode", "#su-b1", "#su-b2", "#su-key", "#su-group", "#su-spref", "#su-cut", "#su-dc", "#su-atm", "#su-follow", "#su-excel", "#su-follow-parent", "#su-follow-bases", "#su-alerts-off"].forEach((id) => $(id).addEventListener("change", onSetupChange));

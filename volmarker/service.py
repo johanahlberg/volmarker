@@ -18,13 +18,13 @@ from . import exports
 from .alerts import AlertEngine, deviation, iso, level
 from .conventions import TENORS, normalise_pair
 from . import bbg, weights_export
-from .calendar import (DEFAULT_CUT, cumulative_weights, daily_dates, default_events, expiry_for,
+from .calendar import (DEFAULT_CUT, calibrate_to_quotes, cumulative_weights, daily_dates, default_events, expiry_for,
                        implied_daily_weights, interpolate_atm, is_good_day, normalise_weights,
                        rule_weight, tenor_dates, with_defaults)
 from .conventions import split_pair
 from .fmd.book import daily_n
 from .market import compare, market_view, parse_fix_time
-from .store import LockTimeout, Store, atomic_write
+from .store import ConflictError, LockTimeout, Store, atomic_write
 from .surface import (ALERT_MARKS, FOLLOW_FIELDS, apply_derivation, apply_parent, check_surface, clean_state,
                       new_state, now_iso, resolve, skew_active)
 
@@ -35,7 +35,10 @@ STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_typ
 LEADER_STALE = 45.0
 FEED_STALE = 15.0
 FOLLOW_STALE = 30.0
-MAX_TEST_DATES = 60
+MAX_TEST_DATES = 120
+# pair settings saved by the Setup tab's Save (the rest of a version comes from the latest one)
+SETTING_KEYS = ["mode", "bases", "key", "group", "spread_ref", "follow_parent", "follow_bases", "cut", "dc_factor",
+                "atm_type", "follow_market", "excel", "alert_tol", "alerts_off"]
 
 
 def _labels(own: list, cal: list) -> list[str]:
@@ -497,10 +500,28 @@ class Service:
                 "good_day": is_good_day(d, ccys, holidays),
                 "atm": vol, "published": vp.get(d), "fwd": fwd,
                 "between": after[0] if after else TENORS[-1],
+                "pillar": next((t for t in TENORS if tdates[t] == d), None),
                 "events": [f"{e['desc']} ({e['weight']:+g})" for e in evs.get(iso, [])],
             })
             prev_n, prev_tv = n, tv
         return {"rows": rows}
+
+    def calibrate_test_quotes(self, pair: str, quotes: list[dict], draft: dict | None = None,
+                              floor: bool = True) -> dict:
+        """Event weights that give the draft the forward variance between the
+        external quotes (bid/offer typed on test dates); see calibrate_to_quotes."""
+        rec = self._state_for(pair, draft) or self.get(pair)
+        if rec is None:
+            raise ValueError(f"Unknown pair {pair}")
+        mids = {}
+        for q in quotes[:MAX_TEST_DATES]:
+            vs = [float(q[k]) for k in ("bid", "offer") if q.get(k) not in (None, "")]
+            if vs:
+                mids[date.fromisoformat(q["date"])] = sum(vs) / len(vs)
+        holidays, cal = self.store.load_calendar()
+        w = self.effective_weights(pair, rec.get("weights"), cal, holidays, rec)
+        return calibrate_to_quotes(pair, {t: rec["tenors"][t]["atm"] for t in TENORS}, date.today(),
+                                   mids, w, holidays, floor=floor)
 
     def poll_market(self, notify: bool = True) -> None:
         d = self.store.root / "market"
@@ -692,6 +713,47 @@ class Service:
             rec = self._append(state, warnings, expected_version, comment, source,
                                marked=source == "manual")
         self._schedule(pair, source)
+        return rec
+
+    def save_settings(self, pair: str, draft: dict, expected_version: int | None) -> dict:
+        """The Setup tab's Save: a new version with the draft's pair settings on
+        top of the latest marks. Mark edits stay in the trader's draft, and the
+        pair's staleness clock is not reset."""
+        pair = normalise_pair(pair)
+        with self.store.lock(pair, self.user):
+            latest = self.store.latest(pair)
+            if latest is None:
+                raise ValueError(f"Unknown pair {pair}")
+            if expected_version is not None and latest["version"] > expected_version:
+                base = self.store.history(pair, latest["version"] - expected_version + 1)[-1]   # newest first
+                if any(base.get(k) != latest.get(k) for k in SETTING_KEYS):
+                    raise ConflictError(latest)          # someone else changed the settings meanwhile
+            state = {k: copy.deepcopy(latest.get(k)) for k in STATE_KEYS}
+            for k in SETTING_KEYS:
+                state[k] = copy.deepcopy(draft.get(k))
+            # what switching a setting does to the marks (as the Setup tab does in the draft)
+            rederive = (state["mode"], state["bases"]) != (latest["mode"], latest.get("bases"))
+            reparent = (state["spread_ref"], bool(state["follow_parent"])) != \
+                (latest.get("spread_ref"), bool(latest.get("follow_parent")))
+            follow_on = bool(state["follow_market"]) and not latest.get("follow_market")
+            dt = draft.get("tenors") or {}
+            for t in TENORS:
+                row = state["tenors"][t]
+                if rederive:
+                    row["corr"] = None                   # calibrated to the current ATMs
+                if reparent:
+                    row["psprd"] = None
+                if follow_on and t in dt:
+                    row.update({f: dt[t].get(f) for f in FOLLOW_FIELDS})   # FMD mids the draft took
+            if bool(state["follow_market"]) != bool(latest.get("follow_market")) or \
+                    bool(state["excel"]) != bool(latest.get("excel")):
+                for k in ("lock_rr10f", "lock_bf10f"):  # may have been unticked for factors a lock can't hold
+                    state[k] = draft.get(k)
+            state = self._prepare(pair, state)
+            self._check_cycle(state)
+            state, warnings = self._derive(state)
+            rec = self._append(state, warnings, latest["version"], "Settings", "settings", marked=False)
+        self._schedule(pair, "settings")
         return rec
 
     def _rebase_over_market(self, state: dict, expected: int) -> tuple[dict, int]:

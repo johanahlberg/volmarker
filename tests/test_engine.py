@@ -1,3 +1,4 @@
+import copy
 import csv
 import json
 import math
@@ -7,7 +8,7 @@ import unittest
 from datetime import date, timedelta
 from pathlib import Path
 
-from volmarker.calendar import cumulative_weights, interpolate_atm, tenor_dates
+from volmarker.calendar import calibrate_to_quotes, cumulative_weights, interpolate_atm, tenor_dates
 from volmarker.conventions import TENORS
 from volmarker.derived import cross_vol, implied_corr, orientation
 from volmarker.service import STATE_KEYS, Service
@@ -132,6 +133,76 @@ class TestCalendar(unittest.TestCase):
             self.assertAlmostEqual(out[d], atm[t], places=6)
 
 
+class TestQuoteCalibration(unittest.TestCase):
+    def test_recovers_event_weight_from_the_jump(self):
+        today = date(2026, 10, 26)                       # Monday
+        atm = {t: None for t in TENORS}
+        atm.update({"1W": 6.8, "1M": 7.0, "2M": 7.2, "3M": 7.5, "6M": 7.8})
+        ev = date(2026, 12, 3)                           # Thursday, between the 1M and 2M expiries
+        truth = {"events": [{"date": ev.isoformat(), "weight": 2.0}]}
+        before, after = date(2026, 12, 2), date(2026, 12, 4)
+        q = interpolate_atm("EURUSD", atm, today, [before, ev, after], truth, {})
+        # the bank's level is 0.1 higher than our marks: only the jump is matched
+        quotes = {d: v + 0.1 for d, v in q.items()}
+        res = calibrate_to_quotes("EURUSD", atm, today, quotes, {"events": []}, {})
+        self.assertEqual(len(res["warnings"]), 1)
+        self.assertIn("No tenor expiry", res["warnings"][0])      # shift taken at the first quoted date
+        self.assertEqual([e["date"] for e in res["events"]], [ev.isoformat(), after.isoformat()])
+        self.assertAlmostEqual(res["events"][0]["weight"], 2.0, delta=0.15)
+        self.assertAlmostEqual(res["events"][1]["weight"], 0.0, delta=0.15)
+        iv = res["intervals"][0]
+        self.assertAlmostEqual(iv["fwd_after"], iv["ext_fwd"], places=4)
+
+    def test_daily_fit_keeps_the_shift_at_the_pillars(self):
+        today = date(2026, 10, 26)                       # Monday
+        atm = {t: None for t in TENORS}
+        atm.update({"1W": 6.8, "2W": 7.1, "1M": 7.0, "3M": 7.5})
+        td = tenor_dates("EURUSD", today, {})
+        truth = {"events": [{"date": "2026-11-05", "weight": 1.5}, {"date": "2026-11-06", "weight": 0.5}]}
+        days = [td["1W"] + timedelta(days=i) for i in range((td["2W"] - td["1W"]).days + 1)]
+        days = [d for d in days if d.weekday() < 5]
+        model = interpolate_atm("EURUSD", atm, today, days, truth, {})
+        quotes = {d: v + 0.03 for d, v in model.items()}  # the bank is 0.03 above us, pillars included
+        res = calibrate_to_quotes("EURUSD", atm, today, quotes, {"events": []}, {})
+        self.assertEqual([a["tenor"] for a in res["anchors"]], ["1W", "2W"])
+        self.assertAlmostEqual(res["anchors"][0]["shift"], -0.03, places=6)
+        got = {e["date"]: e["weight"] for e in res["events"]}
+        self.assertAlmostEqual(got["2026-11-05"], 1.5, delta=0.02)
+        self.assertAlmostEqual(got["2026-11-06"], 0.5, delta=0.02)
+        self.assertTrue(all(abs(w) <= 0.02 for d, w in got.items() if d not in ("2026-11-05", "2026-11-06")))
+        fitted = interpolate_atm("EURUSD", atm, today, days, {"events": res["events"]}, {})
+        for d in days:
+            self.assertAlmostEqual(fitted[d], quotes[d] - 0.03, delta=0.002)
+
+    def test_no_negative_weights_is_a_best_fit(self):
+        today = date(2026, 10, 26)
+        atm = {t: None for t in TENORS}
+        atm.update({"1W": 6.8, "2W": 7.1, "1M": 7.0, "2M": 7.3, "3M": 7.5})
+        td = tenor_dates("EURUSD", today, {})
+        truth = {"events": [{"date": "2026-11-05", "weight": 1.5}, {"date": "2026-11-12", "weight": 0.8}]}
+        days = [td["1W"] + timedelta(days=i) for i in range((td["1M"] - td["1W"]).days + 1)]
+        days = [d for d in days if d.weekday() < 5]
+        model = interpolate_atm("EURUSD", atm, today, days, truth, {})
+        quotes = {d: round((v + 0.03) * 20) / 20 for d, v in model.items()}   # quoted in 0.05 steps
+        exact = calibrate_to_quotes("EURUSD", atm, today, quotes, {"events": []}, {})
+        self.assertLess(min(e["weight"] for e in exact["events"]), -0.05)      # rounding shows up as negatives
+        res = calibrate_to_quotes("EURUSD", atm, today, quotes, {"events": []}, {}, floor=True)
+        got = {e["date"]: e["weight"] for e in res["events"]}
+        self.assertGreaterEqual(min(got.values()), 0.0)
+        self.assertAlmostEqual(got["2026-11-05"], 1.5, delta=0.3)
+        self.assertAlmostEqual(got["2026-11-12"], 0.8, delta=0.3)
+        self.assertLess(res["fit"]["max_gap"], 0.025)                          # within half a quote step
+        fitted = interpolate_atm("EURUSD", atm, today, days, {"events": res["events"]}, {})
+        gap = max(abs(fitted[d] - (quotes[d] - 0.03)) for d in days if d not in (td["1W"], td["2W"], td["1M"]))
+        self.assertLess(gap, 0.05)          # the shift itself comes from the rounded pillar quotes
+
+    def test_needs_two_quotes(self):
+        atm = {t: 7.0 for t in TENORS}
+        res = calibrate_to_quotes("EURUSD", atm, date(2026, 10, 26), {date(2026, 12, 3): 7.5}, None, {})
+        self.assertEqual(res["events"], [])
+        self.assertTrue(res["warnings"])
+
+
 class TestServiceAndStore(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -206,6 +277,31 @@ class TestServiceAndStore(unittest.TestCase):
         ec = self.store.latest("EURCHF")
         self.assertAlmostEqual(ec["tenors"]["1M"]["corr"], new_rho)
         self.assertAlmostEqual(ec["tenors"]["1M"]["atm"], cross_vol(7.0, 7.5, new_rho, 1, 1), places=5)
+
+    def test_save_settings_keeps_marks_and_staleness(self):
+        self._marked(self.a, "EURUSD", 7.0)
+        pub = self.store.latest("EURUSD")
+        draft = copy.deepcopy(pub)
+        draft["group"], draft["dc_factor"] = "Majors", 0.5
+        draft["tenors"]["1M"]["atm"] = 9.9                    # a mark edit: not part of Save
+        rec = self.a.save_settings("EURUSD", draft, pub["version"])
+        self.assertEqual((rec["group"], rec["dc_factor"], rec["source"]), ("Majors", 0.5, "settings"))
+        self.assertEqual(rec["tenors"]["1M"]["atm"], 7.0)
+        self.assertEqual(rec["marked_ts"], pub["marked_ts"])
+        # someone else's settings change since the draft was loaded is a conflict; a mark change isn't
+        other = copy.deepcopy(rec); other["group"] = "G10"
+        self.b.poll_journal()
+        self.b.save_settings("EURUSD", other, rec["version"])
+        with self.assertRaises(ConflictError):
+            self.a.save_settings("EURUSD", draft, rec["version"])
+        marks = self.store.latest("EURUSD")
+        for t in TENORS:
+            marks["tenors"][t]["atm"] = 7.3
+        self.b.publish("EURUSD", marks, expected_version=marks["version"])
+        latest = self.store.latest("EURUSD")
+        mine = copy.deepcopy(latest); mine["cut"] = "TOK"
+        rec2 = self.a.save_settings("EURUSD", mine, latest["version"] - 1)
+        self.assertEqual((rec2["cut"], rec2["tenors"]["1M"]["atm"]), ("TOK", 7.3))
 
     def test_favour_puts_is_display_only(self):
         self._marked(self.a, "USDJPY", 9.0)

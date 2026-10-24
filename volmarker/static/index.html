@@ -30,15 +30,13 @@
     <div id="empty" class="empty">Select a pair on the left, or create one with <b>+ New pair</b>.</div>
     <section id="pane" hidden>
       <div class="pairhead">
-        <div>
-          <h1 id="ph-pair"></h1>
-          <div id="ph-sub" class="muted"></div>
-        </div>
+        <h1 id="ph-pair"></h1>
         <div class="spacer"></div>
         <input id="comment" type="text" placeholder="Comment (optional)">
         <button id="load-fa" class="ghost" title="Load the marks of the pair's current Front Arena export file (e.g. written by Excel) into the draft">Last export</button>
         <button id="discard" class="ghost" disabled>Discard</button>
         <button id="publish" class="primary" disabled title="Ctrl/Cmd+S">Publish</button>
+        <div id="ph-sub" class="muted"></div>
       </div>
 
       <div id="banner" class="banner" hidden></div>
@@ -110,7 +108,7 @@
             <div class="spacer"></div><span id="cut-note" class="muted small"></span></div>
           <div id="factors" class="factors"></div>
         </div>
-        <div class="wgrid">
+        <div>
           <div class="card">
             <div class="cardhead"><b>Events</b><span class="muted">Added on top of the day weight (e.g. 0.8 → 1.8)</span>
               <div class="spacer"></div>
@@ -119,16 +117,23 @@
             <div class="gridwrap tall"><table id="events" class="grid small"></table></div>
             <p id="ev-note" class="muted small"></p>
           </div>
-          <div class="card">
-            <div class="cardhead"><b>Test dates</b><span class="muted">Interpolated ATM on your own expiry dates, live with the draft</span>
-              <div class="spacer"></div>
-              <input id="td-date" type="date" title="Add an expiry date">
-              <button id="td-add">Add</button>
-              <button id="td-events" class="ghost" title="Add the expiry dates of the upcoming events (next 3 months) and the day before each">+ Event dates</button>
-              <button id="td-clear" class="ghost">Clear</button></div>
-            <div class="gridwrap tall"><table id="td-table" class="grid small"></table></div>
-            <p class="muted small">Fwd = forward vol from the row above (from today for the first row). Draft vs published: edit weights or marks and watch the ATM move. Test dates are saved for you, per pair.</p>
+        </div>
+        <div class="card" id="td-card">
+          <div class="cardhead"><b>Test dates</b><span class="muted">Interpolated ATM on your own expiry dates, live with the draft</span></div>
+          <div class="toolbar">
+            <button id="td-events" class="ghost" title="Add the expiry dates of the upcoming events (next 3 months) and the weekday before and after each (Mon–Fri; holidays are not skipped)">+ Event dates</button>
+            <button id="td-clear" class="ghost">Clear</button>
+            <button id="td-calib" disabled>Calibrate to quotes</button>
+            <label class="check" title="Ticked: no event weight below zero; the calibration is then a best fit that changes weights as little as the quotes allow. Unticked: exact fit to every quote, negative weights included"><input id="td-floor" type="checkbox"> No negative weights</label>
+            <input id="td-date" type="date" title="Add an expiry date">
+            <button id="td-add">Add</button>
+            <input id="td-from" type="date" title="First day of the range (every Monday to Friday is added)">
+            <span class="lbl">to</span><input id="td-to" type="date" title="Last day of the range">
+            <button id="td-range" title="Add every Monday to Friday in the range (holidays show greyed out)">Add range</button>
           </div>
+          <div class="gridwrap tall"><table id="td-table" class="grid small"></table></div>
+          <p class="muted small">Fwd = forward vol from the row above (from today for the first row). Draft vs published: edit weights or marks and watch the ATM move. Test dates are saved for you, per pair.<br>
+          Ext bid/offer: ATM quotes from an outside platform (e.g. a bank's single-dealer tool), saved for you with the test dates. <b>Calibrate to quotes</b> makes our ATM follow the external quotes at a shift: on quoted tenor expiries (tagged 1W, 1M, …) the shift is your mark minus their mid, in between it is interpolated, and the event weight between each two consecutive quoted dates is set so our ATM lands on their mid plus the shift. Quote every day of the next weeks plus the pillar dates on either side to fit each day; the level stays with your ATM marks (see "vs mid"). With <i>No negative weights</i> (default) it is a best fit that ignores rounding in the quotes; untick it for an exact fit.</p>
         </div>
         <div class="card" id="dailies-card">
           <div class="cardhead"><b>Market dailies (FMD)</b>
@@ -196,9 +201,13 @@
 
       <div data-panel="setup" hidden>
         <div class="card setup">
-          <label>Mode
-            <select id="su-mode"><option value="marked">Marked</option><option value="derived">Derived from two base pairs</option></select>
-          </label>
+          <div class="su-save">
+            <label>Mode
+              <select id="su-mode"><option value="marked">Marked</option><option value="derived">Derived from two base pairs</option></select>
+            </label>
+            <div class="spacer"></div>
+            <span id="su-status" class="muted"></span><button id="su-save" class="primary" disabled>Save</button>
+          </div>
           <label class="su-derived">Base 1 <select id="su-b1"></select></label>
           <label class="su-derived">Base 2 <select id="su-b2"></select></label>
           <label class="check su-indent su-derived"><input id="su-follow-bases" type="checkbox"><span><b>Move with bases</b>: keep the correlation per tenor; every publish of a base moves this pair's ATMs (typing an ATM recalibrates that tenor's correlation). Untick to keep the ATMs where they are; the correlation then follows the bases</span></label>
@@ -219,7 +228,7 @@
             <div id="su-tol" class="factors"></div>
             <label class="check"><input id="su-alerts-off" type="checkbox"> Mute market alerts for this pair</label>
           </div>
-          <p class="muted">These changes are saved to the draft. Click <b>Publish</b> to apply them.<br>
+          <p class="muted">Click <b>Save</b> to apply the settings. Marks you are editing stay in the draft and are not published by Save.<br>
           Derived: ATM = triangle(base ATMs, correlation). Type an ATM on a derived pair to calibrate the correlation to it. Untick <i>Move with bases</i> to keep the ATMs fixed while the bases move.
           The correlation is between the two base pairs as quoted (e.g. EURUSD vs USDCHF is typically negative).</p>
         </div>
