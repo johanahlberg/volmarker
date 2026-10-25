@@ -1148,15 +1148,19 @@ function addEventTestDates() {
 
 // ---------------------------------------------------------------- desk defaults for recurring events
 async function loadDefaults() {
-  if (app.dfDirty) return;
+  if (app.dfDirty) return renderDefaults();          // keep the unsaved edits, show them for this pair
   try { app.defaults = await api("/api/event-defaults"); } catch { return; }
   app.dfRows = clone(app.defaults.rows);
   renderDefaults();
 }
 function renderDefaults() {
   const d = app.defaults || {}, q = ($("#df-filter").value || "").trim().toLowerCase();
+  // this pair's currencies (and events for any currency) unless All currencies is ticked
+  const all = app.prefs?.df_all === true || !app.current, ccys = all ? [] : [app.current.slice(0, 3), app.current.slice(3)];
+  $("#df-all").checked = all;
+  const mine = (r) => all || !r.ccy || r.ccy === "*" || ccys.includes(r.ccy.toUpperCase());
   const rows = (app.dfRows || []).map((r, i) => ({ ...r, i }))
-    .filter((r) => !q || `${r.ccy} ${r.event} ${r.ticker || ""}`.toLowerCase().includes(q))
+    .filter((r) => mine(r) && (!q || `${r.ccy} ${r.event} ${r.ticker || ""}`.toLowerCase().includes(q)))
     .sort((a, b) => (a.ccy || "").localeCompare(b.ccy || "") || (b.weight - a.weight) || a.i - b.i);
   $("#df-table").innerHTML = `<thead><tr><th class="tn">Ccy</th><th class="tn">Event</th><th class="tn">Ticker</th><th>Weight</th><th title="Upcoming calendar events this one matches">Upcoming</th><th class="tn">Next release</th><th></th></tr></thead><tbody>` +
     (rows.length ? rows.map((r) => `<tr><td class="tn"><input class="df" data-i="${r.i}" data-k="ccy" value="${esc(r.ccy)}" maxlength="3" size="4" placeholder="any"></td>
@@ -1165,9 +1169,11 @@ function renderDefaults() {
       <td><input class="df num" data-i="${r.i}" data-k="weight" value="${fmt(r.weight, 2)}"></td>
       <td${r.matches === 0 ? ' class="warn" title="Not in the calendar: check the name, or import the Bloomberg file"' : ""}>${r.matches ?? ""}</td><td class="tn muted small">${esc(r.next || "")}</td>
       <td><button class="ghost df-del" data-i="${r.i}" title="Remove">✕</button></td></tr>`).join("")
-      : `<tr><td colspan="7" class="muted tn">${q ? "No match" : "No relevant events yet"}</td></tr>`) + "</tbody>";
+      : `<tr><td colspan="7" class="muted tn">${q ? "No match" : all ? "No relevant events yet" : `No relevant events for ${ccys.join(" or ")} yet`}</td></tr>`) + "</tbody>";
   $("#df-save").disabled = $("#df-revert").disabled = !app.dfDirty;
-  $("#df-meta").textContent = app.dfDirty ? "Unsaved changes" : d.ts ? `Saved by ${d.user} at ${localTime(d.ts)}` : "";
+  const hidden = (app.dfRows || []).filter((r) => !mine(r)).length;
+  $("#df-meta").textContent = (app.dfDirty ? "Unsaved changes" : d.ts ? `Saved by ${d.user} at ${localTime(d.ts)}` : "") +
+    (hidden ? ` · ${ccys.join(" and ")} only (${hidden} other events hidden)` : "");
   const imp = d.imports || {};
   $("#cal-imports").textContent = Object.keys(imp).length ? "Bloomberg: " + Object.entries(imp).map(([c, x]) =>
     `${c} ${localTime(x.ts)} by ${x.user} (${x.events})`).join(" · ") : "No Bloomberg import yet";
@@ -1337,6 +1343,7 @@ function wireWeights() {
   });
   $("#df-add").onclick = () => { (app.dfRows ||= []).push({ ccy: app.current?.slice(0, 3) || "", event: "", ticker: "", weight: 0.5 }); app.dfDirty = true; $("#df-filter").value = ""; renderDefaults(); };
   $("#df-filter").addEventListener("input", renderDefaults);
+  $("#df-all").addEventListener("change", (e) => { app.prefs.df_all = e.target.checked; savePrefs(); renderDefaults(); });
   // Bloomberg import
   $("#cal-file").onchange = (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) previewImport(f); };
   $("#cal-p-filter").addEventListener("input", renderImport);

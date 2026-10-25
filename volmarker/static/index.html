@@ -165,7 +165,7 @@
           </div>
         </div>
         <details class="card" id="defaults-card">
-          <summary class="cardhead"><b>Event calendar</b><span class="muted">for all pairs · Bloomberg imports and the list of relevant events with their default weights</span></summary>
+          <summary class="cardhead"><b>Event calendar</b><span class="muted">Bloomberg imports and the desk's list of relevant events with their default weights (shared by all pairs)</span></summary>
           <div class="toolbar" style="margin-top:8px">
             <label class="btnlike" title="Bloomberg ECO <GO>: export to Excel and save as .xlsx (one file per currency or region)">Import Bloomberg calendar…<input id="cal-file" type="file" accept=".xlsx" hidden></label>
             <span id="cal-imports" class="muted small"></span>
@@ -189,6 +189,7 @@
             <button id="df-revert" class="ghost" disabled>Revert</button>
             <span id="df-meta" class="muted"></span>
             <div class="spacer"></div>
+            <label class="check" title="Show the events of every currency, not only this pair's"><input id="df-all" type="checkbox"> All currencies</label>
             <input id="df-filter" type="search" placeholder="Filter…" size="14">
           </div>
           <div class="gridwrap tall"><table id="df-table" class="grid small"></table></div>
