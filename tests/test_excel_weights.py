@@ -60,3 +60,44 @@ class TestExcelPairSheet(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExcelDeskSheets(unittest.TestCase):
+    """The workbook's Event weights, Event dates and Holidays sheets: a block of columns per currency."""
+
+    def test_parse(self):
+        from volmarker.excel_weights import parse_event_dates, parse_event_weights, parse_holidays
+        hdr = {(2, 2): "Event weights", (4, 2): "USD", (4, 4): "EUR", (4, 6): "XAU"}
+        w = parse_event_weights({**hdr, (5, 2): "FOMC  Rate Decision", (5, 3): "0.55", (5, 4): "ECB", (5, 5): "0.69",
+                                 (6, 2): "No weight", (6, 4): "PPI", (6, 5): "0"})
+        self.assertEqual([(r["ccy"], r["event"], r["weight"]) for r in w],
+                         [("USD", "FOMC Rate Decision", 0.55), ("EUR", "ECB", 0.69), ("EUR", "PPI", 0.0)])
+        d = parse_event_dates({**hdr, (5, 2): serial("2026-10-29"), (5, 3): "FOMC", (5, 4): serial("2026-10-29"),
+                               (5, 5): "ECB", (6, 2): serial("2026-11-06"), (6, 3): ""})
+        self.assertEqual(d, [{"ccy": "USD", "date": "2026-10-29", "desc": "FOMC"},
+                             {"ccy": "EUR", "date": "2026-10-29", "desc": "ECB"}])
+        h = parse_holidays({**hdr, (4, 3): "CHF", (5, 2): serial("2026-11-26"), (5, 3): serial("2026-12-25"),
+                            (5, 6): serial("2026-12-25"), (6, 2): "0"})
+        self.assertEqual(h, {"USD": [date(2026, 11, 26)], "CHF": [date(2026, 12, 25)], "XAU": [date(2026, 12, 25)]})
+
+    def test_dated_events_skip_bloomberg_and_past(self):
+        import json
+        import sys
+        import tempfile
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        from migrate_excel_weights import new_dated_events
+        from volmarker.store import Store
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            (store.root / "calendar" / "events.csv").write_text("ccy,date,description\nUSD,2026-11-03,Midterms\n")
+            (store.root / "calendar" / "bloomberg").mkdir()
+            (store.root / "calendar" / "bloomberg" / "USD.json").write_text(json.dumps({"events": [
+                {"ccy": "USD", "name": "FOMC Rate Decision (Upper Bound)", "date": "2026-10-28"}]}))
+            add, dup = new_dated_events(store, [
+                {"ccy": "USD", "date": "2026-10-29", "desc": "FOMC Rate Decision (Upper Bound)"},  # Bloomberg has it
+                {"ccy": "USD", "date": "2026-11-03", "desc": "midterms"},                          # already listed
+                {"ccy": "USD", "date": "2026-10-20", "desc": "Past"},
+                {"ccy": "USD", "date": "2026-11-06", "desc": "Change in Nonfarm Payrolls"}], date(2026, 10, 25))
+            self.assertEqual([e["desc"] for e in add], ["Change in Nonfarm Payrolls"])
+            self.assertEqual(dup, ["USD 2026-10-29 FOMC Rate Decision (Upper Bound)"])

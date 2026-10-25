@@ -183,3 +183,53 @@ def excel_day_events(sheet: dict, today: date) -> dict[str, float]:
             if e["date"] >= today.isoformat():
                 out[e["date"]] = round(out.get(e["date"], 0.0) + e["weight"], 6)
     return out
+
+
+# ---- the workbook's desk-wide sheets: one block of columns per currency, the currency in row 4
+#   "Event weights"  event name | weight   (the relevant events and their default weight)
+#   "Event dates"    date | event          (dates are already the expiry an event weighs on)
+#   "Holidays"       date                  (one column per currency)
+
+def _ccy_columns(cells: dict[tuple[int, int], str]) -> tuple[int, dict[int, str]]:
+    """The header row (the first one naming USD) and {column: currency} in it."""
+    rows = sorted({r for r, _ in cells})
+    for r in rows:
+        hdr = {c: v.strip() for (rr, c), v in cells.items() if rr == r and re.fullmatch(r"\s*[A-Z]{3}\s*", v or "")}
+        if "USD" in hdr.values():
+            return r, hdr
+    raise ValueError("no currency header row (USD, EUR, ...)")
+
+
+def parse_event_weights(cells: dict[tuple[int, int], str]) -> list[dict]:
+    """[{ccy, event, weight, ticker: ""}] from the "Event weights" sheet."""
+    hdr_row, hdr = _ccy_columns(cells)
+    out = []
+    for (r, c), name in sorted(cells.items()):
+        ccy = hdr.get(c)
+        w = _num(cells.get((r, c + 1)))
+        if r > hdr_row and ccy and name.strip() and w is not None:
+            out.append({"ccy": ccy, "event": " ".join(name.split()), "weight": w, "ticker": ""})
+    return out
+
+
+def parse_event_dates(cells: dict[tuple[int, int], str]) -> list[dict]:
+    """[{ccy, date, desc}] from the "Event dates" sheet."""
+    hdr_row, hdr = _ccy_columns(cells)
+    out = []
+    for (r, c), v in sorted(cells.items()):
+        ccy, d = hdr.get(c), _serial(v)
+        desc = " ".join((cells.get((r, c + 1)) or "").split())
+        if r > hdr_row and ccy and d and desc:
+            out.append({"ccy": ccy, "date": d.isoformat(), "desc": desc})
+    return out
+
+
+def parse_holidays(cells: dict[tuple[int, int], str]) -> dict[str, list[date]]:
+    """{ccy: [date]} from the "Holidays" sheet."""
+    hdr_row, hdr = _ccy_columns(cells)
+    out: dict[str, list[date]] = {}
+    for (r, c), v in sorted(cells.items()):
+        d = _serial(v)
+        if r > hdr_row and c in hdr and d:
+            out.setdefault(hdr[c], []).append(d)
+    return out

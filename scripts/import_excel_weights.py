@@ -13,23 +13,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from volmarker.bbg import read_xlsx  # noqa: E402
+from volmarker.excel_weights import parse_event_weights, read_cells  # noqa: E402
 from volmarker.store import Store  # noqa: E402
 
 
 def excel_rules(path: str) -> list[dict]:
-    rows = read_xlsx(Path(path).read_bytes(), "Event weights")
-    hdr_i = next(i for i, r in enumerate(rows) if r and "USD" in r)
-    out = []
-    for r in rows[hdr_i + 1:]:
-        for c, ccy in enumerate(rows[hdr_i]):
-            if not ccy or c + 1 >= len(r) or not r[c] or r[c + 1] in (None, ""):
-                continue
-            try:
-                out.append({"ccy": ccy.strip(), "event": r[c].strip(), "weight": round(float(r[c + 1]), 6), "ticker": ""})
-            except ValueError:
-                continue
-    return out
+    return parse_event_weights(read_cells(path, ["Event weights"])["Event weights"])
 
 
 def main() -> None:
