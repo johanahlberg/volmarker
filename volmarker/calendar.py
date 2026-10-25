@@ -26,7 +26,8 @@ see store.load_calendar) and the desk's list of relevant events
 (calendar/event_defaults.csv: ccy, event, weight, ticker). A calendar event in
 one of the pair's currencies that is on the list (same ticker, or same name)
 gets the listed weight on its OPTION EXPIRY date: the first good business day
-whose expiry cut (e.g. 10:00 New York) comes after the release. FOMC at 14:00
+whose expiry cut (e.g. 10:00 New York; a cut can have another time on some
+weekdays, e.g. ILS 15:00 Tel Aviv but 12:00 on Fridays) comes after the release. FOMC at 14:00
 New York on the 28th therefore weighs on the 29th's expiry. Events without a
 release time weigh on their own date.
 
@@ -48,6 +49,12 @@ WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", 
 DEFAULT_WEIGHTS = {"weekdays": [1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0],
                    "holiday1": 0.4, "holiday2": 0.4, "events": [], "use_defaults": True}
 DEFAULT_CUT = {"tz": "America/New_York", "time": "10:00"}
+CUT_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def cut_time(cut: dict, day: date) -> str:
+    """The cut on that weekday: "times" overrides "time" on some days, e.g. {"Fri": "12:00"} for ILS."""
+    return (cut.get("times") or {}).get(CUT_DAYS[day.weekday()]) or cut["time"]
 
 
 def normalise_weights(weights: dict | None) -> dict:
@@ -113,7 +120,7 @@ def expiry_for(ev: dict, ccys: tuple[str, str], holidays: dict[str, set], cut: d
     cut = cut or DEFAULT_CUT
     if ev.get("ts"):
         local = to_local(datetime.fromisoformat(ev["ts"]), cut["tz"])
-        h, m = (int(x) for x in cut["time"].split(":"))
+        h, m = (int(x) for x in cut_time(cut, local.date()).split(":"))
         d = local.date() + timedelta(days=1 if local.time() >= time(h, m) else 0)
     else:
         d = date.fromisoformat(ev["date"])

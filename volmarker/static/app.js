@@ -15,6 +15,9 @@ const FOLLOW_FIELDS = ["atm", "rr25", "rr10f", "rr10", "bf25", "bf10f", "bf10"];
 const external = (d = app.draft) => !!(d.excel || d.follow_market);
 // a derived pair whose ATMs move with the bases at a fixed correlation (else the correlation follows)
 const movesWithBases = (d = app.draft) => d.mode === "derived" && d.follow_bases && !external(d);
+// "15:00, Fri 12:00 Jerusalem": a cut with its weekday exceptions (config cuts.<name>.times)
+const cutLabel = (c) => [c.time, ...Object.entries(c.times || {}).map(([d, t]) => `${d} ${t}`)].join(", ") +
+  " " + c.tz.split("/").pop().replace("_", " ");
 const MARK_LABEL = { atm: "ATM", rr25: "25D RR", rr10: "10D RR", bf25: "25D BF", bf10: "10D BF" };
 // favour puts (pair setting rr_put): the GUI shows and takes RRs as put − call; stored and exported RRs stay call − put
 const RR_FIELDS = ["rr25", "rr10", "skew_rr"];
@@ -947,7 +950,7 @@ function renderWeights(reload) {
     `<span class="fsep"></span>` + [["holiday1", `${c1} holiday`], ["holiday2", `${c2} holiday`]].map(([k, l]) =>
     `<label title="Multiplies the weekday weight on a ${l}">${l}<input class="num wf" data-k="${k}" value="${fmt(w[k], 2)}"></label>`).join("");
   const cut = (app.me.cuts || {})[app.draft.cut || "NYC"];
-  $("#cut-note").textContent = cut ? `Expiry cut ${app.draft.cut || "NYC"}: ${cut.time} ${cut.tz.split("/").pop().replace("_", " ")} (Setup)` : "";
+  $("#cut-note").textContent = cut ? `Expiry cut ${app.draft.cut || "NYC"}: ${cutLabel(cut)} (Setup)` : "";
   $("#ev-usedef").checked = useDefaults();
   renderEvents();
   renderTestDates();
@@ -1492,7 +1495,7 @@ function renderSetup() {
   $("#su-follow-parent").disabled = !d.spread_ref || d.mode !== "marked" || !!d.follow_market || !!d.excel;
   $("#su-follow-parent").parentElement.title = $("#su-follow-parent").disabled ? "Needs a spread parent, on a marked pair that doesn't follow FMD and isn't marked in Excel" : "";
   const cuts = app.me.cuts || {};
-  $("#su-cut").innerHTML = Object.entries(cuts).map(([k, c]) => `<option value="${k}">${k} (${c.time} ${c.tz.split("/").pop().replace("_", " ")})</option>`).join("");
+  $("#su-cut").innerHTML = Object.entries(cuts).map(([k, c]) => `<option value="${k}">${k} (${cutLabel(c)})</option>`).join("");
   $("#su-cut").value = d.cut || "NYC";
   if (document.activeElement !== $("#su-dc")) $("#su-dc").value = d.dc_factor == null ? "" : fmt(d.dc_factor, 2);
   $("#su-atm").value = d.atm_type || "DNS";

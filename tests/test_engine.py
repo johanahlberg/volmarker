@@ -458,6 +458,16 @@ class TestEventDefaults(unittest.TestCase):
         rolled = default_events("USDJPY", cal, self.RULES, holidays=hol)
         self.assertEqual(rolled[0]["date"], "2026-10-30")
 
+    def test_weekday_cut(self):
+        from volmarker.calendar import expiry_for
+        tlv = {"tz": "Asia/Jerusalem", "time": "15:00", "times": {"Fri": "12:00"}}
+        exp = lambda ts: expiry_for({"ts": ts}, ("USD", "ILS"), {}, tlv).isoformat()
+        # Israel is on UTC+2 in November
+        self.assertEqual(exp("2026-11-06T09:30+00:00"), "2026-11-06")    # Fri 11:30, before the Friday cut
+        self.assertEqual(exp("2026-11-06T11:00+00:00"), "2026-11-09")    # Fri 13:00: Monday's expiry
+        self.assertEqual(exp("2026-11-05T12:00+00:00"), "2026-11-05")    # Thu 14:00, before 15:00
+        self.assertEqual(exp("2026-11-05T13:30+00:00"), "2026-11-06")    # Thu 15:30: Friday's expiry
+
     def test_pair_overrides_default(self):
         from volmarker.calendar import with_defaults
         w = with_defaults("EURUSD", {"events": [{"date": "2026-10-29", "desc": "FOMC", "weight": 1.2},

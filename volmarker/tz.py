@@ -28,7 +28,8 @@ def _nth_sunday(year: int, month: int, n: int) -> date:
 class _RuleZone(tzinfo):
     """Standard offset plus a DST rule: 'eu' (last Sunday of March to last
     Sunday of October, switching at 01:00 UTC), 'us' (2nd Sunday of March to
-    1st Sunday of November, 02:00 local), 'au' (1st Sunday of October to 1st
+    1st Sunday of November, 02:00 local), 'il' (Friday before the last Sunday
+    of March, 02:00 local, to the last Sunday of October, 02:00 local), 'au' (1st Sunday of October to 1st
     Sunday of April, 02:00 local standard time) or None."""
 
     def __init__(self, name: str, std_hours: float, rule: str | None):
@@ -41,6 +42,9 @@ class _RuleZone(tzinfo):
         if self.rule == "us":
             return (datetime.combine(_nth_sunday(year, 3, 2), time(2)) - self.std,
                     datetime.combine(_nth_sunday(year, 11, 1), time(2)) - self.std - timedelta(hours=1))
+        if self.rule == "il":
+            return (datetime.combine(_nth_sunday(year, 3, -1) - timedelta(days=2), time(2)) - self.std,
+                    datetime.combine(_nth_sunday(year, 10, -1), time(2)) - self.std - timedelta(hours=1))
         return None
 
     def _is_dst_utc(self, utc_naive: datetime) -> bool:
@@ -73,10 +77,13 @@ class _RuleZone(tzinfo):
 FALLBACK = {
     "Europe/Zurich": (1, "eu"), "Europe/Berlin": (1, "eu"), "Europe/Paris": (1, "eu"),
     "Europe/Stockholm": (1, "eu"), "Europe/Oslo": (1, "eu"), "Europe/Warsaw": (1, "eu"),
+    "Europe/Budapest": (1, "eu"),
     "Europe/London": (0, "eu"), "Europe/Moscow": (3, None), "Europe/Istanbul": (3, None),
     "America/New_York": (-5, "us"), "America/Toronto": (-5, "us"), "America/Mexico_City": (-6, None),
+    "America/Sao_Paulo": (-3, None),
     "Asia/Tokyo": (9, None), "Asia/Singapore": (8, None), "Asia/Hong_Kong": (8, None),
-    "Asia/Shanghai": (8, None),
+    "Asia/Shanghai": (8, None), "Asia/Jerusalem": (2, "il"),
+    "Asia/Tel_Aviv": (2, "il"),           # old name of Asia/Jerusalem, still accepted by the tz database
     "Australia/Sydney": (10, "au"), "Africa/Johannesburg": (2, None), "UTC": (0, None),
 }
 _cache: dict[str, tzinfo] = {}

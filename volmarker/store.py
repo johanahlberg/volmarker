@@ -99,8 +99,16 @@ DEFAULT_CONFIG = {
     # the implied correlation at least min_corr_change), at most every min_interval_s
     "propagation": {"min_change": 0.005, "min_corr_change": 0.005, "min_interval_s": 5},
     # option expiry cuts: an event released after the cut weighs on the next expiry
+    # ("times" overrides the time on some weekdays)
     "cuts": {"NYC": {"tz": "America/New_York", "time": "10:00"},
-             "TOK": {"tz": "Asia/Tokyo", "time": "15:00"}},
+             "TOK": {"tz": "Asia/Tokyo", "time": "15:00"},
+             "NY930": {"tz": "America/New_York", "time": "09:30"},
+             "LDN": {"tz": "Europe/London", "time": "12:00"},
+             "MEX": {"tz": "America/New_York", "time": "12:30"},
+             "PTAX": {"tz": "America/Sao_Paulo", "time": "13:15"},
+             "WAR": {"tz": "Europe/Warsaw", "time": "11:00"},
+             "BUD": {"tz": "Europe/Budapest", "time": "12:00"},
+             "TLV": {"tz": "Asia/Jerusalem", "time": "15:00", "times": {"Fri": "12:00"}}},
     "calendar_tz": "Europe/Zurich",     # time zone of the Bloomberg terminal that exports the calendar
     "fmd_brand": "auto",
     "fmd_daily_basis": "calendar",   # FXO convention: "ND" = today + N calendar days, rolled to a good day
