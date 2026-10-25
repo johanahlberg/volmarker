@@ -1591,8 +1591,23 @@ async function renderHistory() {
 // ---------------------------------------------------------------- live updates
 function connect() {
   const es = new EventSource("/api/stream");
-  es.onopen = () => $("#conn").classList.remove("down");
-  es.onerror = () => $("#conn").classList.add("down");
+  let wasDown = false;
+  es.onopen = () => {
+    $("#conn").classList.remove("down");
+    if (wasDown) { wasDown = false; resync(); }
+  };
+  es.onerror = () => { $("#conn").classList.add("down"); wasDown = true; };
+  // back after a lost connection: catch up on what was published meanwhile (those events are gone)
+  const resync = async () => {
+    loadPairs(); loadAlerts();
+    if (!app.current) return;
+    try {
+      const v = await api(`/api/pairs/${app.current}`), r = v.record;
+      if (r.version > app.baseVersion)
+        es.onmessage({ data: JSON.stringify({ type: "update", pair: r.pair, version: r.version, user: r.user, source: r.source }) });
+      loadMarket();
+    } catch { /* the next event or reconnect tries again */ }
+  };
   let t = null, flash = null, mktBusy = false;
   es.onmessage = async (m) => {
     const ev = JSON.parse(m.data);

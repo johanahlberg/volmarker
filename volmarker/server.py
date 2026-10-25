@@ -199,8 +199,10 @@ class _Server(ThreadingHTTPServer):
 
     def handle_error(self, request, client_address):
         import sys
-        if isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError)):
-            return  # browser tab closed mid-request - not an error
+        # browser closed the connection (tab closed, request given up; on Windows
+        # ConnectionAbortedError, WinError 10053) - not an error
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
         super().handle_error(request, client_address)
 
 
