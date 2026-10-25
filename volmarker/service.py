@@ -104,7 +104,7 @@ class Service:
                 "excel_error": self.excel_errors.get(r["pair"]), "version": r["version"],
                 "ts": r["ts"], "user": r["user"], "source": r.get("source"),
                 "marked_ts": r["marked_ts"], "age_minutes": round(age_min, 1),
-                "stale": follow == "down" if follow else r["mode"] == "marked" and age_min > limit,
+                "stale": follow == "down" if follow else (r["mode"] == "marked" or r.get("excel")) and age_min > limit,
                 "follow": follow,
                 "alerts": len(alerts), "alerts_new": sum(not a["acked"] for a in alerts),
                 "skew": skew_active(r),
@@ -1115,9 +1115,10 @@ class Service:
             return None
         if source in self.THROTTLED:
             pc = self.store.config().get("propagation") or {}
-            move = max((abs((new["tenors"][t]["atm"] or 0) - (latest["tenors"][t]["atm"] or 0)) for t in TENORS),
-                       default=0.0)
-            if move < pc.get("min_change", 0.005):
+            def move(f):
+                return max((abs((new["tenors"][t][f] or 0) - (latest["tenors"][t][f] or 0)) for t in TENORS),
+                           default=0.0)
+            if move("atm") < pc.get("min_change", 0.005) and move("corr") < pc.get("min_corr_change", 0.005):
                 return None             # too small to republish; it adds up until it isn't
             wait = pc.get("min_interval_s", 5) - (time.time() - datetime.fromisoformat(latest["ts"]).timestamp())
             if latest.get("source") == "propagation" and wait > 0:

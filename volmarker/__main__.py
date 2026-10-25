@@ -17,7 +17,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(prog="volmarker")
     ap.add_argument("--data", default=os.environ.get("VOLMARKER_DATA", "data"),
                     help="shared data folder (default: $VOLMARKER_DATA or ./data)")
-    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--port", type=int, default=18765)
     ap.add_argument("--user", default=getpass.getuser())
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()

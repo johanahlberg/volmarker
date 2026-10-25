@@ -210,7 +210,7 @@
           </div>
           <label class="su-derived">Base 1 <select id="su-b1"></select></label>
           <label class="su-derived">Base 2 <select id="su-b2"></select></label>
-          <label class="check su-indent su-derived"><input id="su-follow-bases" type="checkbox"><span><b>Move with bases</b>: keep the correlation per tenor; every publish of a base moves this pair's ATMs (typing an ATM recalibrates that tenor's correlation). Untick to keep the ATMs where they are; the correlation then follows the bases</span></label>
+          <label class="check su-indent su-derived"><input id="su-follow-bases" type="checkbox"><span><b>Move with bases</b>: keep the correlation per tenor; every publish of a base moves this pair's ATMs (typing an ATM recalibrates that tenor's correlation). Untick to keep the ATMs where they are; the correlation then follows the bases. With Follow FMD or Marked in Excel the ATMs come from there and the correlation always follows</span></label>
           <label title="Front Arena DC spread file: ATM spread × 0.5 × factor per tenor. Empty or below 0.01: no file (as in the Excel workbook)">DC spread factor <input id="su-dc" class="num" inputmode="decimal" placeholder="none"></label>
           <label>Expiry cut <select id="su-cut" title="Events released after the cut weigh on the next expiry"></select></label>
           <label title="Shows a column next to ATM with this pair's ATM minus the parent's ATM. Type either the ATM or the spread.">Spread parent <select id="su-spref"></select></label>

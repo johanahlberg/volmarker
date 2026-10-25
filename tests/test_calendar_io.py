@@ -176,17 +176,17 @@ class TestExcelPairs(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _excel_file(self, atm, mtime):
+    def _excel_file(self, atm, mtime, pair="USDCHF"):
         from volmarker.exports import frontarena_lines
         from volmarker.surface import clean_state, new_state, resolve
-        s = new_state("USDCHF")
+        s = new_state(pair)
         for t in s["tenors"]:
             s["tenors"][t].update(atm=atm, spread=0.6, rr25=-0.45, bf25=0.2)
         s = clean_state(s)
         s["tenors"]["1M"]["rr10"] = -0.95                   # a 10D quote that isn't 25D x factor
-        p = self.fa / "USDCHFvolsurface.txt"
+        p = self.fa / f"{pair}volsurface.txt"
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("\r\n".join(frontarena_lines("USDCHF", resolve(s), {t: 0.6 for t in s["tenors"]})) + "\r\n")
+        p.write_text("\r\n".join(frontarena_lines(pair, resolve(s), {t: 0.6 for t in s["tenors"]})) + "\r\n")
         self.os.utime(p, (mtime, mtime))
         return p
 
@@ -233,6 +233,33 @@ class TestExcelPairs(unittest.TestCase):
         self.svc.poll_excel(now=base + 125)
         self.assertIn("incomplete", self.svc.excel_errors["USDCHF"])
         self.assertEqual(self.store.latest("USDCHF")["version"], rec["version"])
+
+    def test_derived_cross_marked_in_excel(self):
+        import time as _t
+        from tests.test_engine import flat_state
+        from volmarker.derived import implied_corr
+        for pair, atm in (("EURUSD", 7.0), ("USDCHF", 8.0)):
+            self.svc.create_pair(pair, "marked", None, True)
+            self.svc.publish(pair, flat_state(pair, atm), 1)
+        self.svc.create_pair("EURCHF", "derived", ["EURUSD", "USDCHF"], False)
+        st = self.store.latest("EURCHF")
+        st["excel"] = True
+        self.svc.publish("EURCHF", st, st["version"])
+        base = _t.time() + 100
+        p = self._excel_file(5.0, base, "EURCHF")
+        self.svc.poll_excel(now=base + 5)
+        rec = self.store.latest("EURCHF")
+        self.assertEqual(rec["source"], "excel")
+        self.assertAlmostEqual(rec["tenors"]["1M"]["atm"], 5.0)
+        self.assertAlmostEqual(rec["tenors"]["1M"]["corr"], implied_corr(5.0, 7.0, 8.0, 1, 1))
+        # a base publish keeps Excel's ATMs and recalculates the correlation; the file stays Excel's
+        self.svc.publish("EURUSD", flat_state("EURUSD", 7.5), self.store.latest("EURUSD")["version"])
+        rec = self.store.latest("EURCHF")
+        self.assertEqual(rec["source"], "propagation")
+        self.assertAlmostEqual(rec["tenors"]["1M"]["atm"], 5.0)
+        self.assertAlmostEqual(rec["tenors"]["1M"]["corr"], implied_corr(5.0, 7.5, 8.0, 1, 1))
+        self.assertEqual(p.stat().st_mtime, base)
+        self.assertTrue(self.svc.summaries()[[s["pair"] for s in self.svc.summaries()].index("EURCHF")]["excel"])
 
     def test_create_reads_existing_file(self):
         from volmarker.exports import read_frontarena

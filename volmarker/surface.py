@@ -28,7 +28,8 @@ in Excel: read from Excel's export file, never written by VolMarker), dc_factor
 mids into FOLLOW_FIELDS), alert_tol (per-mark alert tolerance overrides),
 alerts_off, follow_bases (derived pairs, default on: the ATMs move with the
 bases at a fixed correlation; off: the ATMs stay put and the correlation is
-recalculated as the bases move) and rr_put (favour puts: the GUI shows and takes RRs as put - call;
+recalculated as the bases move; always so on a derived pair marked in Excel or following FMD,
+whose ATMs come from outside) and rr_put (favour puts: the GUI shows and takes RRs as put - call;
 stored and exported RRs stay call - put).
 
 Vols are in percentage points, as typed by the desk (7.25 means 7.25%).
@@ -92,11 +93,9 @@ def clean_state(state: dict) -> dict:
     if s.get("mode") not in ("marked", "derived"):
         raise ValueError("mode must be 'marked' or 'derived'")
     s["follow_market"] = bool(s.get("follow_market"))
-    if s["follow_market"] and s["mode"] != "marked":
-        raise ValueError("Only a marked pair can follow the market (set Mode to Marked)")
     s["excel"] = bool(s.get("excel"))
-    if s["excel"] and (s["mode"] != "marked" or s["follow_market"]):
-        raise ValueError("Marked in Excel: the pair must be Marked and not follow FMD")
+    if s["excel"] and s["follow_market"]:
+        raise ValueError("A pair can't be marked in Excel and follow FMD at the same time")
     s["alerts_off"] = bool(s.get("alerts_off"))
     s["rr_put"] = bool(s.get("rr_put"))
     s["follow_bases"] = s.get("follow_bases") is not False
@@ -173,12 +172,17 @@ def skew_active(state: dict, at: str | None = None) -> bool:
                for r in state["tenors"].values())
 
 
+def external(state: dict) -> bool:
+    """Marks come from outside VolMarker: Excel's export file or the FMD follower."""
+    return bool(state.get("excel") or state.get("follow_market"))
+
+
 def apply_derivation(state: dict, base_states: dict[str, dict]) -> tuple[dict, list[str]]:
     """Compute ATM (or implied corr) of a derived state from its bases.
 
     For each tenor:
-      * follow_bases off: ATM is kept as typed; corr is set to the implied
-                     value (shown for information).
+      * follow_bases off, or marks from Excel / FMD: ATM is kept as it is;
+                     corr is set to the implied value (shown for information).
       * corr set:    ATM = triangle(base ATMs, corr).
       * corr unset but ATM typed: corr is calibrated to the ATM.
     Returns (new_state, warnings).
@@ -188,7 +192,7 @@ def apply_derivation(state: dict, base_states: dict[str, dict]) -> tuple[dict, l
     if s["mode"] != "derived":
         return s, warnings
     b1, b2 = s["bases"]
-    hold = s.get("follow_bases") is False
+    hold = s.get("follow_bases") is False or external(s)
     s1, s2 = orientation(s["pair"], b1, b2)
     st1, st2 = base_states.get(b1), base_states.get(b2)
     if st1 is None or st2 is None:

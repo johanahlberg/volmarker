@@ -11,6 +11,10 @@ const SETUP_KEYS = ["mode", "bases", "key", "group", "spread_ref", "follow_paren
   "atm_type", "follow_market", "excel", "alert_tol", "alerts_off"];
 const MKT_FIELDS = { atm: "atm", rr25: "rr25", rr10: "rr10", bf25: "bf25", bf10: "bf10" };
 const FOLLOW_FIELDS = ["atm", "rr25", "rr10f", "rr10", "bf25", "bf10f", "bf10"];   // owned by the feed on Follow FMD pairs
+// marks from outside VolMarker (surface.external); a derived pair's correlation is then implied by them
+const external = (d = app.draft) => !!(d.excel || d.follow_market);
+// a derived pair whose ATMs move with the bases at a fixed correlation (else the correlation follows)
+const movesWithBases = (d = app.draft) => d.mode === "derived" && d.follow_bases && !external(d);
 const MARK_LABEL = { atm: "ATM", rr25: "25D RR", rr10: "10D RR", bf25: "25D BF", bf10: "10D BF" };
 // favour puts (pair setting rr_put): the GUI shows and takes RRs as put − call; stored and exported RRs stay call − put
 const RR_FIELDS = ["rr25", "rr10", "skew_rr"];
@@ -352,21 +356,22 @@ function renderGrid() {
     el.classList.toggle("up", dir > 0); el.classList.toggle("down", dir < 0);
     const xl = !!app.draft.excel && (FOLLOW_FIELDS.includes(f) || f === "spread");
     const fol = (app.draft.follow_market && FOLLOW_FIELDS.includes(f)) || xl;
-    const held = f === "corr" && !app.draft.follow_bases;
+    const held = f === "corr" && !movesWithBases();
     if (col.lock || fol || held || el.readOnly) {
       const lockRo = !!col.lock && (col.role === "factor") !== !!app.draft[col.lock];
       const ro = fol || lockRo || held;
       el.readOnly = ro; el.tabIndex = ro ? -1 : 0;
       el.classList.toggle("ro", ro);
       el.title = xl ? "Marked in Excel: read from its export file (untick Marked in Excel in Setup to mark here)" :
-        held ? "Implied by the ATM and the bases (tick Move with bases in Setup to keep the correlation instead)" :
+        held ? (external() ? `Implied by the ATM ${app.draft.excel ? "from Excel" : "from FMD"} and the bases; it moves when either is published`
+          : "Implied by the ATM and the bases (tick Move with bases in Setup to keep the correlation instead)") :
         fol ? "Follows FMD: published by the feed (untick Follow FMD in Setup to mark by hand)" :
         lockRo ? (col.role === "factor" ? "Calibrated from the 10D quote (untick lock to edit)" : "25D × factor (untick lock to type the 10D)") : "";
     }
     el.classList.toggle("follow", fol);
-    if (f === "atm") el.classList.toggle("derived", (app.draft.mode === "derived" && app.draft.follow_bases) || !!app.draft.follow_parent);
+    if (f === "atm") el.classList.toggle("derived", movesWithBases() || !!app.draft.follow_parent);
     if (f === "atm" && app.draft.follow_parent) el.title = `Moves with ${app.draft.spread_ref}: ATM = ${app.draft.spread_ref} + spread. Type an ATM to recalibrate the spread`;
-    if (f === "atm" && app.draft.mode === "derived") {
+    if (f === "atm" && app.draft.mode === "derived" && !external()) {
       el.title = app.draft.follow_bases ? "Moves with the bases; type a value to calibrate the correlation" : "Kept as typed while the bases move; the correlation follows";
     }
   }
@@ -411,7 +416,7 @@ function setDraftValue(t, f, v) {
   const row = app.draft.tenors[t];
   if (f === "atm" && app.draft.follow_parent) {
     row.atm = v; row.psprd = null;         // calibrate the spread to the parent to this ATM
-  } else if (f === "atm" && app.draft.mode === "derived" && app.draft.follow_bases) {
+  } else if (f === "atm" && movesWithBases()) {
     row.atm = v; row.corr = null;          // calibrate correlation to this ATM
   } else if (f === "corr") {
     row.corr = v;
@@ -625,7 +630,7 @@ function renderMarket() {
 function setFromMarket(t, m, v, force = false) {
   const row = app.draft.tenors[t];
   if (v == null || ((app.draft.follow_market || app.draft.excel) && !force)) return;
-  if (m === "atm") { row.atm = v; if (app.draft.mode === "derived" && app.draft.follow_bases) row.corr = null; }
+  if (m === "atm") { row.atm = v; if (movesWithBases()) row.corr = null; }
   else if (m === "rr10" || m === "bf10") {
     const w = m.slice(0, 2);
     row[m] = v;                                     // the 10D quote itself (input when unlocked or following FMD)
@@ -672,7 +677,8 @@ function renderFollow() {
     if (h !== "down" && f.missing) html += ` · <span title="${esc((f.missing_list || []).join(", "))}">${f.missing} mark(s) without a fresh FMD quote keep their last value</span>`;
     for (const j of (h !== "down" && f.held) || [])
       html += `<br>Held: ${j.tenor} ${MARK_LABEL[j.mark]}${rrSign(j.mark) < 0 ? " (P−C)" : ""} ${fmt(rrSign(j.mark) * j.from, 2)} → ${fmt(rrSign(j.mark) * j.to, 2)}, taken in ${j.accept_in}s unless it reverts`;
-    html += " · You keep spread, skew and event weights.";
+    html += " · You keep spread, skew and event weights." +
+      (d.mode === "derived" ? " The correlation is implied from the FMD ATMs and the bases." : "");
   }
   bar.className = "followbar " + cls; bar.innerHTML = html;
 }
@@ -1435,7 +1441,7 @@ const setting = (v) => (v && typeof v === "object" && !Array.isArray(v) && !Obje
 // draft edits that aren't settings, leaving out what switching a setting resets itself
 function otherEdits(d = app.draft, p = app.published) {
   const ck = (k) => JSON.stringify(setting(d[k])) !== JSON.stringify(setting(p[k]));
-  const skip = new Set([...(ck("mode") || ck("bases") ? ["corr"] : []), ...(ck("spread_ref") || ck("follow_parent") ? ["psprd"] : []),
+  const skip = new Set([...(ck("mode") || ck("bases") || (d.mode === "derived" && external(d) !== external(p)) ? ["corr"] : []), ...(ck("spread_ref") || ck("follow_parent") ? ["psprd"] : []),
     ...(!p.follow_market && d.follow_market ? FOLLOW_FIELDS : [])]);
   const keys = STATE_KEYS.filter((k) => !SETUP_KEYS.includes(k) && k !== "pair" && k !== "tenors" && JSON.stringify(d[k]) !== JSON.stringify(p[k]));
   const cells = [];
@@ -1492,11 +1498,12 @@ function renderSetup() {
   $("#su-atm").value = d.atm_type || "DNS";
   $$(".su-derived").forEach((el) => (el.hidden = d.mode !== "derived"));
   $("#su-follow-bases").checked = d.follow_bases !== false;
+  $("#su-follow-bases").disabled = external(d);
+  $("#su-follow-bases").parentElement.title = external(d) ? `The ATMs come from ${d.excel ? "Excel" : "FMD"}, so the correlation always follows the bases` : "";
   $("#su-follow").checked = !!d.follow_market;
-  $("#su-follow").disabled = d.mode !== "marked" || !!d.excel;
+  $("#su-follow").disabled = !!d.excel;
   $("#su-excel").checked = !!d.excel;
-  $("#su-excel").disabled = d.mode !== "marked" || !!d.follow_market;
-  $("#su-follow").parentElement.title = d.mode !== "marked" ? "Only marked pairs can follow FMD" : "";
+  $("#su-excel").disabled = !!d.follow_market;
   const def = (app.alertCfg && app.alertCfg.tolerance) || {};
   const own = d.alert_tol || {};
   $("#su-tol").innerHTML = Object.entries(MARK_LABEL).map(([m, l]) =>
@@ -1532,7 +1539,7 @@ function onSetupChange() {
   d.follow_bases = mode !== "derived" || $("#su-follow-bases").checked;
   const rebuild = d.mode !== mode;
   d.mode = mode;
-  const follow = mode === "marked" && $("#su-follow").checked;
+  const follow = $("#su-follow").checked;
   if (follow && !d.follow_market) {
     // start from the market so the publish that switches it on already shows FMD levels
     let n = 0;
@@ -1553,7 +1560,7 @@ function onSetupChange() {
   }
   d.follow_market = follow;
   const wasExcel = !!d.excel;
-  d.excel = mode === "marked" && !follow && $("#su-excel").checked;
+  d.excel = !follow && $("#su-excel").checked;
   if (wasExcel && !d.excel) {
     // Excel's 10D quotes can give factors a locked factor can't hold
     for (const w of ["rr", "bf"]) {
@@ -1819,7 +1826,7 @@ function wire() {
       if (row[f] === null) continue;
       if ((f === "rr10" && app.draft.lock_rr10f) || (f === "bf10" && app.draft.lock_bf10f)) continue;
       row[f] = Math.round((row[f] + rrSign(f) * amt) * 1e6) / 1e6;      // amounts in the RR convention shown
-      if (f === "atm" && app.draft.mode === "derived" && app.draft.follow_bases) row.corr = null;
+      if (f === "atm" && movesWithBases()) row.corr = null;
     }
     changed(); renderGrid();
   };

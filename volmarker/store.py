@@ -95,8 +95,9 @@ DEFAULT_CONFIG = {
         "date_format": "%Y-%m-%d",
     },
     # derived pairs and pairs moving with their parent, after an FMD-driven (or catch-up) move:
-    # republish only when an ATM moves at least min_change, at most every min_interval_s
-    "propagation": {"min_change": 0.005, "min_interval_s": 5},
+    # republish only when an ATM moves at least min_change (or, on a cross whose ATMs stay put,
+    # the implied correlation at least min_corr_change), at most every min_interval_s
+    "propagation": {"min_change": 0.005, "min_corr_change": 0.005, "min_interval_s": 5},
     # option expiry cuts: an event released after the cut weighs on the next expiry
     "cuts": {"NYC": {"tz": "America/New_York", "time": "10:00"},
              "TOK": {"tz": "Asia/Tokyo", "time": "15:00"}},

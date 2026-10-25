@@ -5,6 +5,7 @@ import unittest
 from datetime import datetime, timezone
 
 from volmarker.conventions import TENORS
+from volmarker.derived import implied_corr
 from volmarker.follow import Follower
 from volmarker.service import Service
 from volmarker.store import ConflictError, Store
@@ -128,10 +129,37 @@ class TestFollower(unittest.TestCase):
             eurusd, usdchf = 7.5, 8.0                            # re-derived on the latest bases, corr 0
             self.assertAlmostEqual(rec["tenors"]["1M"]["atm"], (eurusd ** 2 + usdchf ** 2) ** 0.5)
 
-    def test_follow_only_for_marked_pairs(self):
+    def test_derived_cross_follows_fmd_with_implied_corr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, trader, fol = setup(tmp, follow=False)
+            trader.create_pair("USDCHF", "marked", None, True)
+            trader.publish("USDCHF", flat_state("USDCHF", 8.0), 1)
+            trader.create_pair("EURCHF", "derived", ["EURUSD", "USDCHF"], False)
+            st = store.latest("EURCHF")
+            st["follow_market"] = True
+            for t in TENORS:                                     # as the Setup tab does: start from the FMD mids
+                st["tenors"][t]["atm"] = 4.9
+            trader.publish("EURCHF", st, st["version"])
+            write_market(store, "EURCHF", 5.0)
+            self.assertEqual(fol.step(NOW), ["EURCHF"])
+            cross = store.latest("EURCHF")
+            self.assertTrue(cross["follow_bases"])               # the setting is kept, but FMD owns the ATMs
+            self.assertAlmostEqual(cross["tenors"]["1M"]["atm"], 5.0)
+            self.assertAlmostEqual(cross["tenors"]["1M"]["corr"], implied_corr(5.0, 7.0, 8.0, 1, 1))
+            # an FMD-driven base move: the ATMs stay with FMD, the correlation follows the bases
+            trader.publish("EURUSD", flat_state("EURUSD", 7.6), store.latest("EURUSD")["version"], source="market")
+            cross = store.latest("EURCHF")
+            self.assertEqual(cross["source"], "propagation")
+            self.assertAlmostEqual(cross["tenors"]["1M"]["atm"], 5.0)
+            self.assertAlmostEqual(cross["tenors"]["1M"]["corr"], implied_corr(5.0, 7.6, 8.0, 1, 1))
+            v = cross["version"]
+            trader.publish("EURUSD", flat_state("EURUSD", 7.6001), store.latest("EURUSD")["version"], source="market")
+            self.assertEqual(store.latest("EURCHF")["version"], v)      # below min_corr_change
+
+    def test_not_excel_and_fmd_at_once(self):
         st = flat_state("EURCHF", 5.0)
-        st.update(mode="derived", bases=["EURUSD", "USDCHF"], follow_market=True)
-        with self.assertRaisesRegex(ValueError, "marked"):
+        st.update(mode="derived", bases=["EURUSD", "USDCHF"], follow_market=True, excel=True)
+        with self.assertRaisesRegex(ValueError, "Excel and follow FMD"):
             clean_state(st)
 
     def test_trader_edit_survives_market_versions(self):
