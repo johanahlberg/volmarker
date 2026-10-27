@@ -1066,8 +1066,11 @@ function renderEvents() {
   const past = all.filter((r) => r.date < today && r.kind !== "default").length;
   const wd = (d) => new Date(d + "T12:00:00").toLocaleDateString(undefined, { weekday: "short" });
   const ccys = [app.current.slice(0, 3), app.current.slice(3)];
-  $("#events").innerHTML = `<thead><tr><th class="tn" title="Option expiry the event weighs on">Expiry</th><th class="tn">Day</th><th class="tn" title="Release time (${esc(app.me.calendar_tz || "")})">Release</th><th class="tn">Ccy</th><th class="tn">Description</th><th title="Desk default">Default</th><th>Weight</th><th></th></tr></thead><tbody>` +
-    (rows.length ? rows.map((r) => {
+  // the day's total over both currencies, in one cell spanning the expiry's rows
+  const day = {};
+  for (const r of rows) (day[r.date] ||= []).push(r);
+  $("#events").innerHTML = `<thead><tr><th class="tn" title="Option expiry the event weighs on">Expiry</th><th class="tn">Day</th><th class="tn" title="Release time (${esc(app.me.calendar_tz || "")})">Release</th><th class="tn">Ccy</th><th class="tn">Description</th><th title="Desk default">Default</th><th>Weight</th><th title="All events on this expiry, both currencies: what the day weighs on top of its weekday weight">Day total</th><th></th></tr></thead><tbody>` +
+    (rows.length ? rows.map((r, k) => {
       const i = r.idx ? r.idx[0] : "", extra = r.idx ? r.idx.slice(1).join(",") : "";
       const attrs = r.kind === "default" ? `data-date="${r.date}" data-ccy="${r.ccy}" data-desc="${esc(r.desc)}"` : `data-i="${i}" data-extra="${extra}"`;
       // plain text in the same yyyy-mm-dd as the other rows (a date picker would show the PC's regional format)
@@ -1085,8 +1088,14 @@ function renderEvents() {
       return `<tr class="ev-${r.kind}"><td class="tn">${date}</td><td class="tn">${wd(r.date)}</td><td class="tn small${rel && rel.slice(0, 10) !== r.date ? " moved" : ""}" title="${esc(relTitle)}">${esc(relTxt)}</td><td class="tn">${ccy}</td><td class="tn">${desc}</td>
         <td class="muted"${breakdown ? ` title="${esc(breakdown)}"` : ""}>${r.def == null ? "" : fmt(r.def, 2) + (breakdown ? " Σ" : "")}</td>
         <td><input class="ev num${r.kind === "override" ? " ovr" : ""}" ${attrs} data-k="weight" value="${fmt(r.weight, 2)}" title="${r.kind === "default" ? "Desk default; type to override for this pair" : r.kind === "override" ? "Overrides the desk default for this pair" : "This pair's own event"}"></td>
-        <td>${act}</td></tr>`;
-    }).join("") : `<tr><td colspan="8" class="muted tn">No upcoming events</td></tr>`) + "</tbody>";
+        ${dayTotal(r, k)}<td>${act}</td></tr>`;
+    }).join("") : `<tr><td colspan="9" class="muted tn">No upcoming events</td></tr>`) + "</tbody>";
+  function dayTotal(r, k) {
+    if (k > 0 && rows[k - 1].date === r.date) return "";
+    const rs = day[r.date], tot = rs.reduce((s, x) => s + (Number(x.weight) || 0), 0);
+    const title = rs.map((x) => `${x.ccy || ""} ${fmt(Number(x.weight) || 0, 2)}`).join(" + ") + ` = ${fmt(tot, 2)}`;
+    return `<td class="daytot${rs.length > 1 ? " multi" : ""}" rowspan="${rs.length}" title="${esc(title)}">${fmt(tot, 2)}</td>`;
+  }
   const nDef = rows.filter((r) => r.kind === "default").length, nOvr = rows.filter((r) => r.kind === "override").length;
   $("#ev-note").innerHTML = (useDefaults() ? `${nDef} from desk defaults, ${nOvr} overridden. ` : "Desk defaults off for this pair. ") +
     (past ? `${past} past event(s) hidden <button class="ghost" id="ev-prune">Remove past</button>` : "");

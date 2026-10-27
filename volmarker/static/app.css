@@ -274,6 +274,8 @@ p.small, div.small { font-size: 12px; margin: 6px 0 0; }
 .gridwrap.tall { max-height: 340px; overflow-y: auto; }
 .grid tr.ev-default td { color: var(--ink-2); }
 .grid input.ovr { background: var(--dirty); color: var(--dirty-ink); }
+#events td.daytot { font-family: var(--mono); color: var(--muted); vertical-align: middle; }
+#events td.daytot.multi { color: var(--ink); font-weight: 600; border-left: 2px solid var(--border); }
 .grid td.chg { color: var(--s2); font-weight: 600; }
 .grid td.small { font-size: 11px; }
 details.card > summary { cursor: pointer; list-style: none; margin-bottom: 0; }
