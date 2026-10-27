@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from .conventions import TENORS
 
 MARKS = ["atm", "rr25", "rr10", "bf25", "bf10"]
-BRAND_ORDER = ["FMD", "BGC", "GFI", "RPM"]   # FMD = aggregated
+BRAND_ORDER = ["FMD", "FMD1", "BGC", "GFI", "RPM"]   # FMD = aggregated, FMD1 = FMD 1.0 via the Fenics XML poster
 
 
 def _brand_rank(b: str | None) -> int:
@@ -19,7 +19,7 @@ def _brand_rank(b: str | None) -> int:
 
 
 def market_view(quotes: list[dict], atm_type: str = "DNS", brand: str = "auto") -> dict:
-    """brand: 'auto' (FMD aggregate first, then BGC, GFI, RPM), 'best'
+    """brand: 'auto' (FMD aggregate first, then FMD1, BGC, GFI, RPM), 'best'
     (highest bid / lowest offer across brands) or a specific brand."""
     view: dict[str, dict] = {}
     groups: dict[tuple[str, str], list[dict]] = {}

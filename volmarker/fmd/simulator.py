@@ -262,3 +262,76 @@ def run_webapi(store: Store, port: int = 8936, secret: str | None = None, tick: 
     srv.daemon_threads = True
     log.info("FMD WebAPI simulator on http://127.0.0.1:%d (token: POST /token)", port)
     srv.serve_forever()
+
+
+# ---- Fenics XML poster (FMD 1.0) simulator ----------------------------------
+
+UNIT_WORDS = {"D": "Day", "W": "Week", "M": "Month", "Y": "Year"}
+XML_TYPES = {"DNS": ("ATM", ""), "RR25": ("RR", "0.25"), "RR10": ("RR", "0.10"), "S25": ("S", "0.25"), "S10": ("S", "0.10")}
+
+
+def _maturity(tenor: str) -> str:
+    n, unit = (1, "D") if tenor == "ON" else (int(tenor[:-1]), tenor[-1])
+    return f"{n} {UNIT_WORDS[unit]}{'s' if n > 1 else ''}"
+
+
+def get_vols_answer(instruments: list[Instrument], pair: str) -> str:
+    """A get_vols answer shaped as the Excel query reads it: body/data/node/node[field...]."""
+    from xml.sax.saxutils import quoteattr
+    nodes = []
+    for i, ins in enumerate(x for x in instruments if x.pair == pair and x.ptype in XML_TYPES and x.tenor in TENORS):
+        vtype, delta = XML_TYPES[ins.ptype]
+        vol = f"{ins.mid - ins.spread / 2:.4f}/{ins.mid + ins.spread / 2:.4f}"
+        nodes.append(f'<node name="{i}"><field name="Maturity" value={quoteattr(_maturity(ins.tenor))}/>'
+                     f'<field name="VolType" value="{vtype}"/><field name="PctDelta" value="{delta}"/>'
+                     f'<field name="Volity" value="{vol}"/></node>')
+    c1, c2 = split_pair(pair)
+    return (f'<?xml version="1.0" encoding="UTF-8"?><gfi_message version="2.0"><header><status>OK</status></header>'
+            f'<body><data name="vols" format="NAME_VALUE"><node name="{c1}/{c2}">{"".join(nodes)}</node></data></body></gfi_message>')
+
+
+def make_xml_handler(store: Store, password: str | None):
+    import urllib.parse
+    import xml.etree.ElementTree as ET
+    from http.server import BaseHTTPRequestHandler
+    instruments = [i for i in build_instruments(store) if i.brand == "FMD"]
+    lock = threading.Lock()
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, text: str, code: int = 200):
+            body = text.encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "text/xml")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            form = urllib.parse.parse_qs(self.rfile.read(n).decode())
+            try:
+                msg = ET.fromstring(form["xml"][0])
+                f = {x.get("name"): x.get("value") for x in msg.iter("field")}
+                pair = (f["Currency"] + f["CtrCcy"]).upper()
+            except (KeyError, ET.ParseError):
+                return self._send("<gfi_message><body><error>Error: bad request</error></body></gfi_message>")
+            if password and msg.findtext("header/password") != password:
+                return self._send("<gfi_message><body><error>Error: invalid username or password</error></body></gfi_message>")
+            with lock:
+                for ins in instruments:
+                    if ins.pair == pair:
+                        ins.mid += random.gauss(0, 0.02)
+                self._send(get_vols_answer(instruments, pair))
+
+    return H
+
+
+def run_xml(store: Store, port: int = 8937, password: str | None = None):
+    from http.server import ThreadingHTTPServer
+    srv = ThreadingHTTPServer(("127.0.0.1", port), make_xml_handler(store, password))
+    srv.daemon_threads = True
+    log.info("Fenics XML poster simulator on http://127.0.0.1:%d/xmlposter", port)
+    srv.serve_forever()

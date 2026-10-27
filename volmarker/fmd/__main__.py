@@ -1,12 +1,13 @@
 """Fenics Market Data feed.
 
-    python -m volmarker.fmd feed     --data <shared folder> [--transport fix|webapi]
-    python -m volmarker.fmd simulate --data <shared folder> [--transport fix|webapi] [--port N]
+    python -m volmarker.fmd feed     --data <shared folder> [--transport fix|webapi|xml]
+    python -m volmarker.fmd simulate --data <shared folder> [--transport fix|webapi|xml] [--port N]
     python -m volmarker.fmd feed     --data <folder> --sim 127.0.0.1:8935   (feed from a simulator)
 
 Connection settings live under "fmd" in <data>/config.json. The password
 is never stored there: set FMD_PASSWORD, or point fmd.password_file at a
-file on the local PC.
+file on the local PC. xml = FMD 1.0 polled from the Fenics XML poster
+(fmd.xml; password in FENICS_PASSWORD or fmd.xml.password_file).
 """
 
 from __future__ import annotations
@@ -17,15 +18,15 @@ import os
 
 from ..store import Store
 from . import simulator
-from .feed import Feed, read_password
+from .feed import Feed, read_password, xml_url
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="volmarker.fmd")
     ap.add_argument("command", choices=["feed", "simulate"])
     ap.add_argument("--data", default=os.environ.get("VOLMARKER_DATA", "data"))
-    ap.add_argument("--port", type=int, help="simulator port (default 8935 FIX, 8936 WebAPI)")
-    ap.add_argument("--transport", choices=["fix", "webapi"], help="override fmd.transport")
+    ap.add_argument("--port", type=int, help="simulator port (default 8935 FIX, 8936 WebAPI, 8937 XML)")
+    ap.add_argument("--transport", choices=["fix", "webapi", "xml"], help="override fmd.transport")
     ap.add_argument("--sim", metavar="HOST:PORT",
                     help="feed: connect to a simulator instead of FMD (no TLS)")
     ap.add_argument("--force", action="store_true", help="feed: start even if another feed looks alive")
@@ -40,10 +41,12 @@ def main() -> None:
     cfg = dict(store.config()["fmd"])
     if args.transport:
         cfg["transport"] = args.transport
-    webapi = cfg.get("transport") == "webapi"
+    webapi, xml = cfg.get("transport") == "webapi", cfg.get("transport") == "xml"
 
     if args.command == "simulate":
-        if webapi:
+        if xml:
+            simulator.run_xml(store, args.port or 8937)
+        elif webapi:
             simulator.run_webapi(store, args.port or 8936)
         else:
             simulator.run(store, args.port or 8935)
@@ -51,13 +54,19 @@ def main() -> None:
 
     if args.sim:
         host, port = args.sim.rsplit(":", 1)
-        if webapi:
+        if xml:
+            cfg["xml"] = dict(cfg["xml"], url=f"http://{host}:{port}", username="sim")
+        elif webapi:
             cfg["webapi"] = dict(cfg["webapi"], base_url=f"http://{host}:{port}",
                                  token_url=f"http://{host}:{port}/token", client_id="sim")
         else:
             cfg.update(host=host, port=int(port), tls=False,
                        sender_comp_id=cfg.get("sender_comp_id") or "SIMTEST")
         password = "sim"
+    elif xml:
+        if not (xml_url(cfg, store) and cfg["xml"].get("username")):
+            raise SystemExit("Set fmd.xml.url (or weights_export.fenics_url) and fmd.xml.username in config.json")
+        password = read_password(cfg)
     elif webapi:
         w = cfg["webapi"]
         if not (w.get("token_url") and w.get("client_id")):

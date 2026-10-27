@@ -5,7 +5,7 @@ import math
 import os
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from volmarker.calendar import calibrate_to_quotes, cumulative_weights, interpolate_atm, tenor_dates
@@ -359,6 +359,16 @@ class TestServiceAndStore(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_as_of_finds_the_last_version_before_a_moment(self):
+        for ts in ("2026-10-22T16:00:00+00:00", "2026-10-23T21:30:00+00:00", "2026-10-26T08:00:00+00:00"):
+            self.store.append({"pair": "EURUSD", "ts": ts, "tenors": {}}, None)
+        at = lambda iso: self.store.as_of("EURUSD", datetime.fromisoformat(iso))
+        self.assertEqual(at("2026-10-25T23:00:00+00:00")["version"], 2)   # Monday 00:00 CET: Friday's EOD
+        self.assertEqual(at("2026-10-23T21:30:00+00:00")["version"], 1)   # strictly before
+        self.assertEqual(at("2026-10-27T00:00:00+00:00")["version"], 3)
+        self.assertIsNone(at("2026-10-01T00:00:00+00:00"))
+        self.assertIsNone(self.store.as_of("USDJPY", datetime.fromisoformat("2026-10-27T00:00:00+00:00")))
 
 
 class TestConfigFile(unittest.TestCase):

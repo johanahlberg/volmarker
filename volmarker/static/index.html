@@ -12,6 +12,8 @@
   <div class="meta"><span id="me"></span><span class="sep">·</span><span id="datadir" class="muted"></span></div>
   <div class="spacer"></div>
   <button id="alerts-btn" class="alerts-btn" title="Market alerts">⚠ 0</button>
+  <button id="fenics-btn" class="ghost" title="Log in to Fenics to fetch the FMD 1.0 vols (XML poster)">Fenics login</button>
+  <span class="fx-every">every <input id="fx-int" type="number" min="1" step="any" class="num"><select id="fx-unit"><option value="1">s</option><option value="60">min</option></select></span>
   <span id="fmd" class="conn off" title="Fenics Market Data feed">FMD off</span>
   <span id="conn" class="conn" title="Live connection to the shared folder">● live</span>
   <button id="theme" class="ghost" title="Toggle light/dark">◐</button>
@@ -43,6 +45,7 @@
 
       <nav class="tabs">
         <button data-tab="surface" class="active">Surface</button>
+        <button data-tab="changes">Changes</button>
         <button data-tab="s3d">3D</button>
         <button data-tab="weights">Event weights</button>
         <button data-tab="setup">Setup</button>
@@ -235,6 +238,20 @@
         </div>
       </div>
 
+      <div data-panel="changes" hidden>
+        <div class="toolbar">
+          <span class="lbl">Compare with the EOD of</span>
+          <select id="ch-ref">
+            <option value="prev">the previous business day</option>
+            <option value="week">one week ago</option>
+            <option value="date">a date</option>
+          </select>
+          <input id="ch-date" type="date">
+          <span id="ch-info" class="muted"></span>
+        </div>
+        <table id="changes" class="grid small changes"></table>
+      </div>
+
       <div data-panel="history" hidden>
         <table id="history" class="grid small"></table>
       </div>
@@ -266,6 +283,22 @@
     <label class="check"><input id="np-key" type="checkbox"> Key pair</label>
     <div id="np-err" class="err"></div>
     <div class="actions"><button value="cancel" formnovalidate class="ghost">Cancel</button><button id="np-ok" value="ok" class="primary">Create</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlg-fenics">
+  <form method="dialog" id="form-fenics">
+    <h2>Fenics</h2>
+    <p class="muted small fx-note">Fetches the FMD 1.0 vols from the Fenics XML poster for every pair. Your login is kept in this VolMarker until you close it (never saved) and is also used to send event weights.</p>
+    <label>User <input id="fx-user" autocomplete="username" size="16"></label>
+    <label>Password <input id="fx-pass" type="password" autocomplete="current-password" size="16"></label>
+    <div id="fx-state" class="muted small"></div>
+    <div id="fx-err" class="err"></div>
+    <div class="actions">
+      <button value="cancel" formnovalidate class="ghost">Close</button>
+      <button id="fx-logout" class="ghost" hidden>Log out</button>
+      <button id="fx-ok" value="ok" class="primary">Log in</button>
+    </div>
   </form>
 </dialog>
 

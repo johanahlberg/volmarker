@@ -8,6 +8,7 @@ import json
 import logging
 import queue
 import re
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -86,6 +87,12 @@ def make_handler(svc: Service):
             if m:
                 limit = int(parse_qs(url.query).get("limit", ["50"])[0])
                 return self._json(svc.store.history(m.group(1), limit))
+            m = re.fullmatch(r"/api/pairs/([A-Z]{6})/as-of", p)
+            if m:
+                before = datetime.fromisoformat(parse_qs(url.query)["before"][0].replace("Z", "+00:00"))
+                return self._json(svc.as_of(m.group(1), before))
+            if p == "/api/fenics":
+                return self._json(svc.fenics.status())
             if p == "/api/alerts":
                 return self._json({"alerts": svc.alerts.list(), "config": svc.store.config()["alerts"]})
             if p == "/api/market/status":
@@ -113,6 +120,13 @@ def make_handler(svc: Service):
                 body = self._body()
                 if p == "/api/prefs":
                     return self._json(svc.save_prefs(body))
+                if p == "/api/fenics/login":
+                    return self._json(svc.fenics.login(body.get("username", ""), body.get("password", ""),
+                                                       body.get("seconds")))
+                if p == "/api/fenics/logout":
+                    return self._json(svc.fenics.logout())
+                if p == "/api/fenics/interval":
+                    return self._json(svc.fenics.set_seconds(body["seconds"]))
                 if p == "/api/event-defaults":
                     return self._json(svc.save_event_defaults(body.get("rows") or [], body.get("expected_version")))
                 if p in ("/api/calendar/preview", "/api/calendar/import"):

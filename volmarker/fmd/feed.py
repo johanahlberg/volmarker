@@ -1,4 +1,5 @@
-"""The feed process: one FIX session for the whole desk.
+"""The feed process: one FMD session for the whole desk (FIX, WebAPI, or
+FMD 1.0 polled from the Fenics XML poster).
 
 Writes to the shared data folder:
 
@@ -27,6 +28,7 @@ from ..store import Store, atomic_write
 from .book import QuoteBook
 from .fix import FixSession
 from .webapi import WebApiSession
+from .xmlposter import XmlPosterSession
 
 log = logging.getLogger("volmarker.fmd")
 
@@ -50,7 +52,15 @@ def read_secret(env: str | None, file: str | None, what: str) -> str:
     raise SystemExit(f"No {what}: set {env} or the matching *_file setting in config.json")
 
 
+def xml_url(cfg: dict, store: Store) -> str:
+    """The Fenics pricing server; by default the one event weights are sent to."""
+    return cfg["xml"].get("url") or store.config()["weights_export"].get("fenics_url") or ""
+
+
 def read_password(cfg: dict) -> str:
+    if cfg.get("transport") == "xml":
+        x = cfg["xml"]
+        return read_secret(x.get("password_env") or "FENICS_PASSWORD", x.get("password_file"), "Fenics password")
     if cfg.get("transport") == "webapi":
         w = cfg["webapi"]
         return read_secret(w.get("client_secret_env") or "FMD_CLIENT_SECRET",
@@ -71,12 +81,21 @@ class Feed:
         self.dirty: set[str] = set()
         self.instance = f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
         transport = cfg.get("transport", "fix")
-        host = cfg["webapi"]["base_url"] if transport == "webapi" else f"{cfg['host']}:{cfg['port']}"
+        host = (cfg["webapi"]["base_url"] if transport == "webapi" else xml_url(cfg, store) if transport == "xml"
+                else f"{cfg['host']}:{cfg['port']}")
         self.status = {"instance": self.instance, "transport": transport, "host": host,
                        "connected": False, "since": None, "last_msg": None, "msgs": 0,
                        "entries": 0, "last_error": None, "started": now_iso()}
         if not force:
             self._check_single_instance()
+        if transport == "xml":
+            x = cfg["xml"]
+            self.session = XmlPosterSession(
+                host, x["username"], password, pairs=lambda: x.get("pairs") or store.list_pairs(),
+                scenario=x.get("scenario", "fenicsVols"), interval=x.get("interval", 60),
+                brand=x.get("brand", "FMD1"), atm_ptype=x.get("atm_type", "DNS"), timeout=x.get("timeout", 20),
+                on_entries=self.on_entries, on_status=self.on_status)
+            return
         if transport == "webapi":
             w = cfg["webapi"]
             self.session = WebApiSession(

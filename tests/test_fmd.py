@@ -250,6 +250,112 @@ data:{"ask":"3.719","mid":"3.714","bid":"3.709","sym":"FMD.RATES.OIS.USD.SOFR.1Y
             self.assertIn("_snapshot_age=2", sess.url())
 
 
+class TestXmlPoster(unittest.TestCase):
+    # shaped as the Excel query fetchFenicsVols reads it: body/data/node/node[field...]
+    ANSWER = """<?xml version="1.0"?><gfi_message version="2.0"><header/><body><data name="d" format="NAME_VALUE">
+      <node name="EUR/USD">
+        <node name="1"><field name="Maturity" value="1 Day"/><field name="VolType" value="ATM"/><field name="Volity" value="6.10/6.40"/></node>
+        <node name="2"><field name="Maturity" value="3 Months"/><field name="VolType" value="RR"/><field name="PctDelta" value="0.25"/><field name="Volity" value="-0.30/-0.10"/></node>
+        <node name="3"><field name="Maturity" value="1 Year"/><field name="VolType" value="S"/><field name="PctDelta" value="0.10"/><field name="Volity" value="0.75"/></node>
+        <node name="4"><field name="Maturity" value="7 Years"/><field name="VolType" value="ATM"/><field name="Volity" value="n/a"/></node>
+      </node></data></body></gfi_message>"""
+
+    def test_request_parse_and_entries(self):
+        from datetime import datetime
+        from volmarker.fmd.xmlposter import get_vols_xml, norm_maturity, parse_vols, rows_to_entries
+        msg = get_vols_xml("EURUSD", "fenicsVols", "u", "p&w", datetime(2026, 10, 27, 9, 0))
+        for part in ('function="RATE_FETCH" name="get_vols"', 'name="horDate" value="27 Oct 2026"',
+                     'name="Currency" value="eur"', 'name="CtrCcy" value="usd"', "<password>p&amp;w</password>"):
+            self.assertIn(part, msg)
+        self.assertEqual([norm_maturity(m) for m in ("1 Day", "2 Weeks", "18 Months", "1 Year", "O/N")],
+                         ["ON", "2W", "18M", "1Y", None])
+        rows = parse_vols(self.ANSWER)
+        self.assertEqual(rows, [{"tenor": "ON", "ptype": "ATM", "bid": 6.1, "offer": 6.4},
+                                {"tenor": "3M", "ptype": "RR25", "bid": -0.3, "offer": -0.1},
+                                {"tenor": "1Y", "ptype": "S10", "bid": 0.75, "offer": 0.75}])
+        book = QuoteBook()
+        for e in rows_to_entries("EURUSD", rows, "FMD1", "DNS", "2026-10-27T08:00:00+00:00"):
+            book.apply(e)
+        view = market_view(book.pair_quotes("EURUSD"))
+        self.assertAlmostEqual(view["ON"]["atm"]["mid"], 6.25)
+        self.assertFalse(view["ON"]["atm"]["alt_atm"])
+        self.assertAlmostEqual(view["3M"]["rr25"]["mid"], -0.2)
+        self.assertEqual(view["1Y"]["bf10"]["brand"], "FMD1")
+        with self.assertRaisesRegex(ValueError, "invalid username"):
+            parse_vols("<gfi_message><body><error>Error: invalid username or password</error></body></gfi_message>")
+        with self.assertRaisesRegex(ValueError, "not XML"):
+            parse_vols("<html>Gateway error")
+
+    def test_poll_against_simulator(self):
+        from http.server import ThreadingHTTPServer
+        from volmarker.fmd.xmlposter import XmlPosterSession
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            svc = Service(store, "t")
+            svc.create_pair("EURUSD", "marked", None, True)
+            svc.publish("EURUSD", flat_state("EURUSD", 7.0), 1)
+            srv = ThreadingHTTPServer(("127.0.0.1", 0), simulator.make_xml_handler(store, "s3cret"))
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            url = f"http://127.0.0.1:{srv.server_address[1]}"
+            try:
+                status = []
+                bad = XmlPosterSession(url, "u", "wrong", lambda: ["EURUSD"], on_status=status.append)
+                self.assertEqual(bad.poll_once()[0], 0)
+                got = []
+                sess = XmlPosterSession(url, "u", "s3cret", lambda: ["EURUSD"], on_entries=got.extend)
+                self.assertEqual(sess.poll_once(), (1, []))
+            finally:
+                srv.shutdown()
+                srv.server_close()
+            book = QuoteBook()
+            for e in got:
+                book.apply(e)
+            view = market_view(book.pair_quotes("EURUSD"))
+            self.assertEqual(set(view["1M"]), {"atm", "rr25", "rr10", "bf25", "bf10"})
+            self.assertAlmostEqual(view["1M"]["atm"]["mid"], 7.0, delta=1.0)
+            self.assertEqual(view["ON"]["atm"]["brand"], "FMD1")
+
+class TestFenicsLogin(unittest.TestCase):
+    def test_login_feeds_market_files_until_logout(self):
+        from http.server import ThreadingHTTPServer
+        from volmarker.fenics import FenicsLogin
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            svc = Service(store, "t")
+            svc.create_pair("EURUSD", "marked", None, True)
+            svc.publish("EURUSD", flat_state("EURUSD", 7.0), 1)
+            srv = ThreadingHTTPServer(("127.0.0.1", 0), simulator.make_xml_handler(store, "s3cret"))
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            (store.root / "config.json").write_text(json.dumps(
+                {"fmd": {"xml": {"url": f"http://127.0.0.1:{srv.server_address[1]}"}}}))
+            fx = FenicsLogin(store)
+            try:
+                self.assertEqual(fx.status()["seconds"], 300)
+                with self.assertRaisesRegex(ValueError, "login failed: .*invalid username"):
+                    fx.login("anna", "wrong")
+                self.assertFalse(fx.status()["logged_in"])
+                st = fx.login("anna", "s3cret", 600)
+                self.assertTrue(st["logged_in"])
+                self.assertEqual((st["user"], st["seconds"], fx.credentials()), ("anna", 600, ("anna", "s3cret")))
+                path = store.root / "market" / "EURUSD.json"
+                deadline = time.time() + 5
+                while time.time() < deadline and not path.exists():
+                    time.sleep(0.1)
+                quotes = json.loads(path.read_text())["quotes"]
+                self.assertEqual({q["brand"] for q in quotes}, {"FMD1"})
+                self.assertEqual(fx.set_seconds(30)["seconds"], 30)
+                self.assertEqual(fx.feed.session.interval, 30)
+                with self.assertRaisesRegex(ValueError, "at most every 10 seconds"):
+                    fx.set_seconds(5)
+                with self.assertRaisesRegex(ValueError, "Another market data feed"):
+                    FenicsLogin(store).login("ben", "s3cret")      # a second app on the same folder
+                self.assertFalse(fx.logout()["logged_in"])
+                self.assertIsNone(fx.credentials())
+            finally:
+                fx.logout()
+                srv.shutdown()
+                srv.server_close()
+
 class TestDailySegments(unittest.TestCase):
     def test_level_differences_between_pillars_are_not_events(self):
         from datetime import date, timedelta

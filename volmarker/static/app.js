@@ -221,13 +221,17 @@ function showTab(tab, render = true) {
   if (!render || !app.view) return;
   if (tab === "weights") renderWeights(true);
   if (tab === "history") renderHistory();
+  if (tab === "changes") loadChanges();
   if (tab === "setup") renderSetup();
   if (tab === "surface") renderTermChart();
   if (tab === "s3d") render3D();
 }
 async function selectPair(pair) {
   if (app.dirty && pair !== app.current && !confirmDiscard()) return;
-  if (pair !== app.current) { app.defEvents = []; app.testRows = []; showTab("surface", false); }
+  if (pair !== app.current) {      // keep the open tab, except Setup and History (pair-specific chores)
+    app.defEvents = []; app.testRows = [];
+    if (app.tab === "setup" || app.tab === "history") showTab("surface", false);
+  }
   app.current = pair;
   history.replaceState(null, "", "#" + pair);
   await reloadView();
@@ -250,6 +254,7 @@ async function reloadView() {
   buildGrid(); renderAll();
   if (app.tab === "weights") renderWeights(true);
   if (app.tab === "history") renderHistory();
+  if (app.tab === "changes") loadChanges();
   if (app.tab === "setup") renderSetup();
 }
 // spread parent: the grid shows this pair's ATM minus the parent's published ATM
@@ -433,6 +438,13 @@ function revertDraftValue(t, f) {
   if (f === "atm" && app.draft.follow_parent) app.draft.tenors[t].psprd = clone(publishedRow(t).psprd);
 }
 
+// a cell's value and the cells calculated from it, restored together by Esc
+const LINKED = new Proxy({
+  atm: ["atm", "corr", "psprd"], corr: ["corr", "atm"], psprd: ["psprd", "atm"],
+  rr10: ["rr10", "rr10f"], rr10f: ["rr10f", "rr10"], bf10: ["bf10", "bf10f"], bf10f: ["bf10f", "bf10"],
+}, { get: (o, f) => o[f] ?? [f] });
+let focusSnap = null;
+
 function moveFocus(el, dRow) {
   const f = el.dataset.f;
   const i = app.tenors.indexOf(el.dataset.t) + dRow;
@@ -447,6 +459,7 @@ function changed() {
   app.dirty = true;
   updateButtons();
   if (app.tab === "weights") weightsCalc();
+  previewSeq++;                    // a preview still in flight was computed from the old draft: drop it
   clearTimeout(previewTimer);
   previewTimer = setTimeout(runPreview, 120);
 }
@@ -456,25 +469,14 @@ async function runPreview() {
     const p = await api(`/api/pairs/${app.current}/preview`, { state: app.draft });
     if (seq !== previewSeq) return;
     app.preview = p;
-    for (const t of app.tenors) {                 // sync the calculated side of each 10D pair
-      if (document.activeElement?.dataset?.t === t) continue;
-      for (const f of ["rr10", "rr10f", "bf10", "bf10f"]) app.draft.tenors[t][f] = p.state.tenors[t][f];
-    }
-    if (app.draft.follow_parent) {               // sync ATM/spread computed from the parent
-      for (const t of app.tenors) {
-        if (document.activeElement?.dataset?.t === t) continue;
-        app.draft.tenors[t].atm = p.state.tenors[t].atm;
-        app.draft.tenors[t].psprd = p.state.tenors[t].psprd;
-      }
-    }
-    if (app.draft.mode === "derived") {          // sync derived ATM/corr into the draft
-      for (const t of app.tenors) {
-        const focused = document.activeElement?.dataset?.t === t;
-        if (!focused) {
-          app.draft.tenors[t].atm = p.state.tenors[t].atm;
-          app.draft.tenors[t].corr = p.state.tenors[t].corr;
-        }
-      }
+    // copy calculated values into the draft, all but the cell being typed in, so its linked cell
+    // (10D quote/factor, ATM/spread, ATM/corr) updates at once
+    const a = document.activeElement, typing = a?.matches?.("#grid input.cell") ? a : null;
+    const sync = (t, f) => { if (!(typing && typing.dataset.t === t && typing.dataset.f === f)) app.draft.tenors[t][f] = p.state.tenors[t][f]; };
+    for (const t of app.tenors) {
+      for (const f of ["rr10", "rr10f", "bf10", "bf10f"]) sync(t, f);       // the calculated side of each 10D pair
+      if (app.draft.follow_parent) { sync(t, "atm"); sync(t, "psprd"); }     // ATM/spread computed from the parent
+      if (app.draft.mode === "derived") { sync(t, "atm"); sync(t, "corr"); } // derived ATM/corr
     }
     hideBanner("error");
   } catch (e) {
@@ -599,8 +601,73 @@ function renderFeed(st) {
   el.classList.toggle("warn", st.state === "down");
   el.textContent = st.state === "live" ? "● FMD live" : st.state === "down" ? "● FMD down" : "FMD off";
   el.title = st.state === "off" ? "No market data feed running" :
-    `Fenics Market Data ${st.host || ""} · last message ${st.last_msg ? localTime(st.last_msg) : "–"}` + (st.last_error ? ` · ${st.last_error}` : "");
+    `${st.transport === "xml" ? "FMD 1.0 from the Fenics XML poster" : "Fenics Market Data"} ${st.host || ""} · last message ${st.last_msg ? localTime(st.last_msg) : "–"}` + (st.last_error ? ` · ${st.last_error}` : "");
 }
+// ---------------------------------------------------------------- Fenics login (FMD 1.0 via the XML poster)
+async function loadFenics() {
+  try { app.fenics = await api("/api/fenics"); } catch { app.fenics = null; }
+  renderFenics();
+}
+function renderFenics() {
+  const f = app.fenics, on = !!f?.logged_in, btn = $("#fenics-btn");
+  btn.textContent = on ? `Fenics: ${f.user}` : "Fenics login";
+  btn.classList.toggle("on", on);
+  btn.title = on ? `Logged in to Fenics ${f.url}: FMD 1.0 vols every ${everyText(f.seconds)}. Click to log out` :
+    "Log in to Fenics to fetch the FMD 1.0 vols (XML poster)";
+  $("#wx-pass").placeholder = on ? "(your Fenics login)" : "Password";
+  // the interval field: whole minutes in min, anything else in s (not while it is being typed in)
+  const sec = fenicsSeconds();
+  if (!$(".fx-every").contains(document.activeElement)) {
+    const unit = sec % 60 ? 1 : 60;
+    $("#fx-unit").value = unit; $("#fx-int").value = sec / unit;
+  }
+  $(".fx-every").classList.toggle("on", on);
+  $(".fx-every").title = (on ? "How often the FMD 1.0 vols are fetched from Fenics; changes apply at once"
+    : "How often to fetch the FMD 1.0 vols once logged in to Fenics") + " (at least 10 s)";
+}
+const everyText = (sec) => sec % 60 ? `${sec} s` : `${sec / 60} min`;
+const fenicsSeconds = () => (app.fenics?.logged_in ? app.fenics.seconds : app.prefs.fenics_seconds) || 300;
+async function setFenicsInterval() {
+  const el = $("#fx-int"), sec = Number(el.value) * Number($("#fx-unit").value);
+  const bad = !(sec >= 10);
+  el.classList.toggle("bad", bad);
+  if (bad) { el.title = "At least 10 seconds"; return; }
+  el.title = "";
+  app.prefs.fenics_seconds = sec; savePrefs();
+  if (app.fenics?.logged_in) {
+    try { app.fenics = await api("/api/fenics/interval", { seconds: sec }); }
+    catch (err) { el.classList.add("bad"); el.title = err.message; return; }
+  }
+  renderFenics();
+}
+function openFenics() {
+  const f = app.fenics || {}, on = !!f.logged_in;
+  $("#fx-user").value = on ? f.user : app.prefs.fenics_user || "";
+  $("#fx-user").readOnly = on;
+  $("#fx-pass").value = ""; $("#fx-pass").closest("label").hidden = on;
+  $("#fx-ok").hidden = on;
+  $("#fx-logout").hidden = !on;
+  $("#fx-err").textContent = "";
+  $("#fx-state").textContent = !f.url ? "No Fenics server set (config.json: fmd.xml.url)" :
+    (on ? `${f.url} · every ${everyText(f.seconds)} · ${f.connected ? `last fetch ${f.last_msg ? localTime(f.last_msg) : "–"}` : "not answering"}${f.last_error ? ` · ${f.last_error}` : ""}`
+      : `${f.url} · every ${everyText(fenicsSeconds())} (the field at the top)`);
+  $("#dlg-fenics").showModal();
+  if (!on) ($("#fx-user").value ? $("#fx-pass") : $("#fx-user")).focus();
+}
+async function submitFenics(e) {
+  e.preventDefault();
+  const username = $("#fx-user").value.trim();
+  $("#fx-ok").disabled = true; $("#fx-err").textContent = "Logging in…";
+  try {
+    app.fenics = await api("/api/fenics/login", { username, password: $("#fx-pass").value, seconds: fenicsSeconds() });
+    app.prefs.fenics_user = username; savePrefs();
+    $("#dlg-fenics").close();
+  } catch (err) { $("#fx-err").textContent = err.message; }
+  $("#fx-pass").value = "";
+  $("#fx-ok").disabled = false;
+  renderFenics();
+}
+
 function mktQuote(t, m) {
   if (!app.market || !$("#mkt-show").checked || app.market.feed.state === "off") return null;
   return app.market.view?.[t]?.[m] || null;
@@ -689,6 +756,7 @@ function renderFollow() {
 function renderAll() {
   renderHeader(); renderFollow(); renderGrid(); renderMarket(); renderWarnings(); renderSkewExpiry(); renderTermChart(); updateButtons();
   if (app.tab === "s3d") render3D();
+  if (app.tab === "changes") renderChanges();
 }
 
 // ---------------------------------------------------------------- charts
@@ -1244,8 +1312,9 @@ function renderWeightsExport() {
 }
 async function sendWeights() {
   const username = $("#wx-user").value.trim(), password = $("#wx-pass").value;
-  if (!username || !password) { $("#wx-msg").textContent = "User and password needed"; return; }
-  if (app.prefs.fenics_user !== username) { app.prefs.fenics_user = username; savePrefs(); }
+  if (!password && !app.fenics?.logged_in) { $("#wx-msg").textContent = "User and password needed (or log in to Fenics)"; return; }
+  if (!username && password) { $("#wx-msg").textContent = "User needed"; return; }
+  if (username && app.prefs.fenics_user !== username) { app.prefs.fenics_user = username; savePrefs(); }
   $("#wx-send").disabled = true; $("#wx-msg").textContent = "Sending…";
   try {
     const r = await api(`/api/pairs/${app.current}/weights-export`, { username, password });
@@ -1485,7 +1554,7 @@ async function saveSettings() {
   for (const k of edits.keys) if (JSON.stringify(oldDraft[k]) !== JSON.stringify(app.draft[k])) { app.draft[k] = clone(oldDraft[k]); kept++; }
   for (const [t, f] of edits.cells) if (!same(oldDraft.tenors[t][f], app.draft.tenors[t][f])) { app.draft.tenors[t][f] = oldDraft.tenors[t][f]; kept++; }
   if (kept) { changed(); renderGrid(); }
-  if (app.tab === "setup") renderSetup();
+  showTab("surface");             // back to the marks once the settings are saved
   await loadPairs();
   showBanner(`Settings saved${kept ? ". Your other edits are still in the draft; publish them when ready." : "."}`, [["OK", () => hideBanner()]]);
 }
@@ -1593,6 +1662,64 @@ async function renderHistory() {
       <td class="tn">${esc(r.source)}</td><td class="tn">${esc(r.comment)}</td>
       <td>${fmt(r.tenors["1M"].atm, 3)}</td><td>${fmt(r.tenors["1Y"].atm, 3)}</td>
       <td>${i ? `<button class="ghost restore" data-i="${i}" title="Copy this version into the draft">Restore</button>` : ""}</td></tr>`).join("") + "</tbody>";
+}
+
+// ---------------------------------------------------------------- changes vs an earlier EOD
+// the EOD of a day is the last version published before the next local midnight
+const CH_FIELDS = [
+  { f: "corr", label: "Corr", dp: 3, row: true, derived: true },
+  { f: "atm", label: "ATM", dp: 3 },
+  { f: "spread", label: "Spread", dp: 2, row: true },
+  { f: "rr25", label: "RR 25D", dp: 3 }, { f: "rr10", label: "RR 10D", dp: 3 },
+  { f: "bf25", label: "BF 25D", dp: 3 }, { f: "bf10", label: "BF 10D", dp: 3 },
+];
+function chRefDay() {
+  const d = new Date(); d.setHours(0, 0, 0, 0);
+  const kind = $("#ch-ref").value;
+  if (kind === "date") return $("#ch-date").value ? new Date($("#ch-date").value + "T00:00") : null;
+  d.setDate(d.getDate() - (kind === "week" ? 7 : 1));
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1);    // Monday: Friday's EOD
+  const p = (n) => String(n).padStart(2, "0");
+  $("#ch-date").value = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  return d;
+}
+let chSeq = 0;
+async function loadChanges() {
+  const day = chRefDay(), seq = ++chSeq;
+  if (!day) { app.changes = null; return renderChanges(); }
+  const before = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1).toISOString();
+  const key = `${app.current} ${before}`;
+  if (app.changes?.key !== key) {
+    const r = await api(`/api/pairs/${app.current}/as-of?before=${encodeURIComponent(before)}`);
+    if (seq !== chSeq) return;                    // another pair or date chosen meanwhile
+    app.changes = { key, day, ref: r };
+  }
+  renderChanges();
+}
+function renderChanges() {
+  const c = app.changes, ref = c?.ref;
+  const dayTxt = c?.day.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  $("#ch-info").textContent = !c ? "" : !ref ? `${app.current} was not published before the end of ${dayTxt}` :
+    `Now: ${app.dirty ? "your draft" : `v${app.baseVersion}`}. EOD ${dayTxt}: v${ref.record.version}, ${localTime(ref.record.ts)} by ${ref.record.user} (${ref.record.source})`;
+  const fields = CH_FIELDS.filter((x) => !x.derived || app.draft.mode === "derived");
+  const val = (res, rec, t, x) => {
+    const v = x.row ? rec.tenors[t]?.[x.f] : res[t]?.mid?.[x.f];
+    return v == null ? null : rrSign(x.f) * v;
+  };
+  let h = `<thead><tr><th class="tn"></th>${fields.map((x) => `<th class="grp sep" colspan="3">${esc(x.label)}${RR_FIELDS.includes(x.f) && app.draft.rr_put ? " (put − call)" : ""}</th>`).join("")}</tr>
+    <tr><th class="tn">Tenor</th>${fields.map(() => `<th class="sep">Now</th><th>EOD</th><th>Δ</th>`).join("")}</tr></thead><tbody>`;
+  for (const t of app.tenors) {
+    h += `<tr><td class="tn">${t}</td>`;
+    for (const x of fields) {
+      const now = val(app.preview.resolved, app.draft, t, x), was = ref ? val(ref.resolved, ref.record, t, x) : null;
+      const d = now != null && was != null ? now - was : null;
+      const dir = d == null || Math.abs(d) < 0.5 * 10 ** -x.dp ? "" : d > 0 ? "up" : "down";
+      h += `<td class="sep">${fmt(now, x.dp)}</td><td class="was">${fmt(was, x.dp)}</td>` +
+        `<td class="d ${dir}">${d == null ? "" : (d > 0 && dir ? "+" : "") + fmt(dir ? d : 0, x.dp)}</td>`;
+    }
+    h += `</tr>`;
+  }
+  $("#changes").innerHTML = h + "</tbody>";
 }
 
 // ---------------------------------------------------------------- live updates
@@ -1775,16 +1902,26 @@ function wire() {
     app.draft[e.target.dataset.lock] = e.target.checked;
     changed(); renderGrid(); renderMarket();
   });
-  grid.addEventListener("focusin", (e) => { if (e.target.matches("input.cell")) e.target.select(); });
+  grid.addEventListener("focusin", (e) => {
+    const el = e.target; if (!el.matches("input.cell")) return;
+    el.select();
+    const row = app.draft.tenors[el.dataset.t];      // the cell and its linked cells as they were on entry, for Esc
+    focusSnap = Object.fromEntries(LINKED[el.dataset.f].map((f) => [f, clone(row[f])]));
+  });
   grid.addEventListener("focusout", () => setTimeout(renderGrid, 0));
   grid.addEventListener("keydown", (e) => {
     const el = e.target; if (!el.matches("input.cell")) return;
     if (e.key === "ArrowDown" || e.key === "Enter") { e.preventDefault(); moveFocus(el, 1); }
     else if (e.key === "ArrowUp") { e.preventDefault(); moveFocus(el, -1); }
     else if (e.key === "Escape") {
-      const t = el.dataset.t, f = el.dataset.f;
-      revertDraftValue(t, f === "psprd" ? "atm" : f);
-      el.value = fmt(f === "psprd" ? parentSpread(t, app.draft.tenors[t].atm) : app.draft.tenors[t][f], 3); changed();
+      // first Esc restores the value the cell had on entry, a second the published value
+      const t = el.dataset.t, f = el.dataset.f, row = app.draft.tenors[t];
+      if (focusSnap && Object.keys(focusSnap).some((k) => !same(row[k], focusSnap[k]))) Object.assign(row, clone(focusSnap));
+      else revertDraftValue(t, f === "psprd" ? "atm" : f);
+      const col = visibleCols().find((c) => c.f === f);
+      el.value = f === "psprd" ? fmt(app.draft.follow_parent && row.psprd != null ? row.psprd : parentSpread(t, row.atm), 3)
+        : col?.skew && !row[f] ? "" : fmt(row[f] == null ? row[f] : rrSign(f) * row[f], col?.dp ?? 3);
+      e.preventDefault(); el.select(); changed();     // all selected, ready to type over
     }
   });
 
@@ -1793,6 +1930,8 @@ function wire() {
     const q = mktQuote(el.dataset.t, el.dataset.m); if (!q) return;
     setFromMarket(el.dataset.t, el.dataset.m, q.mid); changed(); renderGrid();
   });
+  $("#ch-ref").onchange = () => loadChanges();
+  $("#ch-date").onchange = () => { $("#ch-ref").value = "date"; loadChanges(); };
   $("#mkt-show").onchange = () => { renderMarket(); renderTermChart(); };
   $("#mkt-brand").onchange = () => loadMarket();
   const followBlock = () => {
@@ -1894,6 +2033,22 @@ function wire() {
     $$(".tabs button")[0].click();
   });
 
+  $("#fenics-btn").onclick = openFenics;
+  $("#fx-int").addEventListener("change", setFenicsInterval);
+  $("#fx-int").addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
+  let fxUnit = 60;
+  $("#fx-unit").addEventListener("focus", () => (fxUnit = Number($("#fx-unit").value)));
+  $("#fx-unit").addEventListener("change", () => {      // a new unit converts the shown value; the interval stays
+    const u = Number($("#fx-unit").value), v = Number($("#fx-int").value) * fxUnit / u;
+    $("#fx-int").value = Math.round(v * 100) / 100; fxUnit = u; $("#fx-int").focus(); $("#fx-int").select();
+  });
+  $("#fx-ok").onclick = submitFenics;
+  $("#fx-logout").onclick = async (e) => {
+    e.preventDefault();
+    try { app.fenics = await api("/api/fenics/logout", {}); } catch (err) { $("#fx-err").textContent = err.message; return; }
+    $("#dlg-fenics").close(); renderFenics();
+  };
+
   // new pair
   const dlg = $("#dlg-new");
   $("#newpair").onclick = () => { $("#np-err").textContent = ""; $("#form-new").reset(); npMode(); dlg.showModal(); $("#np-pair").focus(); };
@@ -1945,6 +2100,7 @@ async function init() {
   $("#sh-from").value = "1M"; $("#sh-to").value = "1Y";
   try { app.prefs = await api("/api/prefs"); } catch { app.prefs = {}; }
   wire();
+  loadFenics();
   await loadPairs();
   loadAlerts();
   connect();

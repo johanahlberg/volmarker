@@ -22,6 +22,7 @@ from .calendar import (DEFAULT_CUT, calibrate_to_quotes, cumulative_weights, dai
                        implied_daily_weights, interpolate_atm, is_good_day, normalise_weights,
                        rule_weight, tenor_dates, with_defaults)
 from .conventions import split_pair
+from .fenics import FenicsLogin
 from .fmd.book import daily_n
 from .market import compare, market_view, parse_fix_time
 from .store import ConflictError, LockTimeout, Store, atomic_write
@@ -64,6 +65,7 @@ class Service:
         self.follow_status: dict = {}
         self._market_mtimes: dict[str, float] = {}
         self.alerts = AlertEngine()
+        self.fenics = FenicsLogin(store)          # FMD 1.0 feed while a trader is logged in to Fenics
         self._leader = False
         self.excel_foreign: dict[str, float] = {}     # pair -> mtime of a file changed outside VolMarker
         self.excel_errors: dict[str, str] = {}
@@ -129,6 +131,11 @@ class Service:
         bases = {b: self._resolved_mid_atm(b) for b in (rec.get("bases") or [])}
         return {"record": rec, "resolved": resolve(rec), "bases": bases,
                 "dependents": self.dependents(pair)}
+
+    def as_of(self, pair: str, before: datetime) -> dict | None:
+        """The pair as last published before a moment, to compare today's marks with."""
+        rec = self.store.as_of(pair, before)
+        return {"record": rec, "resolved": resolve(rec)} if rec else None
 
     # ---- market data (written by the FMD feed process) -----------------
     def feed_alive(self) -> bool:
@@ -302,7 +309,10 @@ class Service:
 
     def send_weights(self, pair: str, username: str, password: str) -> dict:
         """Write the Front Arena event files and post the weights to Fenics
-        (published version). The password is only passed on, never stored."""
+        (published version). The password is only passed on, never stored.
+        Without one, the app's Fenics login is used."""
+        if not password and self.fenics.credentials():
+            username, password = self.fenics.credentials()
         rec, w, holidays, today = self._weights_target(pair)
         cfg = self.store.config()["weights_export"]
         fx, ws = weights_export.frontarena_lines(pair, w, holidays, today, cfg["date_format"])
@@ -1275,3 +1285,4 @@ class Service:
 
     def stop(self) -> None:
         self._stop.set()
+        self.fenics.logout()

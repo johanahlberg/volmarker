@@ -29,7 +29,7 @@ import socket
 import threading
 import time
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 LOCK_TIMEOUT = 15.0     # seconds to wait for a lock
@@ -59,7 +59,7 @@ DEFAULT_CONFIG = {
     "stale_minutes_other": 1440,
     # Fenics Market Data FIX feed (password: FMD_PASSWORD env var or a local password_file)
     "fmd": {
-        "transport": "fix",            # "fix" or "webapi"
+        "transport": "fix",            # "fix", "webapi" or "xml" (FMD 1.0 from the Fenics XML poster)
         "host": "uat-ny-feed.fenicsmd.com",
         "port": 8935,
         "tls": True,
@@ -83,6 +83,19 @@ DEFAULT_CONFIG = {
             "snapshot_age": 2,
             "idle_timeout": 120,
             "ca_file": None,
+        },
+        # FMD 1.0 as fed into Fenics, polled like the Excel query fetchFenicsVols (RATE_FETCH get_vols)
+        "xml": {
+            "url": "",                  # the pricing server, /xmlposter is appended; empty = weights_export.fenics_url
+            "username": "",
+            "password_env": "FENICS_PASSWORD",
+            "password_file": None,
+            "scenario": "fenicsVols",
+            "interval": 300,            # seconds between rounds over all pairs (the app's Fenics login sets its own)
+            "pairs": [],                # empty = every pair in VolMarker
+            "brand": "FMD1",            # the brand its quotes show under
+            "atm_type": "DNS",          # convention of Fenics' ATM
+            "timeout": 20,
         },
     },
     # event weights: Fenics XML poster and the Front Arena event files (as the Excel weight workbook)
@@ -228,6 +241,17 @@ class Store:
         if not path.exists():
             return []
         return [json.loads(l) for l in _tail_lines(path, limit)]
+
+    def as_of(self, pair: str, before: datetime) -> dict | None:
+        """The last version published before a moment (e.g. the previous day's EOD)."""
+        path = self._history(pair)
+        if not path.exists():
+            return None
+        for line in _reverse_lines(path):
+            rec = json.loads(line)
+            if datetime.fromisoformat(rec["ts"]) < before:
+                return rec
+        return None
 
     def append(self, record: dict, expected_version: int | None) -> dict:
         """Append a new version. Caller must hold the pair lock."""
@@ -430,6 +454,24 @@ def _tail_lines(path: Path, n: int) -> list[str]:
     if pos > 0:
         lines = lines[1:]            # first one may be cut
     return [l.decode("utf-8") for l in reversed(lines[-n:])]
+
+
+def _reverse_lines(path: Path):
+    """Non-empty lines from the end of the file backwards, read in chunks."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        pos, rest = f.tell(), b""
+        while pos > 0:
+            step = min(65536, pos)
+            pos -= step
+            f.seek(pos)
+            lines = (f.read(step) + rest).split(b"\n")
+            rest = lines.pop(0)              # may be cut: completed by the next chunk
+            for l in reversed(lines):
+                if l.strip():
+                    yield l.decode("utf-8")
+        if rest.strip():
+            yield rest.decode("utf-8")
 
 
 def atomic_write(path: Path, text: str, fsync: bool = True) -> None:

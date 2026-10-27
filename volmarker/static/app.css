@@ -166,6 +166,10 @@ table.grid { border-collapse: collapse; width: 100%; font-variant-numeric: tabul
 .grid th label.lock input { margin: 0; }
 .grid th.grp label.lock.put { display: inline-flex; margin: 0 0 0 10px; vertical-align: middle; }
 .grid.small td { padding: 5px 8px; }
+.grid.changes td.d { font-weight: 600; }
+.grid.changes td.d.up { color: var(--up-ink); }
+.grid.changes td.d.down { color: var(--down-ink); }
+.grid.changes td.was { color: var(--muted); }
 .grid.small input { width: 100%; }
 .grid tr:hover td { background-image: linear-gradient(rgba(127,127,127,.06), rgba(127,127,127,.06)); }
 
@@ -214,9 +218,16 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top
 .surf3d text.axis { fill: var(--ink-2); font-weight: 600; }
 .scale { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); margin-top: 6px; font-variant-numeric: tabular-nums; }
 .scale .bar { height: 10px; width: 220px; border-radius: 3px; }
-p.small { font-size: 12px; margin: 6px 0 0; }
+p.small, div.small { font-size: 12px; margin: 6px 0 0; }
 
 .conn.off { color: var(--muted); }
+#fenics-btn.on { color: var(--good); }
+.fx-every { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
+.fx-every.on { color: var(--ink-2); }
+.fx-every input { width: 52px; padding: 2px 4px; }
+.fx-every select { padding: 2px 2px; }
+.fx-every input.bad { outline: 2px solid var(--critical); }
+.fx-note { max-width: 340px; margin: 0; }
 .conn.warn { color: var(--critical); }
 .grid td.mk { position: relative; }
 .grid .mq {
