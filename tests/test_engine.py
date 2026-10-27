@@ -454,15 +454,19 @@ class TestEventDefaults(unittest.TestCase):
         from volmarker.calendar import default_events
         cal = self.CAL + [dict(self.CAL[1])]                   # listed twice in the calendar
         ev = default_events("EURUSD", cal, self.RULES)
-        # FOMC 14:00 NY on the 28th is after the 10:00 NY cut -> the 29th, together with the ECB (09:15 NY)
-        # NFP (ticker, counted once) + unemployment (name, case-insensitive) + GE IP; the 3-mo avg is not listed
-        self.assertEqual([(e["date"], e["weight"]) for e in ev], [("2026-10-29", 1.4), ("2026-11-06", 0.9)])
-        self.assertEqual(ev[0]["desc"], "USD FOMC Rate Decision (Upper Bound) +1")   # labelled by the biggest
-        self.assertEqual(ev[0]["ccy"], "USD")
-        self.assertEqual([p["weight"] for p in ev[1]["parts"]], [0.5, 0.2, 0.2])
+        # FOMC 14:00 NY on the 28th is after the 10:00 NY cut -> the 29th, the same day as the ECB (09:15 NY):
+        # one row per currency. NFP (ticker, counted once) + unemployment (name, case-insensitive) for USD,
+        # GE IP for EUR on the 6th; the 3-mo avg is not listed
+        self.assertEqual([(e["date"], e["ccy"], e["weight"]) for e in ev],
+                         [("2026-10-29", "EUR", 0.6), ("2026-10-29", "USD", 0.8),
+                          ("2026-11-06", "EUR", 0.2), ("2026-11-06", "USD", 0.7)])
+        self.assertEqual(ev[1]["desc"], "USD FOMC Rate Decision (Upper Bound)")
+        self.assertEqual(ev[3]["desc"], "USD Change in Nonfarm Payrolls +1")    # labelled by the biggest
+        self.assertEqual([p["weight"] for p in ev[3]["parts"]], [0.5, 0.2])
         # Tokyo cut 15:00 JST = 06:00 UTC: FOMC (03:00 JST on the 29th) weighs on the 29th, the ECB on the 30th
         tok = default_events("EURUSD", cal, self.RULES, cut={"tz": "Asia/Tokyo", "time": "15:00"})
-        self.assertEqual([(e["date"], e["weight"]) for e in tok][:2], [("2026-10-29", 0.8), ("2026-10-30", 0.6)])
+        self.assertEqual([(e["date"], e["ccy"], e["weight"]) for e in tok][:2],
+                         [("2026-10-29", "USD", 0.8), ("2026-10-30", "EUR", 0.6)])
         # a holiday on the expiry rolls it to the next good day
         hol = {"USD": {date(2026, 10, 29)}}
         rolled = default_events("USDJPY", cal, self.RULES, holidays=hol)
@@ -483,9 +487,15 @@ class TestEventDefaults(unittest.TestCase):
         w = with_defaults("EURUSD", {"events": [{"date": "2026-10-29", "desc": "FOMC", "weight": 1.2},
                                                 {"date": "2026-11-20", "desc": "x", "weight": 0.3}]},
                           self.CAL, self.RULES)
-        got = {e["date"]: (e["weight"], e["source"], e["ccy"]) for e in w["events"]}
-        self.assertEqual(got, {"2026-10-29": (1.2, "pair", "USD"), "2026-11-06": (0.9, "default", "USD"),
-                               "2026-11-20": (0.3, "pair", None)})
+        got = sorted((e["date"], e["ccy"], e["weight"], e["source"]) for e in w["events"])
+        # an own event without a currency replaces the whole day (both currencies' defaults)
+        self.assertEqual(got, [("2026-10-29", "USD", 1.2, "pair"), ("2026-11-06", "EUR", 0.2, "default"),
+                               ("2026-11-06", "USD", 0.7, "default"), ("2026-11-20", None, 0.3, "pair")])
+        # with a currency it replaces only that currency's default: the ECB set to 0, the FOMC kept
+        w = with_defaults("EURUSD", {"events": [{"date": "2026-10-29", "ccy": "EUR", "desc": "ECB", "weight": 0}]},
+                          self.CAL, self.RULES)
+        got = sorted((e["ccy"], e["weight"], e["source"]) for e in w["events"] if e["date"] == "2026-10-29")
+        self.assertEqual(got, [("EUR", 0.0, "pair"), ("USD", 0.8, "default")])
         off = with_defaults("EURUSD", {"use_defaults": False, "events": []}, self.CAL, self.RULES)
         self.assertEqual(off["events"], [])
 

@@ -1039,17 +1039,27 @@ function renderWeights(reload) {
   weightsCalc(0);
 }
 // one row per date: desk default, pair override of a default, or the pair's own event
+// one row per date and currency (calendar.effective_events): an own event with a currency replaces
+// that currency's default on its date, one without (older events, calibrated weights) the whole day
 function eventRows() {
-  const w = app.draft.weights, own = {}, defs = useDefaults() ? app.defEvents || [] : [];
-  (w.events || []).forEach((e, i) => (own[e.date] ||= []).push({ ...e, i }));
-  const rows = defs.filter((d) => !own[d.date]).map((d) => ({ date: d.date, desc: d.desc, def: d.weight, weight: d.weight, kind: "default", parts: d.parts, ccy: d.ccy }));
-  for (const [date, es] of Object.entries(own)) {
-    const d = defs.find((x) => x.date === date);
+  const w = app.draft.weights, own = new Map(), defs = useDefaults() ? app.defEvents || [] : [];
+  (w.events || []).forEach((e, i) => {
+    const k = `${e.date}|${e.ccy || ""}`;
+    own.set(k, [...(own.get(k) || []), { ...e, i }]);
+  });
+  const whole = new Set([...own.keys()].filter((k) => k.endsWith("|")).map((k) => k.slice(0, -1)));
+  const rows = defs.filter((d) => !whole.has(d.date) && !own.has(`${d.date}|${d.ccy}`))
+    .map((d) => ({ date: d.date, desc: d.desc, def: d.weight, weight: d.weight, kind: "default", parts: d.parts, ccy: d.ccy }));
+  const ccyOrder = [app.current.slice(0, 3), app.current.slice(3)];
+  for (const [k, es] of own) {
+    const [date, ccy] = k.split("|");
+    const ds = defs.filter((x) => x.date === date && (!ccy || x.ccy === ccy));
+    const d = ds.length ? { weight: ds.reduce((s, x) => s + x.weight, 0), desc: ds.map((x) => x.desc).join(", "), parts: ds.flatMap((x) => x.parts || []), ccy: ds[0].ccy } : null;
     rows.push({ date, desc: es.map((e) => e.desc).filter(Boolean).join(", "), def: d ? d.weight : null, defDesc: d?.desc, parts: d?.parts,
       weight: es.reduce((s, e) => s + (Number(e.weight) || 0), 0), kind: d ? "override" : "pair", idx: es.map((e) => e.i),
-      ccy: es[0].ccy || d?.ccy || app.current.slice(0, 3) });
+      ccy: ccy || d?.ccy || ccyOrder[0] });
   }
-  return rows.sort((a, b) => a.date.localeCompare(b.date));
+  return rows.sort((a, b) => a.date.localeCompare(b.date) || ccyOrder.indexOf(a.ccy) - ccyOrder.indexOf(b.ccy));
 }
 function renderEvents() {
   const today = isoToday(), all = eventRows(), rows = all.filter((r) => r.date >= today);
@@ -1059,7 +1069,7 @@ function renderEvents() {
   $("#events").innerHTML = `<thead><tr><th class="tn" title="Option expiry the event weighs on">Expiry</th><th class="tn">Day</th><th class="tn" title="Release time (${esc(app.me.calendar_tz || "")})">Release</th><th class="tn">Ccy</th><th class="tn">Description</th><th title="Desk default">Default</th><th>Weight</th><th></th></tr></thead><tbody>` +
     (rows.length ? rows.map((r) => {
       const i = r.idx ? r.idx[0] : "", extra = r.idx ? r.idx.slice(1).join(",") : "";
-      const attrs = r.kind === "default" ? `data-date="${r.date}" data-desc="${esc(r.desc)}"` : `data-i="${i}" data-extra="${extra}"`;
+      const attrs = r.kind === "default" ? `data-date="${r.date}" data-ccy="${r.ccy}" data-desc="${esc(r.desc)}"` : `data-i="${i}" data-extra="${extra}"`;
       // plain text in the same yyyy-mm-dd as the other rows (a date picker would show the PC's regional format)
       const date = r.kind === "pair" ? `<input class="ev evdate" ${attrs} data-k="date" value="${r.date}" placeholder="yyyy-mm-dd" maxlength="10" size="10" title="Expiry date, yyyy-mm-dd">` : r.date;
       const breakdown = (r.parts || []).length > 1 ? r.parts.map((x) => `${x.desc}  ${fmt(x.weight, 2)}`).join("\n") + `\n= ${fmt(r.def, 2)}` : "";
@@ -1370,8 +1380,8 @@ function wireWeights() {
       }
     }
     if (el.dataset.date) {                 // a desk default: typing creates this pair's override
-      const def = (app.defEvents || []).find((x) => x.date === el.dataset.date);
-      evs.push({ date: el.dataset.date, desc: k === "desc" ? val : el.dataset.desc, weight: k === "weight" ? val : def?.weight ?? 0, ccy: def?.ccy });
+      const def = (app.defEvents || []).find((x) => x.date === el.dataset.date && x.ccy === el.dataset.ccy);
+      evs.push({ date: el.dataset.date, desc: k === "desc" ? val : el.dataset.desc, weight: k === "weight" ? val : def?.weight ?? 0, ccy: el.dataset.ccy });
     } else {
       evs[+el.dataset.i][k] = val;
       if (k === "weight" && el.dataset.extra)     // several events on one date: keep one carrying the total
@@ -1393,7 +1403,7 @@ function wireWeights() {
   $("#ev-add").onclick = () => {
     const used = new Set(eventRows().map((r) => r.date)), d = new Date();
     let iso; do { d.setDate(d.getDate() + 1); iso = d.toISOString().slice(0, 10); } while (used.has(iso));
-    (app.draft.weights.events ||= []).push({ date: iso, desc: "", weight: 0.5 });
+    (app.draft.weights.events ||= []).push({ date: iso, desc: "", weight: 0.5, ccy: app.current.slice(0, 3) });
     changed(); renderEvents();
   };
   // test dates

@@ -146,12 +146,14 @@ def rule_weight(ev: dict, rules: list[dict]) -> float | None:
 def default_events(pair: str, cal_events: list[dict], defaults: list[dict],
                    start: str | None = None, holidays: dict[str, set] | None = None,
                    cut: dict | None = None, display_tz: str | None = None) -> list[dict]:
-    """Desk default weights for this pair, one entry per expiry date: the sum
-    of the relevant events weighing on it, labelled with the biggest one.
-    "parts" lists them all, with their release time."""
+    """Desk default weights for this pair, one entry per expiry date and
+    currency (events of both currencies on one day are separate rows, also in
+    the Fenics and Front Arena exports): the sum of that currency's relevant
+    events weighing on it, labelled with the biggest one. "parts" lists them
+    all, with their release time."""
     ccys = split_pair(pair)
     holidays = holidays or {}
-    by_date: dict[str, dict[str, dict]] = {}
+    by_key: dict[tuple[str, str], dict[str, dict]] = {}
     for ev in cal_events:
         if ev["ccy"] not in ccys:
             continue
@@ -167,28 +169,54 @@ def default_events(pair: str, cal_events: list[dict], defaults: list[dict],
         elif ev.get("time"):
             release = f"{ev['date']} {ev['time']}"
         # an event listed twice in the calendar counts once
-        by_date.setdefault(d, {})[f"{ev['ccy']} {ev['desc']}"] = {"weight": w, "ccy": ev["ccy"], "release": release}
+        by_key.setdefault((d, ev["ccy"]), {})[f"{ev['ccy']} {ev['desc']}"] = {"weight": w, "ccy": ev["ccy"], "release": release}
     out = []
-    for d, evs in sorted(by_date.items()):
+    for (d, ccy), evs in sorted(by_key.items(), key=lambda kv: (kv[0][0], ccys.index(kv[0][1]))):
         parts = sorted(evs.items(), key=lambda kv: -kv[1]["weight"])
         out.append({"date": d, "desc": parts[0][0] + (f" +{len(parts) - 1}" if len(parts) > 1 else ""),
-                    "weight": round(sum(p["weight"] for _, p in parts), 6), "ccy": parts[0][1]["ccy"],
+                    "weight": round(sum(p["weight"] for _, p in parts), 6), "ccy": ccy,
                     "parts": [{"desc": n, **p} for n, p in parts]})
     return out
 
 
 def effective_events(pair_events: list[dict], defaults: list[dict]) -> list[dict]:
-    """The pair's own events plus the defaults on dates the pair doesn't set itself."""
-    own: dict[str, list] = {}
+    """The pair's own events plus the defaults they don't set themselves. An own
+    event with a currency replaces that currency's default on its date; one
+    without (older events, calibrated weights) replaces every default on it."""
+    own: dict[tuple[str, str | None], list] = {}
     for e in pair_events:
-        own.setdefault(e["date"], []).append(e)
-    out = [dict(e, source="default") for e in defaults if e["date"] not in own]
-    dflt = {e["date"]: e for e in defaults}
-    for d, es in own.items():
+        own.setdefault((e["date"], e.get("ccy") or None), []).append(e)
+    whole = {d for d, c in own if c is None}
+    out = [dict(e, source="default") for e in defaults if e["date"] not in whole and (e["date"], e["ccy"]) not in own]
+    for (d, ccy), es in own.items():
+        dflt = max((x for x in defaults if x["date"] == d and ccy in (None, x["ccy"])),
+                   key=lambda x: x["weight"], default={})
         out.append({"date": d, "desc": ", ".join(e.get("desc") or "" for e in es),
                     "weight": sum(float(e["weight"]) for e in es), "source": "pair",
-                    "ccy": es[0].get("ccy") or dflt.get(d, {}).get("ccy")})
+                    "ccy": ccy or dflt.get("ccy"), **({"parts": dflt["parts"]} if dflt.get("parts") else {})})
     return sorted(out, key=lambda e: e["date"])
+
+
+def split_by_ccy(events: list[dict], day_events: list[dict]) -> list[dict]:
+    """Calibrated weights (one per day) onto the day's currencies: with events
+    of both currencies on a day each gets half, with one it gets it all; named
+    after that currency's event. day_events: the pair's effective events."""
+    by_day: dict[str, dict[str, dict]] = {}
+    for e in day_events:
+        if e.get("ccy"):
+            cur = by_day.setdefault(e["date"], {}).get(e["ccy"])
+            if cur is None or e["weight"] > cur["weight"]:
+                by_day[e["date"]][e["ccy"]] = e
+    out = []
+    for ev in events:
+        on_day = by_day.get(ev["date"], {})
+        if ev.get("ccy") or not on_day:
+            out.append(ev)
+            continue
+        for ccy, d in on_day.items():
+            out.append(dict(ev, ccy=ccy, desc=d.get("desc") or ev.get("desc"),
+                            weight=round(float(ev["weight"]) / len(on_day), 4)))
+    return out
 
 
 def with_defaults(pair: str, weights: dict | None, cal_events: list[dict], defaults: list[dict],

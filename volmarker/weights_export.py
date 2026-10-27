@@ -14,7 +14,9 @@ A port of the desk's Excel weight workbook (WeightExporter / LoadWeights):
                before, weight (w + base) / base with base = holiday factor.
 
 Event weights come from the pair's effective weights (desk defaults plus the
-pair's own events); events with weight 0 are left out.
+pair's own events). Events with weight 0 are sent to Fenics and FA_FX too
+(Fenics doubles as the desk's overview of what is coming), not to FA_WS.
+Each is named after the biggest default event of its currency that day.
 """
 
 from __future__ import annotations
@@ -44,7 +46,7 @@ def _events(pair: str, weights: dict, today: date) -> list[dict]:
     out = []
     for e in weights["events"]:
         d = date.fromisoformat(e["date"])
-        if d > today and abs(float(e["weight"])) > 1e-12:
+        if d > today:
             out.append({"date": d, "ccy": e.get("ccy") or c1, "name": _name(e), "weight": float(e["weight"])})
     return sorted(out, key=lambda e: e["date"])
 
@@ -115,6 +117,8 @@ def frontarena_lines(pair: str, weights: dict, holidays: dict[str, set], today: 
     fx = [f'{e["ccy"]},{e["date"].strftime(date_format)},{e["name"]},{e["weight"]:g}' for e in evs]
     ws: dict[date, dict] = {}
     for e in evs:
+        if abs(e["weight"]) < 1e-12:               # a weight file: a zero adds nothing
+            continue
         d = e["date"] - timedelta(days=1)
         while d.weekday() >= 5:
             d -= timedelta(days=1)

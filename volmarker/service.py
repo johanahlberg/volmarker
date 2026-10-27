@@ -20,12 +20,12 @@ from .conventions import TENORS, normalise_pair
 from . import bbg, weights_export
 from .calendar import (DEFAULT_CUT, calibrate_to_quotes, cumulative_weights, daily_dates, default_events, expiry_for,
                        implied_daily_weights, interpolate_atm, is_good_day, normalise_weights,
-                       rule_weight, tenor_dates, with_defaults)
+                       rule_weight, split_by_ccy, tenor_dates, with_defaults)
 from .conventions import split_pair
 from .fenics import FenicsLogin
 from .fmd.book import daily_n
 from .market import compare, market_view, parse_fix_time
-from .store import ConflictError, LockTimeout, Store, atomic_write
+from .store import ConflictError, LockTimeout, Store, atomic_write, write_shared
 from .surface import (ALERT_MARKS, FOLLOW_FIELDS, apply_derivation, apply_parent, check_surface, clean_state,
                       new_state, now_iso, resolve, skew_active)
 
@@ -247,7 +247,8 @@ class Service:
         implied = {e["date"] for e in events}
         for ev in eff["events"]:
             if ev.get("source") == "default" and window[0] < ev["date"] <= window[1] and ev["date"] not in implied:
-                events.append({"date": ev["date"], "desc": ev["desc"], "weight": 0.0})
+                events.append({"date": ev["date"], "ccy": ev.get("ccy"), "desc": ev["desc"], "weight": 0.0})
+        events = split_by_ccy(events, eff["events"])        # a day with events in both currencies: half each
         return {"rows": rows, "events": events, "warnings": res["warnings"], "basis": basis,
                 "window_end": max(vols).isoformat() if vols else None, "feed": m["feed"]}
 
@@ -530,8 +531,10 @@ class Service:
                 mids[date.fromisoformat(q["date"])] = sum(vs) / len(vs)
         holidays, cal = self.store.load_calendar()
         w = self.effective_weights(pair, rec.get("weights"), cal, holidays, rec)
-        return calibrate_to_quotes(pair, {t: rec["tenors"][t]["atm"] for t in TENORS}, date.today(),
-                                   mids, w, holidays, floor=floor)
+        out = calibrate_to_quotes(pair, {t: rec["tenors"][t]["atm"] for t in TENORS}, date.today(),
+                                  mids, w, holidays, floor=floor)
+        out["events"] = split_by_ccy(out["events"], w["events"])     # a day with events in both currencies: half each
+        return out
 
     def poll_market(self, notify: bool = True) -> None:
         d = self.store.root / "market"
@@ -1229,8 +1232,8 @@ class Service:
                     cur = None
                 if cur is None or cur["instance"] == self.instance or \
                         time.time() - cur["heartbeat"] > LEADER_STALE:
-                    atomic_write(path, json.dumps({"instance": self.instance,
-                                                   "heartbeat": time.time()}))
+                    # read only under this lock, so writing it in place when the share refuses a replace is safe
+                    write_shared(path, json.dumps({"instance": self.instance, "heartbeat": time.time()}))
                     return True
                 return False
         except LockTimeout:

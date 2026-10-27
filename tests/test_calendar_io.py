@@ -84,10 +84,46 @@ class TestWeightsExport(unittest.TestCase):
     HOL = {"USD": {date(2026, 11, 11)}, "EUR": {date(2026, 11, 13)}}
     TODAY = date(2026, 10, 21)
 
+    def test_both_currencies_on_one_day_are_separate_events(self):
+        from volmarker.calendar import with_defaults
+        cal = [{"ccy": "USD", "date": "2026-11-04", "desc": "FOMC Rate Decision", "ts": "2026-11-04T12:00+00:00"},
+               {"ccy": "EUR", "date": "2026-11-04", "desc": "ECB Main Refinancing Rate", "ts": "2026-11-04T12:15+00:00"}]
+        rules = [{"ccy": "USD", "event": "FOMC Rate Decision", "weight": 0.8},
+                 {"ccy": "EUR", "event": "ECB Main Refinancing Rate", "weight": 0.6}]
+        w = with_defaults("EURUSD", {"events": []}, cal, rules)
+        items = wx.fenics_items("EURUSD", w, {}, self.TODAY)
+        self.assertEqual([(e["ccy"], e["name"], e["value"]) for e in items],
+                         [("EUR", "ECB Main Refinancing Rate", 0.6), ("USD", "FOMC Rate Decision", 0.8)])
+        fx, ws = wx.frontarena_lines("EURUSD", w, {}, self.TODAY, "%Y-%m-%d")
+        self.assertEqual(fx, ["EUR,2026-11-04,ECB Main Refinancing Rate,0.6", "USD,2026-11-04,FOMC Rate Decision,0.8"])
+        self.assertEqual(len(ws), 1)                     # FA_WS: one weight per day, as the macro
+        # the ECB set to 0 for this pair (typed as "ECB"): still sent, as an overview, named after the
+        # default event; the FOMC keeps its weight; FA_WS gets only the FOMC
+        w = with_defaults("EURUSD", {"events": [{"date": "2026-11-04", "ccy": "EUR", "desc": "ECB", "weight": 0}]},
+                          cal, rules)
+        self.assertEqual(sorted((e["ccy"], e["name"], e["value"]) for e in wx.fenics_items("EURUSD", w, {}, self.TODAY)),
+                         [("EUR", "ECB Main Refinancing Rate", 0.0), ("USD", "FOMC Rate Decision", 0.8)])
+        fx, ws = wx.frontarena_lines("EURUSD", w, {}, self.TODAY, "%Y-%m-%d")
+        self.assertEqual(len(fx), 2)
+        self.assertEqual(ws, ["USD,2026-11-03,USD FOMC Rate Decision,1.8"])
+
+    def test_calibrated_weight_split_between_currencies(self):
+        from volmarker.calendar import split_by_ccy
+        day = [{"date": "2026-11-04", "ccy": "EUR", "desc": "EUR ECB", "weight": 0.6},
+               {"date": "2026-11-04", "ccy": "USD", "desc": "USD FOMC", "weight": 0.8},
+               {"date": "2026-11-05", "ccy": "USD", "desc": "USD ISM", "weight": 0.3}]
+        got = split_by_ccy([{"date": "2026-11-04", "desc": "FMD daily", "weight": 1.0},
+                            {"date": "2026-11-05", "desc": "FMD daily", "weight": 0.4},
+                            {"date": "2026-11-06", "desc": "FMD daily", "weight": 0.2}], day)
+        self.assertEqual([(e["date"], e.get("ccy"), e["desc"], e["weight"]) for e in got],
+                         [("2026-11-04", "EUR", "EUR ECB", 0.5), ("2026-11-04", "USD", "USD FOMC", 0.5),
+                          ("2026-11-05", "USD", "USD ISM", 0.4), ("2026-11-06", None, "FMD daily", 0.2)])
+
     def test_fenics_items(self):
         items = wx.fenics_items("EURUSD", self.W, self.HOL, self.TODAY)
         self.assertEqual([(i["date"].isoformat(), i["type"]) for i in items],
-                         [("2026-10-29", "Event"), ("2026-11-11", "Holiday"), ("2026-11-16", "Event")])
+                         [("2026-10-29", "Event"), ("2026-11-11", "Holiday"), ("2026-11-16", "Event"),
+                          ("2026-11-20", "Event")])                       # weight 0 sent too: Fenics' overview
         self.assertEqual(items[0]["name"], "FOMC Rate Decision (Upper Bound)")
         # event on a USD holiday (Wed): sent as holiday weight h + w / (weekday x other holiday) = 0.5 + 0.3
         self.assertAlmostEqual(items[1]["value"], 0.5 + 0.3 / 1.0)
@@ -111,7 +147,7 @@ class TestWeightsExport(unittest.TestCase):
     def test_frontarena(self):
         fx, ws = wx.frontarena_lines("EURUSD", self.W, self.HOL, self.TODAY, "%d.%m.%Y")
         self.assertEqual(fx[0], "USD,29.10.2026,FOMC Rate Decision (Upper Bound),1.4")
-        self.assertEqual(len(fx), 3)
+        self.assertEqual(len(fx), 4)                    # the weight-0 event too; not in FA_WS
         # FA_WS: the business day before; 16 Nov (Mon) -> Fri 13 Nov, a EUR holiday: (0.2 + 0.4) / 0.4
         self.assertEqual(ws[0], "USD,28.10.2026,USD FOMC Rate Decision (Upper Bound),2.4")
         self.assertEqual(ws[-1], f"EUR,13.11.2026,EUR S&P PMI,{(0.2 + 0.4) / 0.4:g}")
