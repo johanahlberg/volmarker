@@ -276,12 +276,13 @@ def _maturity(tenor: str) -> str:
 
 
 def get_vols_answer(instruments: list[Instrument], pair: str) -> str:
-    """A get_vols answer shaped as the Excel query reads it: body/data/node/node[field...]."""
+    """A get_vols answer shaped as the Excel query reads it: body/data/node/node[field...],
+    vols in decimals."""
     from xml.sax.saxutils import quoteattr
     nodes = []
     for i, ins in enumerate(x for x in instruments if x.pair == pair and x.ptype in XML_TYPES and x.tenor in TENORS):
         vtype, delta = XML_TYPES[ins.ptype]
-        vol = f"{ins.mid - ins.spread / 2:.4f}/{ins.mid + ins.spread / 2:.4f}"
+        vol = f"{(ins.mid - ins.spread / 2) / 100:.6f}/{(ins.mid + ins.spread / 2) / 100:.6f}"   # decimals, as Fenics
         nodes.append(f'<node name="{i}"><field name="Maturity" value={quoteattr(_maturity(ins.tenor))}/>'
                      f'<field name="VolType" value="{vtype}"/><field name="PctDelta" value="{delta}"/>'
                      f'<field name="Volity" value="{vol}"/></node>')

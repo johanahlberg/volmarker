@@ -96,6 +96,8 @@ DEFAULT_CONFIG = {
             "brand": "FMD1",            # the brand its quotes show under
             "atm_type": "DNS",          # convention of Fenics' ATM
             "timeout": 20,
+            "scale": 100,               # Fenics answers in decimals (0.0605); x100 gives vol points, as the workbook
+            "retry_missing": 3600,      # a pair Fenics has no vols for is asked again after this many seconds
         },
     },
     # event weights: Fenics XML poster and the Front Arena event files (as the Excel weight workbook)
@@ -472,6 +474,33 @@ def _reverse_lines(path: Path):
                     yield l.decode("utf-8")
         if rest.strip():
             yield rest.decode("utf-8")
+
+
+def write_shared(path: Path, text: str) -> None:
+    """A small file every app polls (market data, feed and follower status),
+    rewritten every second or so. Replaced atomically when possible; but
+    Windows refuses to replace a file another PC on the share has open
+    ("Access is denied"), and with every app reading it that is common, so it
+    is then written in place. A reader that catches it half-written gets
+    invalid JSON and simply reads it again on its next poll."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    for attempt in range(3):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.05)
+    try:
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def atomic_write(path: Path, text: str, fsync: bool = True) -> None:

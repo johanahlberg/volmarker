@@ -254,25 +254,26 @@ class TestXmlPoster(unittest.TestCase):
     # shaped as the Excel query fetchFenicsVols reads it: body/data/node/node[field...]
     ANSWER = """<?xml version="1.0"?><gfi_message version="2.0"><header/><body><data name="d" format="NAME_VALUE">
       <node name="EUR/USD">
-        <node name="1"><field name="Maturity" value="1 Day"/><field name="VolType" value="ATM"/><field name="Volity" value="6.10/6.40"/></node>
-        <node name="2"><field name="Maturity" value="3 Months"/><field name="VolType" value="RR"/><field name="PctDelta" value="0.25"/><field name="Volity" value="-0.30/-0.10"/></node>
-        <node name="3"><field name="Maturity" value="1 Year"/><field name="VolType" value="S"/><field name="PctDelta" value="0.10"/><field name="Volity" value="0.75"/></node>
+        <node name="1"><field name="Maturity" value="1 Day"/><field name="VolType" value="ATM"/><field name="Volity" value="0.0610/0.0640"/></node>
+        <node name="2"><field name="Maturity" value="3 Months"/><field name="VolType" value="RR"/><field name="PctDelta" value="0.25"/><field name="Volity" value="-0.0030/-0.0010"/></node>
+        <node name="3"><field name="Maturity" value="1 Year"/><field name="VolType" value="S"/><field name="PctDelta" value="0.10"/><field name="Volity" value="0.0075"/></node>
         <node name="4"><field name="Maturity" value="7 Years"/><field name="VolType" value="ATM"/><field name="Volity" value="n/a"/></node>
       </node></data></body></gfi_message>"""
 
     def test_request_parse_and_entries(self):
         from datetime import datetime
-        from volmarker.fmd.xmlposter import get_vols_xml, norm_maturity, parse_vols, rows_to_entries
+        from volmarker.fmd.xmlposter import NoVols, get_vols_xml, norm_maturity, parse_vols, rows_to_entries
         msg = get_vols_xml("EURUSD", "fenicsVols", "u", "p&w", datetime(2026, 10, 27, 9, 0))
         for part in ('function="RATE_FETCH" name="get_vols"', 'name="horDate" value="27 Oct 2026"',
                      'name="Currency" value="eur"', 'name="CtrCcy" value="usd"', "<password>p&amp;w</password>"):
             self.assertIn(part, msg)
         self.assertEqual([norm_maturity(m) for m in ("1 Day", "2 Weeks", "18 Months", "1 Year", "O/N")],
                          ["ON", "2W", "18M", "1Y", None])
-        rows = parse_vols(self.ANSWER)
-        self.assertEqual(rows, [{"tenor": "ON", "ptype": "ATM", "bid": 6.1, "offer": 6.4},
-                                {"tenor": "3M", "ptype": "RR25", "bid": -0.3, "offer": -0.1},
-                                {"tenor": "1Y", "ptype": "S10", "bid": 0.75, "offer": 0.75}])
+        rows = parse_vols(self.ANSWER)          # Fenics answers in decimals; x100 as the workbook
+        self.assertEqual([(r["tenor"], r["ptype"]) for r in rows], [("ON", "ATM"), ("3M", "RR25"), ("1Y", "S10")])
+        for r, (bid, offer) in zip(rows, [(6.1, 6.4), (-0.3, -0.1), (0.75, 0.75)]):
+            self.assertAlmostEqual(r["bid"], bid)
+            self.assertAlmostEqual(r["offer"], offer)
         book = QuoteBook()
         for e in rows_to_entries("EURUSD", rows, "FMD1", "DNS", "2026-10-27T08:00:00+00:00"):
             book.apply(e)
@@ -285,6 +286,8 @@ class TestXmlPoster(unittest.TestCase):
             parse_vols("<gfi_message><body><error>Error: invalid username or password</error></body></gfi_message>")
         with self.assertRaisesRegex(ValueError, "not XML"):
             parse_vols("<html>Gateway error")
+        with self.assertRaises(NoVols):
+            parse_vols('<gfi_message><body><data name="d"><node name="EUR/XYZ"/></data></body></gfi_message>')
 
     def test_poll_against_simulator(self):
         from http.server import ThreadingHTTPServer
@@ -302,8 +305,16 @@ class TestXmlPoster(unittest.TestCase):
                 bad = XmlPosterSession(url, "u", "wrong", lambda: ["EURUSD"], on_status=status.append)
                 self.assertEqual(bad.poll_once()[0], 0)
                 got = []
-                sess = XmlPosterSession(url, "u", "s3cret", lambda: ["EURUSD"], on_entries=got.extend)
-                self.assertEqual(sess.poll_once(), (1, []))
+                sess = XmlPosterSession(url, "u", "s3cret", lambda: ["EURUSD", "GBPUSD"], on_entries=got.extend)
+                self.assertEqual(sess.poll_once(), (1, []))           # GBPUSD: no vols, not an error
+                self.assertEqual(list(sess.missing), ["GBPUSD"])
+                fetched = []
+                sess.fetch = lambda pair: fetched.append(pair) or []
+                sess.poll_once()
+                self.assertEqual(fetched, ["EURUSD"])                 # not asked again within the hour
+                sess.missing["GBPUSD"] = 0
+                sess.poll_once()
+                self.assertEqual(fetched, ["EURUSD", "EURUSD", "GBPUSD"])
             finally:
                 srv.shutdown()
                 srv.server_close()
@@ -355,6 +366,19 @@ class TestFenicsLogin(unittest.TestCase):
                 fx.logout()
                 srv.shutdown()
                 srv.server_close()
+
+class TestWriteShared(unittest.TestCase):
+    def test_written_in_place_when_the_share_refuses_a_replace(self):
+        from pathlib import Path
+        from unittest import mock
+        from volmarker.store import write_shared
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "_status.json"
+            write_shared(path, '{"a": 1}')
+            with mock.patch("volmarker.store.os.replace", side_effect=PermissionError("Access is denied")):
+                write_shared(path, '{"a": 2}')
+            self.assertEqual(json.loads(path.read_text()), {"a": 2})
+            self.assertEqual([p.name for p in Path(tmp).iterdir()], ["_status.json"])   # no temp file left
 
 class TestDailySegments(unittest.TestCase):
     def test_level_differences_between_pillars_are_not_events(self):

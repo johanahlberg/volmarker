@@ -659,7 +659,8 @@ async function openFenics() {
   $("#fx-err").textContent = "";
   $("#fx-state").textContent = !app.fenics ? "VolMarker did not answer about the Fenics login: restart VolMarker (it may be older than this page)" :
     !f.url ? "No Fenics server set (config.json: fmd.xml.url)" :
-    (on ? `${f.url} · every ${everyText(f.seconds)} · ${f.connected ? `last fetch ${f.last_msg ? localTime(f.last_msg) : "–"}` : "not answering"}${f.last_error ? ` · ${f.last_error}` : ""}`
+    (on ? `${f.url} · every ${everyText(f.seconds)} · ${f.connected ? `last fetch ${f.last_msg ? localTime(f.last_msg) : "–"}` : "not answering"}${f.last_error ? ` · ${f.last_error}` : ""}` +
+      (f.no_vols?.length ? ` · no vols in Fenics (asked again hourly): ${f.no_vols.join(", ")}` : "")
       : `${f.url} · every ${everyText(fenicsSeconds())} (the field at the top)`);
   $("#dlg-fenics").showModal();
   if (!on) ($("#fx-user").value ? $("#fx-pass") : $("#fx-user")).focus();

@@ -24,7 +24,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..store import Store, atomic_write
+from ..store import Store, write_shared
 from .book import QuoteBook
 from .fix import FixSession
 from .webapi import WebApiSession
@@ -94,6 +94,7 @@ class Feed:
                 host, x["username"], password, pairs=lambda: x.get("pairs") or store.list_pairs(),
                 scenario=x.get("scenario", "fenicsVols"), interval=x.get("interval", 60),
                 brand=x.get("brand", "FMD1"), atm_ptype=x.get("atm_type", "DNS"), timeout=x.get("timeout", 20),
+                scale=x.get("scale", 100), retry_missing=x.get("retry_missing", 3600),
                 on_entries=self.on_entries, on_status=self.on_status)
             return
         if transport == "webapi":
@@ -145,9 +146,9 @@ class Feed:
             status = dict(self.status, heartbeat=time.time(), pairs=len(
                 {q.get("pair") for q in self.book.by_id.values()}))
         for pair, quotes in snaps.items():
-            atomic_write(self.dir / f"{pair}.json",
+            write_shared(self.dir / f"{pair}.json",
                          json.dumps({"pair": pair, "updated": now_iso(), "quotes": quotes}))
-        atomic_write(self.dir / "_status.json", json.dumps(status))
+        write_shared(self.dir / "_status.json", json.dumps(status))
 
     def run(self) -> None:
         stop = threading.Event()

@@ -17,6 +17,7 @@ import threading
 import time
 
 from .fmd.feed import FEED_STALE, Feed, xml_url
+from .fmd.xmlposter import NoVols
 from .store import Store
 
 log = logging.getLogger("volmarker.fenics")
@@ -44,7 +45,8 @@ class FenicsLogin:
                "url": xml_url(cfg, self.store)}
         if self.feed:
             st = self.feed.status
-            out.update(connected=st["connected"], last_msg=st["last_msg"], last_error=st["last_error"])
+            out.update(connected=st["connected"], last_msg=st["last_msg"], last_error=st["last_error"],
+                       no_vols=st.get("no_vols") or [])
         return out
 
     def _other_feed(self) -> str | None:
@@ -81,11 +83,14 @@ class FenicsLogin:
     @staticmethod
     def _check(feed: Feed) -> None:
         """One request before starting, so a wrong password is reported at once.
-        Tries a few pairs: a pair Fenics has no vols for says nothing about the login."""
-        errors = []
-        for pair in feed.session.pairs()[:3]:
+        Tries a few pairs; an answer without vols still means the login worked."""
+        errors, sess = [], feed.session
+        for pair in sess.pairs()[:3]:
             try:
-                feed.on_entries(feed.session.fetch(pair))
+                feed.on_entries(sess.fetch(pair))
+                return
+            except NoVols:
+                sess.missing[pair] = time.monotonic() + sess.retry_missing
                 return
             except (OSError, ValueError) as e:
                 errors.append(str(e))

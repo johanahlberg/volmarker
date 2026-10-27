@@ -29,7 +29,7 @@ import time
 from .alerts import iso
 from .conventions import TENORS
 from .service import STATE_KEYS, Service
-from .store import ConflictError, LockTimeout, atomic_write
+from .store import ConflictError, LockTimeout, write_shared
 from .surface import ALERT_MARKS, resolve
 
 log = logging.getLogger("volmarker.follow")
@@ -66,7 +66,7 @@ class Follower:
             status[pair] = st
         self.pending = {k: v for k, v in self.pending.items() if k[0] in status}
         self.status = status
-        atomic_write(self.path, json.dumps({"heartbeat": now, "instance": svc.instance,
+        write_shared(self.path, json.dumps({"heartbeat": now, "instance": svc.instance,
                                             "pairs": status}))
         return published
 
@@ -116,7 +116,8 @@ class Follower:
                 if abs(row[f"{w}25"]) > 1e-9:
                     row[f"{w}10f"] = v / row[f"{w}25"]
         _, t, m, d = max(moved, key=lambda x: x[0])
-        comment = f"FMD: {t} {m.upper()} " + (f"{d:+.2f}" if d is not None else "new")
+        put = rec.get("rr_put") and m in ("rr25", "rr10")     # favour puts: RR moves as shown, put - call
+        comment = f"FMD: {t} {m.upper()}{' P-C' if put else ''} " + (f"{-d if put else d:+.2f}" if d is not None else "new")
         if len(moved) > 1:
             comment += f" (+{len(moved) - 1} more)"
         try:
