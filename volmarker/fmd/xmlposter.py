@@ -10,8 +10,8 @@ strategy with the fields Maturity ("1 Week", "3 Months", "1 Year"), VolType
 (ATM, RR, S), PctDelta (0.25, 0.10) and Volity ("bid/offer", or one value),
 in decimals (0.0605 for 6.05 vol): the workbook multiplies by 100 (scale).
 Only the ATM has a bid/offer; RRs and strangles come as one value, a mid.
-The last answer per pair is kept as <raw_dir>/<PAIR>.xml, to see every field
-Fenics sends (the workbook's query keeps only the four above).
+With raw_dir set (off by default), the last answer per pair is kept as
+<raw_dir>/<PAIR>.xml, to see every field Fenics sends.
 A pair Fenics has no vols for is skipped for an hour instead of asked again
 every round.
 

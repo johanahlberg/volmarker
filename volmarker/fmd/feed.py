@@ -95,7 +95,7 @@ class Feed:
                 scenario=x.get("scenario", "fenicsVols"), interval=x.get("interval", 60),
                 brand=x.get("brand", "FMD1"), atm_ptype=x.get("atm_type", "DNS"), timeout=x.get("timeout", 20),
                 scale=x.get("scale", 100), retry_missing=x.get("retry_missing", 3600),
-                raw_dir=store.root / x.get("raw_dir", "exports/fenics_vols"),
+                raw_dir=store.root / x["raw_dir"] if x.get("raw_dir") else None,
                 on_entries=self.on_entries, on_status=self.on_status)
             return
         if transport == "webapi":

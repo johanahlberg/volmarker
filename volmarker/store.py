@@ -98,7 +98,7 @@ DEFAULT_CONFIG = {
             "timeout": 20,
             "scale": 100,               # Fenics answers in decimals (0.0605); x100 gives vol points, as the workbook
             "retry_missing": 3600,      # a pair Fenics has no vols for is asked again after this many seconds
-            "raw_dir": "exports/fenics_vols",   # the last answer per pair, <PAIR>.xml, to see every field Fenics sends
+            "raw_dir": "",              # e.g. "exports/fenics_vols": keep the last answer per pair (<PAIR>.xml) to debug
         },
     },
     # event weights: Fenics XML poster and the Front Arena event files (as the Excel weight workbook)
