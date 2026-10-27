@@ -9,6 +9,9 @@ FMD 1.0 is fed into, "fenicsVols"). The answer has one node per tenor and
 strategy with the fields Maturity ("1 Week", "3 Months", "1 Year"), VolType
 (ATM, RR, S), PctDelta (0.25, 0.10) and Volity ("bid/offer", or one value),
 in decimals (0.0605 for 6.05 vol): the workbook multiplies by 100 (scale).
+Only the ATM has a bid/offer; RRs and strangles come as one value, a mid.
+The last answer per pair is kept as <raw_dir>/<PAIR>.xml, to see every field
+Fenics sends (the workbook's query keeps only the four above).
 A pair Fenics has no vols for is skipped for an hour instead of asked again
 every round.
 
@@ -26,10 +29,12 @@ import time
 import urllib.error
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable
 from xml.sax.saxutils import escape
 
 from ..conventions import split_pair
+from ..store import atomic_write
 from ..weights_export import post
 
 log = logging.getLogger("volmarker.fmd")
@@ -77,7 +82,8 @@ class NoVols(ValueError):
 
 
 def parse_vols(text: str, scale: float = 100) -> list[dict]:
-    """Rows {tenor, ptype, bid, offer} in vol points from a get_vols answer;
+    """Rows {tenor, ptype, bid, offer, mid} in vol points from a get_vols answer
+    (bid and offer None for a single value: Fenics' RRs and strangles are mids);
     raises NoVols for an answer without vols, ValueError for an error."""
     try:
         root = ET.fromstring(text)
@@ -99,10 +105,13 @@ def parse_vols(text: str, scale: float = 100) -> list[dict]:
         else:
             continue
         parts = [_num(p) for p in vol.split("/")]
-        bid, offer = parts[0], parts[1] if len(parts) > 1 else parts[0]
-        if bid is None or offer is None:
+        if None in parts or len(parts) > 2:
             continue
-        rows.append({"tenor": tenor, "ptype": ptype, "bid": bid * scale, "offer": offer * scale})
+        if len(parts) == 1 or parts[0] == parts[1]:       # no spread: a mid, not a zero-width range
+            rows.append({"tenor": tenor, "ptype": ptype, "bid": None, "offer": None, "mid": parts[0] * scale})
+        else:
+            bid, offer = parts[0] * scale, parts[1] * scale
+            rows.append({"tenor": tenor, "ptype": ptype, "bid": bid, "offer": offer, "mid": (bid + offer) / 2})
     if not rows:
         err = " ".join(t.strip() for t in root.itertext() if t.strip())
         if "error" in err.lower():                  # as the workbook checks: e.g. a wrong password
@@ -116,9 +125,11 @@ def rows_to_entries(pair: str, rows: list[dict], brand: str, atm_ptype: str, ts:
     out = []
     for r in rows:
         ptype = atm_ptype if r["ptype"] == "ATM" else r["ptype"]
-        out.append({279: "1", 48: f"XML.{pair}.{r['tenor']}.{ptype}.{brand}", 17001: pair, 6217: r["tenor"],
-                    423: ptype, 6960: brand, 60: ts, 132: f"{r['bid']}", 133: f"{r['offer']}",
-                    631: f"{(r['bid'] + r['offer']) / 2}"})
+        e = {279: "1", 48: f"XML.{pair}.{r['tenor']}.{ptype}.{brand}", 17001: pair, 6217: r["tenor"],
+             423: ptype, 6960: brand, 60: ts, 631: f"{r['mid']}"}
+        if r["bid"] is not None:
+            e.update({132: f"{r['bid']}", 133: f"{r['offer']}"})
+        out.append(e)
     return out
 
 
@@ -128,19 +139,35 @@ class XmlPosterSession:
     def __init__(self, url: str, user: str, password: str, pairs: Callable[[], list[str]],
                  scenario: str = "fenicsVols", interval: float = 60, brand: str = "FMD1",
                  atm_ptype: str = "DNS", timeout: float = 20, scale: float = 100, retry_missing: float = 3600,
+                 raw_dir: Path | None = None,
                  on_entries: Callable[[list[dict[int, str]]], None] = lambda e: None,
                  on_status: Callable[[dict], None] = lambda s: None):
         self.url, self.user, self.password, self.pairs = url, user, password, pairs
         self.scenario, self.interval, self.brand, self.atm_ptype, self.timeout = scenario, interval, brand, atm_ptype, timeout
-        self.scale, self.retry_missing = scale, retry_missing
+        self.scale, self.retry_missing, self.raw_dir = scale, retry_missing, raw_dir
+        self._fields_logged = False
         self.missing: dict[str, float] = {}           # pair -> when to ask again (monotonic)
         self.on_entries, self.on_status = on_entries, on_status
         self._stop, self._wake = threading.Event(), threading.Event()
 
     def fetch(self, pair: str) -> list[dict[int, str]]:
         text = post(self.url, get_vols_xml(pair, self.scenario, self.user, self.password), self.timeout)
+        self._keep_raw(pair, text)
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         return rows_to_entries(pair, parse_vols(text, self.scale), self.brand, self.atm_ptype, ts)
+
+    def _keep_raw(self, pair: str, text: str) -> None:
+        if not self._fields_logged:
+            names = sorted({m for m in re.findall(r'<field\s+name\s*=\s*"([^"]*)"', text)})
+            if names:
+                log.info("Fenics get_vols answer fields: %s", ", ".join(names))
+                self._fields_logged = True
+        if self.raw_dir:
+            try:
+                atomic_write(self.raw_dir / f"{pair}.xml",
+                             re.sub(r"<password>.*?</password>", "<password></password>", text, flags=re.S), fsync=False)
+            except OSError as e:
+                log.debug("could not keep the Fenics answer for %s: %s", pair, e)
 
     def poll_once(self) -> tuple[int, list[str]]:
         """One round over all pairs: (pairs answered, errors). Pairs without vols

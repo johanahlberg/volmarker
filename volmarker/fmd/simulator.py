@@ -282,7 +282,8 @@ def get_vols_answer(instruments: list[Instrument], pair: str) -> str:
     nodes = []
     for i, ins in enumerate(x for x in instruments if x.pair == pair and x.ptype in XML_TYPES and x.tenor in TENORS):
         vtype, delta = XML_TYPES[ins.ptype]
-        vol = f"{(ins.mid - ins.spread / 2) / 100:.6f}/{(ins.mid + ins.spread / 2) / 100:.6f}"   # decimals, as Fenics
+        vol = (f"{(ins.mid - ins.spread / 2) / 100:.6f}/{(ins.mid + ins.spread / 2) / 100:.6f}" if vtype == "ATM"
+               else f"{ins.mid / 100:.6f}")         # decimals; only the ATM has a bid/offer, as Fenics
         nodes.append(f'<node name="{i}"><field name="Maturity" value={quoteattr(_maturity(ins.tenor))}/>'
                      f'<field name="VolType" value="{vtype}"/><field name="PctDelta" value="{delta}"/>'
                      f'<field name="Volity" value="{vol}"/></node>')

@@ -271,9 +271,12 @@ class TestXmlPoster(unittest.TestCase):
                          ["ON", "2W", "18M", "1Y", None])
         rows = parse_vols(self.ANSWER)          # Fenics answers in decimals; x100 as the workbook
         self.assertEqual([(r["tenor"], r["ptype"]) for r in rows], [("ON", "ATM"), ("3M", "RR25"), ("1Y", "S10")])
-        for r, (bid, offer) in zip(rows, [(6.1, 6.4), (-0.3, -0.1), (0.75, 0.75)]):
-            self.assertAlmostEqual(r["bid"], bid)
-            self.assertAlmostEqual(r["offer"], offer)
+        for r, (bid, offer, mid) in zip(rows, [(6.1, 6.4, 6.25), (-0.3, -0.1, -0.2), (None, None, 0.75)]):
+            self.assertAlmostEqual(r["mid"], mid)
+            if bid is None:
+                self.assertIsNone(r["bid"]); self.assertIsNone(r["offer"])     # one value: a mid, no range
+            else:
+                self.assertAlmostEqual(r["bid"], bid); self.assertAlmostEqual(r["offer"], offer)
         book = QuoteBook()
         for e in rows_to_entries("EURUSD", rows, "FMD1", "DNS", "2026-10-27T08:00:00+00:00"):
             book.apply(e)
@@ -282,6 +285,8 @@ class TestXmlPoster(unittest.TestCase):
         self.assertFalse(view["ON"]["atm"]["alt_atm"])
         self.assertAlmostEqual(view["3M"]["rr25"]["mid"], -0.2)
         self.assertEqual(view["1Y"]["bf10"]["brand"], "FMD1")
+        self.assertIsNone(view["1Y"]["bf10"]["bid"])
+        self.assertAlmostEqual(view["1Y"]["bf10"]["mid"], 0.75)
         with self.assertRaisesRegex(ValueError, "invalid username"):
             parse_vols("<gfi_message><body><error>Error: invalid username or password</error></body></gfi_message>")
         with self.assertRaisesRegex(ValueError, "not XML"):
@@ -324,6 +329,8 @@ class TestXmlPoster(unittest.TestCase):
             view = market_view(book.pair_quotes("EURUSD"))
             self.assertEqual(set(view["1M"]), {"atm", "rr25", "rr10", "bf25", "bf10"})
             self.assertAlmostEqual(view["1M"]["atm"]["mid"], 7.0, delta=1.0)
+            self.assertLess(view["1M"]["atm"]["bid"], view["1M"]["atm"]["offer"])
+            self.assertIsNone(view["1M"]["rr25"]["bid"])           # RRs and strangles: mids only
             self.assertEqual(view["ON"]["atm"]["brand"], "FMD1")
 
 class TestFenicsLogin(unittest.TestCase):

@@ -70,6 +70,8 @@ def compare(resolved: dict, view: dict, tol: float = 1e-9) -> list[dict]:
             v = resolved[t]["mid"].get(m)
             if not q or v is None:
                 continue
+            if q.get("bid") is not None and q.get("offer") is not None and q["offer"] - q["bid"] <= tol:
+                continue          # bid = offer is a mid, not a range to be outside of
             if q.get("bid") is not None and v < q["bid"] - tol:
                 out.append({"tenor": t, "mark": m, "side": "below bid", "diff": v - q["bid"]})
             elif q.get("offer") is not None and v > q["offer"] + tol:

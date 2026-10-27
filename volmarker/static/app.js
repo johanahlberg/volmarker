@@ -691,13 +691,14 @@ function renderMarket() {
     if (!mq) { el.textContent = ""; el.title = ""; continue; }
     const q = sg < 0 ? rrFlip(mq) : mq;
     const two = (v) => (v == null ? "–" : (Math.abs(v) < 0.005 ? 0 : v).toFixed(2));
-    el.textContent = q.bid != null || q.offer != null ? `${two(q.bid)} / ${two(q.offer)}` : `mid ${two(q.mid)}`;
+    el.textContent = (q.bid != null || q.offer != null) && q.bid !== q.offer ? `${two(q.bid)} / ${two(q.offer)}` : `mid ${two(q.mid)}`;
     if (q.alt_atm) el.textContent += "*";
     el.classList.toggle("stale", !!q.stale);
     const v = res[t].mid[m] == null ? null : sg * res[t].mid[m];
-    let side = "";
-    if (v != null && q.bid != null && v < q.bid - 1e-9) side = `below bid by ${(q.bid - v).toFixed(3)}`;
-    if (v != null && q.offer != null && v > q.offer + 1e-9) side = `above offer by ${(v - q.offer).toFixed(3)}`;
+    let side = "";                   // only a real range: a source quoting bid = offer gives a mid, not a range
+    const ranged = q.bid != null && q.offer != null && q.offer - q.bid > 1e-9;
+    if (v != null && ranged && v < q.bid - 1e-9) side = `below bid by ${(q.bid - v).toFixed(3)}`;
+    if (v != null && ranged && v > q.offer + 1e-9) side = `above offer by ${(v - q.offer).toFixed(3)}`;
     td.classList.toggle("out", !!side);
     const al = app.alerts.find((a) => a.key === `${app.current}|${t}|${m}`);
     td.classList.toggle("alert", !!al);
