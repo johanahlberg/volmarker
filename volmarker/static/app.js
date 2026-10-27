@@ -5,10 +5,10 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type", "lock_rr10f", "lock_bf10f",
-  "follow_market", "alert_tol", "alerts_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "follow_bases", "tenors"];
+  "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "follow_bases", "tenors"];
 // pair settings the Setup tab saves on its own (service.SETTING_KEYS)
 const SETUP_KEYS = ["mode", "bases", "key", "group", "spread_ref", "follow_parent", "follow_bases", "cut", "dc_factor",
-  "atm_type", "follow_market", "excel", "alert_tol", "alerts_off"];
+  "atm_type", "follow_market", "excel", "alert_tol", "alerts_off", "alerts_smile_off"];
 const MKT_FIELDS = { atm: "atm", rr25: "rr25", rr10: "rr10", bf25: "bf25", bf10: "bf10" };
 const FOLLOW_FIELDS = ["atm", "rr25", "rr10f", "rr10", "bf25", "bf10f", "bf10"];   // owned by the feed on Follow FMD pairs
 // marks from outside VolMarker (surface.external); a derived pair's correlation is then implied by them
@@ -273,7 +273,7 @@ function pick(rec) {
   s.weights = normaliseWeights(s.weights);
   for (const k of ["lock_rr10f", "lock_bf10f"]) s[k] = s[k] === null ? true : !!s[k];
   s.atm_type = s.atm_type || "DNS";
-  s.follow_market = !!s.follow_market; s.alerts_off = !!s.alerts_off; s.rr_put = !!s.rr_put;
+  s.follow_market = !!s.follow_market; s.alerts_off = !!s.alerts_off; s.alerts_smile_off = !!s.alerts_smile_off; s.rr_put = !!s.rr_put;
   s.follow_bases = s.follow_bases !== false;
   for (const r of Object.values(s.tenors)) {   // records from before the 10D values were stored
     if (r.rr10 == null) r.rr10 = r.rr25 * r.rr10f;
@@ -1600,6 +1600,8 @@ function renderSetup() {
   $("#su-tol").innerHTML = Object.entries(MARK_LABEL).map(([m, l]) =>
     `<label>${l}<input class="num" data-m="${m}" value="${own[m] != null ? fmt(own[m], 2) : ""}" placeholder="${fmt(def[m], 2)}"></label>`).join("");
   $("#su-alerts-off").checked = !!d.alerts_off;
+  $("#su-alerts-smile").checked = !!d.alerts_smile_off;
+  $("#su-alerts-smile").disabled = !!d.alerts_off;
   $(".su-tol").hidden = !!d.follow_market;
 }
 function onSetupChange() {
@@ -1659,6 +1661,7 @@ function onSetupChange() {
     }
   }
   d.alerts_off = $("#su-alerts-off").checked;
+  d.alerts_smile_off = $("#su-alerts-smile").checked;
   renderSetup();
   if (parentChanged) loadParent().then(() => { buildGrid(); renderAll(); });
   if (rebuild) buildGrid();
@@ -2026,7 +2029,7 @@ function wire() {
   $("#su-save").onclick = saveSettings;
 
   // setup
-  ["#su-mode", "#su-b1", "#su-b2", "#su-key", "#su-group", "#su-spref", "#su-cut", "#su-dc", "#su-atm", "#su-follow", "#su-excel", "#su-follow-parent", "#su-follow-bases", "#su-alerts-off"].forEach((id) => $(id).addEventListener("change", onSetupChange));
+  ["#su-mode", "#su-b1", "#su-b2", "#su-key", "#su-group", "#su-spref", "#su-cut", "#su-dc", "#su-atm", "#su-follow", "#su-excel", "#su-follow-parent", "#su-follow-bases", "#su-alerts-off", "#su-alerts-smile"].forEach((id) => $(id).addEventListener("change", onSetupChange));
   $("#su-tol").addEventListener("change", (e) => {
     const m = e.target.dataset.m; if (!m) return;
     const txt = e.target.value.trim(), v = Number(txt);

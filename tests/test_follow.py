@@ -230,10 +230,18 @@ class TestAlerts(unittest.TestCase):
             trader.evaluate_alerts(NOW + 30)
             self.assertFalse([a for a in trader.alerts.list() if a["mark"] == "atm"])
             st = store.latest("EURUSD")
+            st["alerts_smile_off"] = True                       # RR and BF muted, ATM still alerts
+            st["alert_tol"] = None
+            st["tenors"]["1M"]["rr25"] = 2.0
+            trader.publish("EURUSD", st, st["version"])
+            trader.evaluate_alerts(NOW + 40)
+            trader.evaluate_alerts(NOW + 70)
+            self.assertEqual({a["mark"] for a in trader.alerts.list() if a["kind"] == "market"}, {"atm"})
+            st = store.latest("EURUSD")
             st["alerts_off"] = True
             st["tenors"]["1M"]["rr25"] = 2.0
             trader.publish("EURUSD", st, st["version"])
-            trader.evaluate_alerts(NOW + 60)
+            trader.evaluate_alerts(NOW + 100)
             self.assertEqual(trader.alerts.list(), [])
 
     def test_follow_pair_alerts_when_not_updated(self):

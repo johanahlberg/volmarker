@@ -32,14 +32,14 @@ from .surface import (ALERT_MARKS, FOLLOW_FIELDS, apply_derivation, apply_parent
 log = logging.getLogger("volmarker")
 
 STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type",
-              "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "follow_bases", "tenors"]
+              "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "follow_bases", "tenors"]
 LEADER_STALE = 45.0
 FEED_STALE = 15.0
 FOLLOW_STALE = 30.0
 MAX_TEST_DATES = 120
 # pair settings saved by the Setup tab's Save (the rest of a version comes from the latest one)
 SETTING_KEYS = ["mode", "bases", "key", "group", "spread_ref", "follow_parent", "follow_bases", "cut", "dc_factor",
-                "atm_type", "follow_market", "excel", "alert_tol", "alerts_off"]
+                "atm_type", "follow_market", "excel", "alert_tol", "alerts_off", "alerts_smile_off"]
 
 
 def _labels(own: list, cal: list) -> list[str]:
@@ -811,8 +811,9 @@ class Service:
             view = self.fresh_view(pair, rec, cfg)
             res = resolve(rec)
             own = rec.get("alert_tol") or {}
+            marks = ["atm"] if rec.get("alerts_smile_off") else ALERT_MARKS     # RR and BF muted, ATM kept
             for t in TENORS:
-                for m in ALERT_MARKS:
+                for m in marks:
                     q = view.get(t, {}).get(m)
                     v = res[t]["mid"][m]
                     if not q or q.get("stale") or q.get("alt_atm") or v is None:

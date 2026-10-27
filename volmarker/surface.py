@@ -26,7 +26,7 @@ cut, e.g. NYC or TOK: decides which expiry an event weighs on), excel (marked
 in Excel: read from Excel's export file, never written by VolMarker), dc_factor
 (Front Arena DC spread file = ATM spread x 0.5 x factor; none below 0.01), follow_market (the feed process publishes FMD
 mids into FOLLOW_FIELDS), alert_tol (per-mark alert tolerance overrides),
-alerts_off, follow_bases (derived pairs, default on: the ATMs move with the
+alerts_off, alerts_smile_off (mute the RR and BF alerts only, keep the ATM ones), follow_bases (derived pairs, default on: the ATMs move with the
 bases at a fixed correlation; off: the ATMs stay put and the correlation is
 recalculated as the bases move; always so on a derived pair marked in Excel or following FMD,
 whose ATMs come from outside) and rr_put (favour puts: the GUI shows and takes RRs as put - call;
@@ -97,6 +97,7 @@ def clean_state(state: dict) -> dict:
     if s["excel"] and s["follow_market"]:
         raise ValueError("A pair can't be marked in Excel and follow FMD at the same time")
     s["alerts_off"] = bool(s.get("alerts_off"))
+    s["alerts_smile_off"] = bool(s.get("alerts_smile_off"))
     s["rr_put"] = bool(s.get("rr_put"))
     s["follow_bases"] = s.get("follow_bases") is not False
     s["group"] = " ".join(str(s.get("group") or "").split())[:40] or None

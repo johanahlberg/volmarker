@@ -111,7 +111,7 @@ Tick **Follow FMD** in a pair's Setup tab and save. From then on, the FMD feed p
 Every app compares the **published** mids (not the draft, and without skew) of every pair with FMD, and raises an alert when they drift apart:
 
 - **Rule:** `|our mid − FMD mid| > tolerance` (`alerts.basis: "mid"`). With `"range"`, the distance outside the FMD bid/offer is used instead.
-- **Tolerances:** `alerts.tolerance` sets the default per mark (ATM 0.25, 25D RR 0.20, 10D RR 0.40, 25D BF 0.10, 10D BF 0.25). It is scaled at the short end by `alerts.tenor_scale` (ON ×2, 1W ×1.5, 2W ×1.25). Each pair can override the tolerances or mute its alerts in the Setup tab.
+- **Tolerances:** `alerts.tolerance` sets the default per mark (ATM 0.25, 25D RR 0.20, 10D RR 0.40, 25D BF 0.10, 10D BF 0.25). It is scaled at the short end by `alerts.tenor_scale` (ON ×2, 1W ×1.5, 2W ×1.25). Each pair can override the tolerances or mute its alerts in the Setup tab, or mute only its RR and BF alerts and keep the ATM ones (e.g. where the market source has mids only for the smile).
 - **No flapping:** a breach must last `alerts.confirm_s` (20 s) before it alerts, and it clears only once the gap is below 80 % of the tolerance (`clear_ratio`).
 - **Where alerts show:** the ⚠ button in the top bar (red when some are not acknowledged), the tab title, `⚠n` in the sidebar, red frames in the grid, and optional desktop notifications (tick them in the alert panel; a click opens the pair).
 - **Ack:** mutes an alert (per trader) until it clears, or until the gap grows by another full tolerance.
