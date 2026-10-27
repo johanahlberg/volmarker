@@ -625,6 +625,14 @@ function renderFenics() {
   $(".fx-every").title = (on ? "How often the FMD 1.0 vols are fetched from Fenics; changes apply at once"
     : "How often to fetch the FMD 1.0 vols once logged in to Fenics") + " (at least 10 s)";
 }
+// the Fenics user: the Windows login, or the name of the last login that worked if it differs
+const fenicsUserDefault = () => app.prefs.fenics_login || app.me?.user || "";
+function rememberFenicsUser(name) {
+  const keep = name && name !== app.me?.user ? name : undefined;
+  if (app.prefs.fenics_login !== keep || "fenics_user" in app.prefs) {
+    app.prefs.fenics_login = keep; delete app.prefs.fenics_user; savePrefs();
+  }
+}
 const everyText = (sec) => sec % 60 ? `${sec} s` : `${sec / 60} min`;
 const fenicsSeconds = () => (app.fenics?.logged_in ? app.fenics.seconds : app.prefs.fenics_seconds) || 300;
 async function setFenicsInterval() {
@@ -640,15 +648,17 @@ async function setFenicsInterval() {
   }
   renderFenics();
 }
-function openFenics() {
+async function openFenics() {
+  await loadFenics();                  // current status and server (config.json may have changed)
   const f = app.fenics || {}, on = !!f.logged_in;
-  $("#fx-user").value = on ? f.user : app.prefs.fenics_user || "";
+  $("#fx-user").value = on ? f.user : fenicsUserDefault();
   $("#fx-user").readOnly = on;
   $("#fx-pass").value = ""; $("#fx-pass").closest("label").hidden = on;
   $("#fx-ok").hidden = on;
   $("#fx-logout").hidden = !on;
   $("#fx-err").textContent = "";
-  $("#fx-state").textContent = !f.url ? "No Fenics server set (config.json: fmd.xml.url)" :
+  $("#fx-state").textContent = !app.fenics ? "VolMarker did not answer about the Fenics login: restart VolMarker (it may be older than this page)" :
+    !f.url ? "No Fenics server set (config.json: fmd.xml.url)" :
     (on ? `${f.url} · every ${everyText(f.seconds)} · ${f.connected ? `last fetch ${f.last_msg ? localTime(f.last_msg) : "–"}` : "not answering"}${f.last_error ? ` · ${f.last_error}` : ""}`
       : `${f.url} · every ${everyText(fenicsSeconds())} (the field at the top)`);
   $("#dlg-fenics").showModal();
@@ -660,7 +670,7 @@ async function submitFenics(e) {
   $("#fx-ok").disabled = true; $("#fx-err").textContent = "Logging in…";
   try {
     app.fenics = await api("/api/fenics/login", { username, password: $("#fx-pass").value, seconds: fenicsSeconds() });
-    app.prefs.fenics_user = username; savePrefs();
+    rememberFenicsUser(username);
     $("#dlg-fenics").close();
   } catch (err) { $("#fx-err").textContent = err.message; }
   $("#fx-pass").value = "";
@@ -1303,7 +1313,7 @@ function renderWeightsExport() {
   const l = x.last;
   $("#wx-state").innerHTML = (l ? `Last sent v${l.version} by ${esc(l.user)} at ${localTime(l.ts)}${l.ok ? "" : ` <span class="warn">(${esc(l.error || "failed")})</span>`}` : "Not sent from VolMarker yet") +
     (x.changed ? ` · <b class="warn">weights changed since</b>` : " · up to date");
-  if (!$("#wx-user").value) $("#wx-user").value = app.prefs.fenics_user || "";
+  if (!$("#wx-user").value) $("#wx-user").value = fenicsUserDefault();
   $("#wx-send").disabled = app.dirty;
   $("#wx-send").title = app.dirty ? "Publish first: the published version is sent" : `POST to ${x.url}/xmlposter`;
   $("#wx-table").innerHTML = `<thead><tr><th class="tn">Expiry</th><th class="tn">Ccy</th><th class="tn">Type</th><th class="tn">Event</th><th>Weight</th><th>Sent value</th></tr></thead><tbody>` +
@@ -1314,12 +1324,12 @@ async function sendWeights() {
   const username = $("#wx-user").value.trim(), password = $("#wx-pass").value;
   if (!password && !app.fenics?.logged_in) { $("#wx-msg").textContent = "User and password needed (or log in to Fenics)"; return; }
   if (!username && password) { $("#wx-msg").textContent = "User needed"; return; }
-  if (username && app.prefs.fenics_user !== username) { app.prefs.fenics_user = username; savePrefs(); }
   $("#wx-send").disabled = true; $("#wx-msg").textContent = "Sending…";
   try {
     const r = await api(`/api/pairs/${app.current}/weights-export`, { username, password });
     $("#wx-msg").textContent = r.ok ? "Sent: Fenics accepted, Front Arena files written" : `Front Arena files written; Fenics: ${r.error}`;
     $("#wx-msg").className = r.ok ? "ok" : "warn";
+    if (r.ok && password) rememberFenicsUser(username);
     if (!r.ok && r.response) $("#wx-msg").title = r.response;
   } catch (e) { $("#wx-msg").textContent = `Failed: ${e.message}`; $("#wx-msg").className = "warn"; }
   $("#wx-pass").value = "";
