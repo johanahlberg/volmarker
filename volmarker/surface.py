@@ -29,8 +29,10 @@ mids into FOLLOW_FIELDS), alert_tol (per-mark alert tolerance overrides),
 alerts_off, alerts_smile_off (mute the RR and BF alerts only, keep the ATM ones), follow_bases (derived pairs, default on: the ATMs move with the
 bases at a fixed correlation; off: the ATMs stay put and the correlation is
 recalculated as the bases move; always so on a derived pair marked in Excel or following FMD,
-whose ATMs come from outside) and rr_put (favour puts: the GUI shows and takes RRs as put - call;
-stored and exported RRs stay call - put).
+whose ATMs come from outside), rr_put (favour puts: the GUI shows and takes RRs as put - call;
+stored and exported RRs stay call - put) and inverse (Excel's Quotation = Inverse: Fenics and FMD
+quote the pair's RRs in the inverted pair's terms, e.g. NOKCHF as CHFNOK call - put, so the Fenics
+export and the FMD market view flip their sign; stored RRs and Front Arena stay in the desk's terms).
 
 Vols are in percentage points, as typed by the desk (7.25 means 7.25%).
 """
@@ -99,6 +101,7 @@ def clean_state(state: dict) -> dict:
     s["alerts_off"] = bool(s.get("alerts_off"))
     s["alerts_smile_off"] = bool(s.get("alerts_smile_off"))
     s["rr_put"] = bool(s.get("rr_put"))
+    s["inverse"] = bool(s.get("inverse"))
     s["follow_bases"] = s.get("follow_bases") is not False
     s["group"] = " ".join(str(s.get("group") or "").split())[:40] or None
     s["follow_parent"] = bool(s.get("follow_parent"))

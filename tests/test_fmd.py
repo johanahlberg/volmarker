@@ -72,6 +72,15 @@ class TestBookAndView(unittest.TestCase):
         v = market_view(quotes[:1], "DNS", "auto")["1M"]["atm"]
         self.assertTrue(v["alt_atm"])
 
+    def test_inverse_pair_flips_rrs(self):
+        quotes = [{"tenor": "1M", "mark": "rr25", "brand": "FMD", "bid": -0.9, "offer": -0.6, "mid": -0.75},
+                  {"tenor": "1M", "mark": "bf25", "brand": "FMD", "bid": 0.2, "offer": 0.3, "mid": 0.25}]
+        v = market_view(quotes, inverse=True)["1M"]
+        self.assertEqual((v["rr25"]["bid"], v["rr25"]["offer"], v["rr25"]["mid"]), (0.6, 0.9, 0.75))
+        self.assertEqual((v["bf25"]["bid"], v["bf25"]["offer"]), (0.2, 0.3))
+        best = market_view(quotes, brand="best", inverse=True)["1M"]["rr25"]
+        self.assertEqual((best["bid"], best["offer"]), (0.6, 0.9))
+
     def test_compare(self):
         s = flat_state("EURUSD", 7.0)
         view = {"1M": {"atm": {"bid": 7.1, "offer": 7.4, "mid": 7.25}}}

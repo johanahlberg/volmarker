@@ -32,14 +32,14 @@ from .surface import (ALERT_MARKS, FOLLOW_FIELDS, apply_derivation, apply_parent
 log = logging.getLogger("volmarker")
 
 STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type",
-              "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "follow_bases", "tenors"]
+              "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "inverse", "follow_bases", "tenors"]
 LEADER_STALE = 45.0
 FEED_STALE = 15.0
 FOLLOW_STALE = 30.0
 MAX_TEST_DATES = 120
 # pair settings saved by the Setup tab's Save (the rest of a version comes from the latest one)
 SETTING_KEYS = ["mode", "bases", "key", "group", "spread_ref", "follow_parent", "follow_bases", "cut", "dc_factor",
-                "atm_type", "follow_market", "excel", "alert_tol", "alerts_off", "alerts_smile_off"]
+                "atm_type", "follow_market", "excel", "alert_tol", "alerts_off", "alerts_smile_off", "inverse"]
 
 
 def _labels(own: list, cal: list) -> list[str]:
@@ -92,7 +92,7 @@ class Service:
         for r in recs:
             quotes = self.market.get(r["pair"])
             pair_has_market = bool(quotes) and self.feed_alive()
-            outside = (compare(resolve(r), market_view(quotes, r.get("atm_type") or "DNS", brand))
+            outside = (compare(resolve(r), market_view(quotes, r.get("atm_type") or "DNS", brand, bool(r.get("inverse"))))
                        if pair_has_market else None)
             age_min = (now - datetime.fromisoformat(r["marked_ts"])).total_seconds() / 60
             limit = cfg["stale_minutes_key"] if r.get("key") else cfg["stale_minutes_other"]
@@ -164,7 +164,7 @@ class Service:
     def fresh_view(self, pair: str, rec: dict, cfg: dict, brand: str | None = None) -> dict:
         """Market view with the age of every quote and a stale flag."""
         brand = brand or cfg.get("fmd_brand", "auto")
-        view = market_view(self.market.get(pair, []), rec.get("atm_type") or "DNS", brand)
+        view = market_view(self.market.get(pair, []), rec.get("atm_type") or "DNS", brand, bool(rec.get("inverse")))
         stale_min = cfg.get("market_stale_minutes", 30)
         now = datetime.now(timezone.utc)
         for marks in view.values():

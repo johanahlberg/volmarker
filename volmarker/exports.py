@@ -8,7 +8,9 @@
   Fenics       <fenics_dir>/<CCY1><CCY2>volsurface.txt       quoted surface (mid + skew)
       vol,atm,EUR,USD,1w,<bid>,<ask>                          tenors 1d 1w 2w 1m ... 1y ... 5y
       vol,s25|rr25|s10|rr10,EUR,USD,1w,<bid>,<ask>            bid = ask = mid: Fenics uses the
-                                                              mid for RR and BF
+                                                              mid for RR and BF; an inverse pair's
+                                                              RRs with the sign flipped (Excel's
+                                                              Quotation = Inverse)
   DC spreads   <dc_spread_dir>/<CCY1><CCY2>spreads.txt        only if the pair's dc_factor >= 0.01
       1d,<ATM spread x 0.5 x dc_factor>
   History      <history_dir>/<CCY1><CCY2>_yyyymmdd_hhmmss.csv  a copy of the Fenics file
@@ -56,13 +58,17 @@ def frontarena_lines(pair: str, resolved: dict, spreads: dict[str, float]) -> li
     return out
 
 
-def fenics_lines(pair: str, resolved: dict) -> list[str]:
+def fenics_lines(pair: str, resolved: dict, inverse: bool = False) -> list[str]:
+    """inverse: Fenics reads the pair's RRs in the inverted pair's terms (e.g. the
+    desk marks NOKCHF RRs as CHFNOK), so they go out with the sign flipped."""
     c1, c2 = split_pair(pair)
     out = [f"vol,atm,{c1},{c2},{FEN_TENORS[t]},{_n(resolved[t]['quoted']['atm_bid'])},"
            f"{_n(resolved[t]['quoted']['atm_offer'])}" for t in TENORS]
     for code, mark in (("s25", "bf25"), ("rr25", "rr25"), ("s10", "bf10"), ("rr10", "rr10")):
-        out += [f"vol,{code},{c1},{c2},{FEN_TENORS[t]},{_n(resolved[t]['quoted'][mark])},"
-                f"{_n(resolved[t]['quoted'][mark])}" for t in TENORS]
+        sign = -1 if inverse and mark.startswith("rr") else 1
+        vals = [resolved[t]["quoted"][mark] for t in TENORS]
+        vals = [None if v is None else sign * v for v in vals]
+        out += [f"vol,{code},{c1},{c2},{FEN_TENORS[t]},{_n(v)},{_n(v)}" for t, v in zip(TENORS, vals)]
     return out
 
 
@@ -76,7 +82,7 @@ def write_exports(rec: dict, resolved: dict, dirs: dict[str, Path], history: boo
     pair = rec["pair"]
     c1, c2 = split_pair(pair)
     spreads = {t: rec["tenors"][t]["spread"] for t in TENORS}
-    fen = _lines(fenics_lines(pair, resolved))
+    fen = _lines(fenics_lines(pair, resolved, bool(rec.get("inverse"))))
     # no flush to disk: the rename keeps readers safe, and the next publish rewrites them anyway
     atomic_write(Path(dirs["frontarena"]) / f"{c1}{c2}volsurface.txt", _lines(frontarena_lines(pair, resolved, spreads)), fsync=False)
     atomic_write(Path(dirs["fenics"]) / f"{c1}{c2}volsurface.txt", fen, fsync=False)

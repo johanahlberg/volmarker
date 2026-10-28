@@ -18,9 +18,11 @@ def _brand_rank(b: str | None) -> int:
     return BRAND_ORDER.index(b) if b in BRAND_ORDER else len(BRAND_ORDER)
 
 
-def market_view(quotes: list[dict], atm_type: str = "DNS", brand: str = "auto") -> dict:
+def market_view(quotes: list[dict], atm_type: str = "DNS", brand: str = "auto", inverse: bool = False) -> dict:
     """brand: 'auto' (FMD aggregate first, then FMD1, BGC, GFI, RPM), 'best'
-    (highest bid / lowest offer across brands) or a specific brand."""
+    (highest bid / lowest offer across brands) or a specific brand.
+    inverse: FMD quotes the pair's RRs in the inverted pair's terms, as Fenics
+    does; the view turns them into the desk's (sign flipped, bid and offer swapped)."""
     view: dict[str, dict] = {}
     groups: dict[tuple[str, str], list[dict]] = {}
     for q in quotes:
@@ -57,6 +59,9 @@ def market_view(quotes: list[dict], atm_type: str = "DNS", brand: str = "auto") 
         if pick.get("mid") is None and pick.get("bid") is not None and pick.get("offer") is not None:
             pick["mid"] = (pick["bid"] + pick["offer"]) / 2
         pick["alt_atm"] = alt
+        if inverse and mark in ("rr25", "rr10"):
+            neg = lambda x: None if x is None else -x
+            pick["bid"], pick["offer"], pick["mid"] = neg(pick.get("offer")), neg(pick.get("bid")), neg(pick.get("mid"))
         view.setdefault(tenor, {})[mark] = pick
     return view
 

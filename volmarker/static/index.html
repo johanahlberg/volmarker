@@ -224,6 +224,7 @@
           <label>ATM convention (for broker ATM quotes)
             <select id="su-atm"><option value="DNS">DNS (delta-neutral straddle)</option><option value="ATMF">ATMF (at-the-money forward)</option></select>
           </label>
+          <label class="check"><input id="su-inverse" type="checkbox"><span><b>Inverse</b> (Excel's Quotation = Inverse): Fenics and FMD quote this pair's RRs in the inverted pair's terms (e.g. NOKCHF as CHFNOK), so the Fenics file gets the RRs with the sign flipped and FMD RRs are flipped before they are shown, alerted on or followed. Front Arena, ATM and BF are unchanged</span></label>
           <label class="check"><input id="su-follow" type="checkbox"><span><b>Follow FMD</b> (market mode): the feed publishes FMD mids for ATM, 25D/10D RR and BF to Fenics and Front Arena automatically</span></label>
           <label class="check"><input id="su-excel" type="checkbox"><span><b>Marked in Excel</b>: VolMarker reads the marks from the pair's Excel export file (Front Arena volsurface file) whenever Excel writes a newer one, and never writes this pair's files itself</span></label>
           <p class="muted su-follow-note">You keep the spread, skew and event weights. Moves bigger than the jump limit are held for a minute first. If the feed stops, nothing is published and every app raises an alert. Untick to take the surface back.</p>

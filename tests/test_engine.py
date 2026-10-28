@@ -252,6 +252,23 @@ class TestServiceAndStore(unittest.TestCase):
         bid, ask = (float(x) for x in next(l for l in lines if l.startswith("vol,EUR,CHF,1mo,")).split(",")[4:6])
         self.assertAlmostEqual((bid + ask) / 2, ec["tenors"]["1M"]["atm"], places=9)
 
+    def test_inverse_pair_flips_fenics_rrs_only(self):
+        self.a.create_pair("NOKCHF", "marked", None, False)
+        st = flat_state("NOKCHF", 9.0, rr25=0.8, bf25=0.3)
+        st["inverse"] = True                                   # desk marks the RRs as CHFNOK
+        self.a.publish("NOKCHF", st, expected_version=1)
+        rec = self.store.latest("NOKCHF")
+        self.assertTrue(rec["inverse"])
+        rr10 = rec["tenors"]["1M"]["rr10"]
+        exp = Path(self.tmp.name) / "exports"
+        fen = (exp / "fenics/NOKCHFvolsurface.txt").read_text().splitlines()
+        val = lambda code: [float(x) for x in next(l for l in fen if l.startswith(f"vol,{code},NOK,CHF,1m,")).split(",")[5:7]]
+        self.assertEqual(val("rr25"), [-0.8, -0.8])
+        self.assertEqual(val("rr10"), [-rr10, -rr10])
+        self.assertEqual(val("s25"), [0.3, 0.3])
+        fa = (exp / "frontarena/NOKCHFvolsurface.txt").read_text().splitlines()
+        self.assertIn("vol25,NOK,CHF,riskreversal,1mo,0.8", fa)   # Front Arena: as marked
+
     def test_derived_held_off_bases(self):
         self._marked(self.a, "EURUSD", 7.0)
         self._marked(self.a, "USDCHF", 7.5)

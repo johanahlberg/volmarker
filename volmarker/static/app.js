@@ -5,10 +5,10 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type", "lock_rr10f", "lock_bf10f",
-  "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "follow_bases", "tenors"];
+  "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "inverse", "follow_bases", "tenors"];
 // pair settings the Setup tab saves on its own (service.SETTING_KEYS)
 const SETUP_KEYS = ["mode", "bases", "key", "group", "spread_ref", "follow_parent", "follow_bases", "cut", "dc_factor",
-  "atm_type", "follow_market", "excel", "alert_tol", "alerts_off", "alerts_smile_off"];
+  "atm_type", "follow_market", "excel", "alert_tol", "alerts_off", "alerts_smile_off", "inverse"];
 const MKT_FIELDS = { atm: "atm", rr25: "rr25", rr10: "rr10", bf25: "bf25", bf10: "bf10" };
 const FOLLOW_FIELDS = ["atm", "rr25", "rr10f", "rr10", "bf25", "bf10f", "bf10"];   // owned by the feed on Follow FMD pairs
 // marks from outside VolMarker (surface.external); a derived pair's correlation is then implied by them
@@ -273,7 +273,7 @@ function pick(rec) {
   s.weights = normaliseWeights(s.weights);
   for (const k of ["lock_rr10f", "lock_bf10f"]) s[k] = s[k] === null ? true : !!s[k];
   s.atm_type = s.atm_type || "DNS";
-  s.follow_market = !!s.follow_market; s.alerts_off = !!s.alerts_off; s.alerts_smile_off = !!s.alerts_smile_off; s.rr_put = !!s.rr_put;
+  s.follow_market = !!s.follow_market; s.alerts_off = !!s.alerts_off; s.alerts_smile_off = !!s.alerts_smile_off; s.rr_put = !!s.rr_put; s.inverse = !!s.inverse;
   s.follow_bases = s.follow_bases !== false;
   for (const r of Object.values(s.tenors)) {   // records from before the 10D values were stored
     if (r.rr10 == null) r.rr10 = r.rr25 * r.rr10f;
@@ -1606,6 +1606,7 @@ function renderSetup() {
   $("#su-cut").value = d.cut || "NYC";
   if (document.activeElement !== $("#su-dc")) $("#su-dc").value = d.dc_factor == null ? "" : fmt(d.dc_factor, 2);
   $("#su-atm").value = d.atm_type || "DNS";
+  $("#su-inverse").checked = !!d.inverse;
   $$(".su-derived").forEach((el) => (el.hidden = d.mode !== "derived"));
   $("#su-follow-bases").checked = d.follow_bases !== false;
   $("#su-follow-bases").disabled = external(d);
@@ -1637,6 +1638,7 @@ function onSetupChange() {
   if (fp !== !!d.follow_parent || parentChanged) for (const t of app.tenors) d.tenors[t].psprd = null;   // (re)calibrate to the current ATMs
   d.follow_parent = fp;
   d.atm_type = $("#su-atm").value;
+  d.inverse = $("#su-inverse").checked;
   if (mode === "derived") {
     if (!bases[0] || !bases[1]) { $$(".su-derived").forEach((el) => (el.hidden = false)); return; }
     if (d.mode !== "derived" || String(d.bases) !== String(bases)) {
@@ -2048,7 +2050,7 @@ function wire() {
   $("#su-save").onclick = saveSettings;
 
   // setup
-  ["#su-mode", "#su-b1", "#su-b2", "#su-key", "#su-group", "#su-spref", "#su-cut", "#su-dc", "#su-atm", "#su-follow", "#su-excel", "#su-follow-parent", "#su-follow-bases", "#su-alerts-off", "#su-alerts-smile"].forEach((id) => $(id).addEventListener("change", onSetupChange));
+  ["#su-mode", "#su-b1", "#su-b2", "#su-key", "#su-group", "#su-spref", "#su-cut", "#su-dc", "#su-atm", "#su-inverse", "#su-follow", "#su-excel", "#su-follow-parent", "#su-follow-bases", "#su-alerts-off", "#su-alerts-smile"].forEach((id) => $(id).addEventListener("change", onSetupChange));
   $("#su-tol").addEventListener("change", (e) => {
     const m = e.target.dataset.m; if (!m) return;
     const txt = e.target.value.trim(), v = Number(txt);
