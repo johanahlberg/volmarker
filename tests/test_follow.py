@@ -145,13 +145,13 @@ class TestFollower(unittest.TestCase):
             cross = store.latest("EURCHF")
             self.assertTrue(cross["follow_bases"])               # the setting is kept, but FMD owns the ATMs
             self.assertAlmostEqual(cross["tenors"]["1M"]["atm"], 5.0)
-            self.assertAlmostEqual(cross["tenors"]["1M"]["corr"], implied_corr(5.0, 7.0, 8.0, 1, 1))
+            self.assertAlmostEqual(cross["tenors"]["1M"]["corr"], implied_corr(5.0, 7.0, 8.0))
             # an FMD-driven base move: the ATMs stay with FMD, the correlation follows the bases
             trader.publish("EURUSD", flat_state("EURUSD", 7.6), store.latest("EURUSD")["version"], source="market")
             cross = store.latest("EURCHF")
             self.assertEqual(cross["source"], "propagation")
             self.assertAlmostEqual(cross["tenors"]["1M"]["atm"], 5.0)
-            self.assertAlmostEqual(cross["tenors"]["1M"]["corr"], implied_corr(5.0, 7.6, 8.0, 1, 1))
+            self.assertAlmostEqual(cross["tenors"]["1M"]["corr"], implied_corr(5.0, 7.6, 8.0))
             v = cross["version"]
             trader.publish("EURUSD", flat_state("EURUSD", 7.6001), store.latest("EURUSD")["version"], source="market")
             self.assertEqual(store.latest("EURCHF")["version"], v)      # below min_corr_change

@@ -32,6 +32,8 @@ from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 
+from .derived import upgrade_corr
+
 LOCK_TIMEOUT = 15.0     # seconds to wait for a lock
 LOCK_STALE = 30.0       # a lock older than this is considered abandoned
 
@@ -237,13 +239,13 @@ class Store:
         if not path.exists():
             return None
         line = _last_line(path)
-        return json.loads(line) if line else None
+        return upgrade_corr(json.loads(line)) if line else None
 
     def history(self, pair: str, limit: int = 100) -> list[dict]:
         path = self._history(pair)
         if not path.exists():
             return []
-        return [json.loads(l) for l in _tail_lines(path, limit)]
+        return [upgrade_corr(json.loads(l)) for l in _tail_lines(path, limit)]
 
     def as_of(self, pair: str, before: datetime) -> dict | None:
         """The last version published before a moment (e.g. the previous day's EOD)."""
@@ -251,7 +253,7 @@ class Store:
         if not path.exists():
             return None
         for line in _reverse_lines(path):
-            rec = json.loads(line)
+            rec = upgrade_corr(json.loads(line))
             if datetime.fromisoformat(rec["ts"]) < before:
                 return rec
         return None

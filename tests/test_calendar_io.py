@@ -287,13 +287,13 @@ class TestExcelPairs(unittest.TestCase):
         rec = self.store.latest("EURCHF")
         self.assertEqual(rec["source"], "excel")
         self.assertAlmostEqual(rec["tenors"]["1M"]["atm"], 5.0)
-        self.assertAlmostEqual(rec["tenors"]["1M"]["corr"], implied_corr(5.0, 7.0, 8.0, 1, 1))
+        self.assertAlmostEqual(rec["tenors"]["1M"]["corr"], implied_corr(5.0, 7.0, 8.0))
         # a base publish keeps Excel's ATMs and recalculates the correlation; the file stays Excel's
         self.svc.publish("EURUSD", flat_state("EURUSD", 7.5), self.store.latest("EURUSD")["version"])
         rec = self.store.latest("EURCHF")
         self.assertEqual(rec["source"], "propagation")
         self.assertAlmostEqual(rec["tenors"]["1M"]["atm"], 5.0)
-        self.assertAlmostEqual(rec["tenors"]["1M"]["corr"], implied_corr(5.0, 7.5, 8.0, 1, 1))
+        self.assertAlmostEqual(rec["tenors"]["1M"]["corr"], implied_corr(5.0, 7.5, 8.0))
         self.assertEqual(p.stat().st_mtime, base)
         self.assertTrue(self.svc.summaries()[[s["pair"] for s in self.svc.summaries()].index("EURCHF")]["excel"])
 

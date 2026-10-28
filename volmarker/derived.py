@@ -7,12 +7,14 @@ A cross is written as a product of its two base pairs, each raised to +1 or
     AUDCHF = AUDUSD^+1 * USDCHF^+1
     NOKSEK = EURSEK^+1 * EURNOK^-1
 
-so that
+The correlation is the triangle correlation, as in the desk's Excel workbook:
 
-    var(cross) = var1 + var2 + 2 * s1 * s2 * rho * vol1 * vol2
+    var(cross) = var1 + var2 - 2 * rho * vol1 * vol2
 
-where rho is the correlation between the two base pairs *as quoted*
-(e.g. EURUSD vs USDCHF is typically strongly negative).
+whatever way the bases are quoted (EURCHF from EURUSD and USDCHF: rho is
+typically strongly positive). Versions written before this convention
+(no corr_conv) held the correlation of the bases as quoted, which is
+-s1 * s2 * rho; upgrade_corr turns them into the triangle correlation.
 """
 
 from __future__ import annotations
@@ -46,13 +48,35 @@ def orientation(cross: str, base1: str, base2: str) -> tuple[int, int]:
     raise ValueError(f"{cross} cannot be built from {base1} and {base2}")
 
 
-def cross_vol(vol1: float, vol2: float, rho: float, s1: int, s2: int) -> float:
-    var = vol1 ** 2 + vol2 ** 2 + 2 * s1 * s2 * rho * vol1 * vol2
+CORR_CONV = "triangle"
+
+
+def cross_vol(vol1: float, vol2: float, rho: float) -> float:
+    var = vol1 ** 2 + vol2 ** 2 - 2 * rho * vol1 * vol2
     if var <= 0:
         raise ValueError("Correlation gives a non-positive cross variance")
     return math.sqrt(var)
 
 
-def implied_corr(cross: float, vol1: float, vol2: float, s1: int, s2: int) -> float:
+def implied_corr(cross: float, vol1: float, vol2: float) -> float:
     """Correlation that reproduces the given cross vol (not clamped)."""
-    return (cross ** 2 - vol1 ** 2 - vol2 ** 2) / (2 * s1 * s2 * vol1 * vol2)
+    return (vol1 ** 2 + vol2 ** 2 - cross ** 2) / (2 * vol1 * vol2)
+
+
+def upgrade_corr(rec: dict) -> dict:
+    """A version read from history in the triangle convention: one written
+    before corr_conv held the correlation of the bases as quoted."""
+    if rec.get("corr_conv") == CORR_CONV:
+        return rec
+    rec["corr_conv"] = CORR_CONV
+    bases = rec.get("bases")
+    if not bases or len(bases) != 2:
+        return rec
+    try:
+        s1, s2 = orientation(rec["pair"], *bases)
+    except ValueError:
+        return rec
+    for row in (rec.get("tenors") or {}).values():
+        if row.get("corr") is not None:
+            row["corr"] = -s1 * s2 * row["corr"]
+    return rec

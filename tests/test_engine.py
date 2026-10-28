@@ -10,7 +10,7 @@ from pathlib import Path
 
 from volmarker.calendar import calibrate_to_quotes, cumulative_weights, interpolate_atm, tenor_dates
 from volmarker.conventions import TENORS
-from volmarker.derived import cross_vol, implied_corr, orientation
+from volmarker.derived import cross_vol, implied_corr, orientation, upgrade_corr
 from volmarker.service import STATE_KEYS, Service
 from volmarker.store import ConflictError, Store
 from volmarker.surface import calibrate, check_surface, clean_state, new_state, resolve
@@ -34,14 +34,22 @@ class TestTriangle(unittest.TestCase):
             orientation("EURCHF", "AUDUSD", "USDJPY")
 
     def test_round_trip(self):
-        for s1, s2 in ((1, 1), (1, -1)):
-            v = cross_vol(7.0, 6.5, -0.6 * s1 * s2, s1, s2)
-            self.assertAlmostEqual(implied_corr(v, 7.0, 6.5, s1, s2), -0.6 * s1 * s2)
+        v = cross_vol(7.0, 6.5, 0.6)
+        self.assertAlmostEqual(implied_corr(v, 7.0, 6.5), 0.6)
 
-    def test_eurchf_low_vol_with_negative_corr(self):
-        # EURUSD and USDCHF strongly negatively correlated -> low EURCHF vol
-        v = cross_vol(7.0, 7.5, -0.9, 1, 1)
-        self.assertAlmostEqual(v, math.sqrt(49 + 56.25 - 2 * 0.9 * 7 * 7.5))
+    def test_triangle_corr_as_in_excel(self):
+        # Excel: sqrt(v1^2 + v2^2 - 2 v1 v2 rho) whatever way the bases are quoted
+        self.assertAlmostEqual(cross_vol(7.0, 7.5, 0.9), math.sqrt(49 + 56.25 - 2 * 0.9 * 7 * 7.5))
+        self.assertAlmostEqual(implied_corr(10.0, 10.5, 10.95), 0.566, places=3)   # AUDCHF O/N: positive
+
+    def test_old_versions_upgrade_to_triangle_corr(self):
+        rec = {"pair": "AUDCHF", "bases": ["AUDUSD", "USDCHF"], "tenors": {"ON": {"corr": -0.566}, "1W": {"corr": None}}}
+        upgrade_corr(rec)
+        self.assertEqual((rec["tenors"]["ON"]["corr"], rec["corr_conv"]), (0.566, "triangle"))
+        upgrade_corr(rec)                                       # only once
+        self.assertEqual(rec["tenors"]["ON"]["corr"], 0.566)
+        rec = {"pair": "NOKSEK", "bases": ["EURSEK", "EURNOK"], "tenors": {"ON": {"corr": 0.9}}}
+        self.assertEqual(upgrade_corr(rec)["tenors"]["ON"]["corr"], 0.9)   # s1 * s2 = -1: same number
 
 
 class TestSurface(unittest.TestCase):
@@ -97,7 +105,7 @@ class TestSurface(unittest.TestCase):
         s = calibrate(clean_state(s), bases, {t: 4.5 for t in TENORS})
         for t in TENORS:
             self.assertAlmostEqual(s["tenors"][t]["atm"], 4.5, places=5)
-            self.assertLess(s["tenors"][t]["corr"], 0)
+            self.assertGreater(s["tenors"][t]["corr"], 0)        # triangle correlation, as in Excel
 
 
 class TestCalendar(unittest.TestCase):
@@ -242,7 +250,7 @@ class TestServiceAndStore(unittest.TestCase):
         ec = self.store.latest("EURCHF")
         self.assertEqual(ec["source"], "propagation")
         self.assertAlmostEqual(ec["tenors"]["1M"]["corr"], rho)
-        self.assertAlmostEqual(ec["tenors"]["1M"]["atm"], cross_vol(8.0, 7.5, rho, 1, 1), places=5)
+        self.assertAlmostEqual(ec["tenors"]["1M"]["atm"], cross_vol(8.0, 7.5, rho), places=5)
 
         # Anna's app sees it via the journal
         self.a.poll_journal()
@@ -286,14 +294,14 @@ class TestServiceAndStore(unittest.TestCase):
         self.assertAlmostEqual(ec["tenors"]["1M"]["atm"], 4.5)  # ATM stays
         new_rho = ec["tenors"]["1M"]["corr"]
         self.assertNotAlmostEqual(new_rho, rho)                 # correlation follows the bases
-        self.assertAlmostEqual(cross_vol(8.0, 7.5, new_rho, 1, 1), 4.5, places=6)
+        self.assertAlmostEqual(cross_vol(8.0, 7.5, new_rho), 4.5, places=6)
 
         ec["follow_bases"] = True                              # back on: runs off the bases from here
         self.a.publish("EURCHF", ec, ec["version"])
         self.a.publish("EURUSD", flat_state("EURUSD", 7.0), expected_version=3)
         ec = self.store.latest("EURCHF")
         self.assertAlmostEqual(ec["tenors"]["1M"]["corr"], new_rho)
-        self.assertAlmostEqual(ec["tenors"]["1M"]["atm"], cross_vol(7.0, 7.5, new_rho, 1, 1), places=5)
+        self.assertAlmostEqual(ec["tenors"]["1M"]["atm"], cross_vol(7.0, 7.5, new_rho), places=5)
 
     def test_save_settings_keeps_marks_and_staleness(self):
         self._marked(self.a, "EURUSD", 7.0)

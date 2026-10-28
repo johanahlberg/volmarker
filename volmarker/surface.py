@@ -11,7 +11,7 @@ file). Per tenor the trader-owned inputs are:
     bf25     25D butterfly
     bf10f    10D/25D BF factor
     bf10     10D butterfly
-    corr     derived pairs only: correlation between the two base pairs
+    corr     derived pairs only: triangle correlation of the two base pairs, as in Excel
     psprd    pairs moving with their spread parent: ATM minus the parent's ATM
     skew_atm, skew_rr, skew_bf   quoted-only shifts (Fenics file only)
 
@@ -197,7 +197,7 @@ def apply_derivation(state: dict, base_states: dict[str, dict]) -> tuple[dict, l
         return s, warnings
     b1, b2 = s["bases"]
     hold = s.get("follow_bases") is False or external(s)
-    s1, s2 = orientation(s["pair"], b1, b2)
+    orientation(s["pair"], b1, b2)  # validates
     st1, st2 = base_states.get(b1), base_states.get(b2)
     if st1 is None or st2 is None:
         missing = [b for b, st in ((b1, st1), (b2, st2)) if st is None]
@@ -210,7 +210,7 @@ def apply_derivation(state: dict, base_states: dict[str, dict]) -> tuple[dict, l
             continue
         if hold or (row["corr"] is None and row["atm"] is not None):
             if row["atm"] is not None:
-                rho = implied_corr(row["atm"], v1, v2, s1, s2)
+                rho = implied_corr(row["atm"], v1, v2)
                 if not -1 <= rho <= 1:
                     warnings.append(f"{t}: ATM {row['atm']:.3f} implies correlation "
                                     f"{rho:.3f}, outside [-1, 1]")
@@ -218,7 +218,7 @@ def apply_derivation(state: dict, base_states: dict[str, dict]) -> tuple[dict, l
                 row["corr"] = rho
         elif row["corr"] is not None:
             try:
-                row["atm"] = cross_vol(v1, v2, row["corr"], s1, s2)
+                row["atm"] = cross_vol(v1, v2, row["corr"])
             except ValueError as e:
                 warnings.append(f"{t}: {e}")
     return s, warnings

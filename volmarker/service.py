@@ -22,6 +22,7 @@ from .calendar import (DEFAULT_CUT, calibrate_to_quotes, cumulative_weights, dai
                        implied_daily_weights, interpolate_atm, is_good_day, normalise_weights,
                        rule_weight, split_by_ccy, tenor_dates, with_defaults)
 from .conventions import split_pair
+from .derived import CORR_CONV
 from .fenics import FenicsLogin
 from .fmd.book import daily_n
 from .market import compare, market_view, parse_fix_time
@@ -904,7 +905,7 @@ class Service:
         record = {k: state.get(k) for k in STATE_KEYS}
         record.update({
             "ts": now_iso(), "user": user or self.user, "comment": comment, "source": source,
-            "warnings": warnings + check_surface(state),
+            "warnings": warnings + check_surface(state), "corr_conv": CORR_CONV,
         })
         # marked_ts = last time a person touched it (staleness); propagation keeps it
         record["marked_ts"] = marked_ts or (record["ts"] if marked or prev is None else prev["marked_ts"])
