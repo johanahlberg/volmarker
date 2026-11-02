@@ -712,7 +712,7 @@ function renderMarket() {
 function setFromMarket(t, m, v, force = false) {
   const row = app.draft.tenors[t];
   if (v == null || ((app.draft.follow_market || app.draft.excel) && !force)) return;
-  if (m === "atm") { row.atm = v; if (movesWithBases()) row.corr = null; }
+  if (m === "atm") setDraftValue(t, "atm", v);      // as typed: recalibrates the correlation / spread to the parent
   else if (m === "rr10" || m === "bf10") {
     const w = m.slice(0, 2);
     row[m] = v;                                     // the 10D quote itself (input when unlocked or following FMD)
@@ -1041,6 +1041,29 @@ function renderWeights(reload) {
 // one row per date: desk default, pair override of a default, or the pair's own event
 // one row per date and currency (calendar.effective_events): an own event with a currency replaces
 // that currency's default on its date, one without (older events, calibrated weights) the whole day
+// events just added, kept at the top of their table until described and left (then sorted into place)
+const evPending = new WeakSet(), dfPending = new WeakSet();
+// re-render a table of inputs once focus has moved on (Tab, Enter, click), keeping the cursor in the same cell
+const cellKey = (el) => [el.dataset.i, el.dataset.date, el.dataset.ccy, el.dataset.k].join("|");
+function rerenderKeepFocus(table, render) {
+  setTimeout(() => {
+    const a = document.activeElement, key = table.contains(a) && a.dataset.k ? cellKey(a) : null;
+    render();
+    const el = key && [...table.querySelectorAll("[data-k]")].find((x) => cellKey(x) === key);
+    if (el) { el.focus(); el.select?.(); }
+  }, 0);
+}
+// a pinned row is let go when focus leaves it (described): it then jumps to its sorted place
+function releaseOnLeave(table, pinned, render) {
+  table.addEventListener("focusout", (e) => {
+    const i = e.target.dataset?.i; if (i == null || i === "") return;
+    setTimeout(() => {
+      const a = document.activeElement, r = pinned(+i);
+      if (!r || (table.contains(a) && a.dataset.i === i)) return;   // gone, or still in the row
+      if (r.release()) rerenderKeepFocus(table, render);
+    }, 0);
+  });
+}
 function eventRows() {
   const w = app.draft.weights, own = new Map(), defs = useDefaults() ? app.defEvents || [] : [];
   (w.events || []).forEach((e, i) => {
@@ -1057,18 +1080,18 @@ function eventRows() {
     const d = ds.length ? { weight: ds.reduce((s, x) => s + x.weight, 0), desc: ds.map((x) => x.desc).join(", "), parts: ds.flatMap((x) => x.parts || []), ccy: ds[0].ccy } : null;
     rows.push({ date, desc: es.map((e) => e.desc).filter(Boolean).join(", "), def: d ? d.weight : null, defDesc: d?.desc, parts: d?.parts,
       weight: es.reduce((s, e) => s + (Number(e.weight) || 0), 0), kind: d ? "override" : "pair", idx: es.map((e) => e.i),
-      ccy: ccy || d?.ccy || ccyOrder[0] });
+      ccy: ccy || d?.ccy || ccyOrder[0], pending: es.some((e) => evPending.has(w.events[e.i])) });
   }
-  return rows.sort((a, b) => a.date.localeCompare(b.date) || ccyOrder.indexOf(a.ccy) - ccyOrder.indexOf(b.ccy));
+  return rows.sort((a, b) => !!b.pending - !!a.pending || a.date.localeCompare(b.date) || ccyOrder.indexOf(a.ccy) - ccyOrder.indexOf(b.ccy));
 }
 function renderEvents() {
-  const today = isoToday(), all = eventRows(), rows = all.filter((r) => r.date >= today);
+  const today = isoToday(), all = eventRows(), rows = all.filter((r) => r.pending || r.date >= today);
   const past = all.filter((r) => r.date < today && r.kind !== "default").length;
   const wd = (d) => new Date(d + "T12:00:00").toLocaleDateString(undefined, { weekday: "short" });
   const ccys = [app.current.slice(0, 3), app.current.slice(3)];
   // the day's total over both currencies, in one cell spanning the expiry's rows
   const day = {};
-  for (const r of rows) (day[r.date] ||= []).push(r);
+  for (const r of rows) if (!r.pending) (day[r.date] ||= []).push(r);
   $("#events").innerHTML = `<thead><tr><th class="tn" title="Option expiry the event weighs on">Expiry</th><th class="tn">Day</th><th class="tn" title="Release time (${esc(app.me.calendar_tz || "")})">Release</th><th class="tn">Ccy</th><th class="tn">Description</th><th title="Desk default">Default</th><th>Weight</th><th title="All events on this expiry, both currencies: what the day weighs on top of its weekday weight">Day total</th><th></th></tr></thead><tbody>` +
     (rows.length ? rows.map((r, k) => {
       const i = r.idx ? r.idx[0] : "", extra = r.idx ? r.idx.slice(1).join(",") : "";
@@ -1079,19 +1102,20 @@ function renderEvents() {
       const shown = r.ccy && (r.desc || "").startsWith(r.ccy + " ") ? r.desc.slice(4) : r.desc;
       const desc = r.kind === "default" ? `<span class="muted" title="${esc(breakdown || "Desk default")}">${esc(shown)}</span>`
         : `<input class="ev" ${attrs} data-k="desc" value="${esc(r.desc)}" placeholder="${esc(r.defDesc || "")}">`;
-      const act = r.kind === "pair" ? `<button class="ghost ev-del" data-idx="${r.idx.join(",")}" title="Remove">✕</button>`
-        : r.kind === "override" ? `<button class="ghost ev-del" data-idx="${r.idx.join(",")}" title="Back to the desk default (${fmt(r.def, 2)})">↺</button>` : "";
+      const act = r.kind === "pair" ? `<button class="ghost ev-del" tabindex="-1" data-idx="${r.idx.join(",")}" title="Remove">✕</button>`
+        : r.kind === "override" ? `<button class="ghost ev-del" tabindex="-1" data-idx="${r.idx.join(",")}" title="Back to the desk default (${fmt(r.def, 2)})">↺</button>` : "";
       const rel = (r.parts || [])[0]?.release || "";
       const relTxt = rel.slice(0, 10) === r.date ? rel.slice(11) : rel ? `${wd(rel.slice(0, 10))} ${rel.slice(8, 10)}. ${rel.slice(11)}` : "";
       const relTitle = (r.parts || []).map((x) => `${x.desc}: ${x.release}`).join("\n");
       const ccy = r.kind === "pair" ? `<select class="ev" ${attrs} data-k="ccy">${ccys.map((c) => `<option${c === r.ccy ? " selected" : ""}>${c}</option>`).join("")}</select>` : esc(r.ccy || "");
-      return `<tr class="ev-${r.kind}"><td class="tn">${date}</td><td class="tn">${wd(r.date)}</td><td class="tn small${rel && rel.slice(0, 10) !== r.date ? " moved" : ""}" title="${esc(relTitle)}">${esc(relTxt)}</td><td class="tn">${ccy}</td><td class="tn">${desc}</td>
+      return `<tr class="ev-${r.kind}${r.pending ? " newrow" : ""}"${r.pending ? ' title="New: sorted into place once it has a description and you leave the row"' : ""}><td class="tn">${date}</td><td class="tn">${wd(r.date)}</td><td class="tn small${rel && rel.slice(0, 10) !== r.date ? " moved" : ""}" title="${esc(relTitle)}">${esc(relTxt)}</td><td class="tn">${ccy}</td><td class="tn">${desc}</td>
         <td class="muted"${breakdown ? ` title="${esc(breakdown)}"` : ""}>${r.def == null ? "" : fmt(r.def, 2) + (breakdown ? " Σ" : "")}</td>
         <td><input class="ev num${r.kind === "override" ? " ovr" : ""}" ${attrs} data-k="weight" value="${fmt(r.weight, 2)}" title="${r.kind === "default" ? "Desk default; type to override for this pair" : r.kind === "override" ? "Overrides the desk default for this pair" : "This pair's own event"}"></td>
         ${dayTotal(r, k)}<td>${act}</td></tr>`;
     }).join("") : `<tr><td colspan="9" class="muted tn">No upcoming events</td></tr>`) + "</tbody>";
   function dayTotal(r, k) {
-    if (k > 0 && rows[k - 1].date === r.date) return "";
+    if (r.pending) return `<td class="daytot"></td>`;
+    if (k > 0 && !rows[k - 1].pending && rows[k - 1].date === r.date) return "";
     const rs = day[r.date], tot = rs.reduce((s, x) => s + (Number(x.weight) || 0), 0);
     const title = rs.map((x) => `${x.ccy || ""} ${fmt(Number(x.weight) || 0, 2)}`).join(" + ") + ` = ${fmt(tot, 2)}`;
     return `<td class="daytot${rs.length > 1 ? " multi" : ""}" rowspan="${rs.length}" title="${esc(title)}">${fmt(tot, 2)}</td>`;
@@ -1258,19 +1282,21 @@ function renderDefaults() {
   const all = app.prefs?.df_all === true || !app.current, ccys = all ? [] : [app.current.slice(0, 3), app.current.slice(3)];
   $("#df-all").checked = all;
   const mine = (r) => all || !r.ccy || r.ccy === "*" || ccys.includes(r.ccy.toUpperCase());
-  const rows = (app.dfRows || []).map((r, i) => ({ ...r, i }))
-    .filter((r) => mine(r) && (!q || `${r.ccy} ${r.event} ${r.ticker || ""}`.toLowerCase().includes(q)))
-    .sort((a, b) => (a.ccy || "").localeCompare(b.ccy || "") || (b.weight - a.weight) || a.i - b.i);
-  $("#df-table").innerHTML = `<thead><tr><th class="tn">Ccy</th><th class="tn">Event</th><th class="tn">Ticker</th><th>Weight</th><th title="Upcoming calendar events this one matches">Upcoming</th><th class="tn">Next release</th><th></th></tr></thead><tbody>` +
-    (rows.length ? rows.map((r) => `<tr><td class="tn"><input class="df" data-i="${r.i}" data-k="ccy" value="${esc(r.ccy)}" maxlength="3" size="4" placeholder="any"></td>
+  // new rows on top whatever the filter; the rest by weight, biggest first
+  const rows = (app.dfRows || []).map((r, i) => ({ ...r, i, pending: dfPending.has(r) }))
+    .filter((r) => r.pending || (mine(r) && (!q || `${r.ccy} ${r.event} ${r.ticker || ""}`.toLowerCase().includes(q))))
+    .sort((a, b) => b.pending - a.pending || (b.weight - a.weight) || (a.ccy || "").localeCompare(b.ccy || "") ||
+      (a.event || "").localeCompare(b.event || "") || a.i - b.i);
+  $("#df-table").innerHTML = `<thead><tr><th class="tn">Ccy</th><th class="tn">Event</th><th class="tn">Ticker</th><th title="Sorted by weight, biggest first">Weight ▾</th><th title="Upcoming calendar events this one matches">Upcoming</th><th class="tn">Next release</th><th></th></tr></thead><tbody>` +
+    (rows.length ? rows.map((r) => `<tr${r.pending ? ' class="newrow" title="New: sorted into place once it has an event name and you leave the row"' : ""}><td class="tn"><input class="df" data-i="${r.i}" data-k="ccy" value="${esc(r.ccy)}" maxlength="3" size="4" placeholder="any"></td>
       <td class="tn"><input class="df" data-i="${r.i}" data-k="event" value="${esc(r.event)}" placeholder="e.g. FOMC Rate Decision (Upper Bound)" size="34"></td>
       <td class="tn"><input class="df" data-i="${r.i}" data-k="ticker" value="${esc(r.ticker || "")}" placeholder="optional" size="14"></td>
       <td><input class="df num" data-i="${r.i}" data-k="weight" value="${fmt(r.weight, 2)}"></td>
       <td${r.matches === 0 ? ' class="warn" title="Not in the calendar: check the name, or import the Bloomberg file"' : ""}>${r.matches ?? ""}</td><td class="tn muted small">${esc(r.next || "")}</td>
-      <td><button class="ghost df-del" data-i="${r.i}" title="Remove">✕</button></td></tr>`).join("")
+      <td><button class="ghost df-del" tabindex="-1" data-i="${r.i}" title="Remove">✕</button></td></tr>`).join("")
       : `<tr><td colspan="7" class="muted tn">${q ? "No match" : all ? "No relevant events yet" : `No relevant events for ${ccys.join(" or ")} yet`}</td></tr>`) + "</tbody>";
   $("#df-save").disabled = $("#df-revert").disabled = !app.dfDirty;
-  const hidden = (app.dfRows || []).filter((r) => !mine(r)).length;
+  const hidden = (app.dfRows || []).filter((r) => !mine(r) && !dfPending.has(r)).length;
   $("#df-meta").textContent = (app.dfDirty ? "Unsaved changes" : d.ts ? `Saved by ${d.user} at ${localTime(d.ts)}` : "") +
     (hidden ? ` · ${ccys.join(" and ")} only (${hidden} other events hidden)` : "");
   const imp = d.imports || {};
@@ -1396,7 +1422,7 @@ function wireWeights() {
       if (k === "weight" && el.dataset.extra)     // several events on one date: keep one carrying the total
         el.dataset.extra.split(",").map(Number).sort((a, b) => b - a).forEach((j) => evs.splice(j, 1));
     }
-    changed(); renderEvents();
+    changed(); rerenderKeepFocus($("#events"), renderEvents);
   });
   $("#events").addEventListener("click", (e) => {
     if (!e.target.matches(".ev-del")) return;
@@ -1412,9 +1438,15 @@ function wireWeights() {
   $("#ev-add").onclick = () => {
     const used = new Set(eventRows().map((r) => r.date)), d = new Date();
     let iso; do { d.setDate(d.getDate() + 1); iso = d.toISOString().slice(0, 10); } while (used.has(iso));
-    (app.draft.weights.events ||= []).push({ date: iso, desc: "", weight: 0.5, ccy: app.current.slice(0, 3) });
+    const ev = { date: iso, desc: "", weight: 0.5, ccy: app.current.slice(0, 3) };
+    (app.draft.weights.events ||= []).push(ev); evPending.add(ev);
     changed(); renderEvents();
+    $("#events tbody tr.newrow input[data-k=date]")?.select();     // ready to type over
   };
+  releaseOnLeave($("#events"), (i) => {
+    const ev = app.draft.weights.events?.[i];
+    return ev && evPending.has(ev) && { release: () => !!(ev.desc || "").trim() && evPending.delete(ev) };
+  }, renderEvents);
   // test dates
   $("#td-add").onclick = () => { const v = $("#td-date").value; if (v && v > isoToday()) setTestDates([...testDates(), v]); };
   $("#td-date").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#td-add").click(); });
@@ -1425,6 +1457,12 @@ function wireWeights() {
   $("#td-calib").onclick = calibrateTestQuotes;
   $("#td-floor").addEventListener("change", (e) => { app.prefs.td_no_negative = e.target.checked; savePrefs(); });
   $("#td-table").addEventListener("input", (e) => { if (e.target.matches("input.tq")) onTestQuote(e.target); });
+  // bid, Tab, offer, Enter: on to the next date's bid
+  $("#td-table").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || !e.target.matches("input.tq")) return;
+    e.preventDefault();
+    e.target.closest("tr").nextElementSibling?.querySelector("input.tq[data-k=bid]")?.select();
+  });
   $("#td-table").addEventListener("click", (e) => {
     if (e.target.matches(".td-del")) setTestDates(testDates().filter((d) => d !== e.target.dataset.date));
   });
@@ -1435,13 +1473,24 @@ function wireWeights() {
     const r = app.dfRows[+el.dataset.i], k = el.dataset.k;
     r[k] = k === "weight" ? Number(el.value) || 0 : k === "ccy" ? el.value.trim().toUpperCase() : el.value.trim();
     delete r.matches; delete r.next;
-    app.dfDirty = true; renderDefaults();
+    app.dfDirty = true; rerenderKeepFocus($("#df-table"), renderDefaults);
   });
   $("#df-table").addEventListener("click", (e) => {
     if (!e.target.matches(".df-del")) return;
     app.dfRows.splice(+e.target.dataset.i, 1); app.dfDirty = true; renderDefaults();
   });
-  $("#df-add").onclick = () => { (app.dfRows ||= []).push({ ccy: app.current?.slice(0, 3) || "", event: "", ticker: "", weight: 0.5 }); app.dfDirty = true; $("#df-filter").value = ""; renderDefaults(); };
+  $("#df-add").onclick = () => {
+    // the filter stays; a currency typed there (one shown) is the new event's currency
+    const f = $("#df-filter").value.trim().toUpperCase(), all = app.prefs?.df_all === true || !app.current;
+    const shown = all ? new Set(app.pairs.flatMap((p) => [p.pair.slice(0, 3), p.pair.slice(3)])) : new Set([app.current.slice(0, 3), app.current.slice(3)]);
+    const r = { ccy: shown.has(f) ? f : app.current?.slice(0, 3) || "", event: "", ticker: "", weight: 0.5 };
+    (app.dfRows ||= []).push(r); dfPending.add(r); app.dfDirty = true; renderDefaults();
+    $("#df-table tbody tr.newrow input[data-k=event]")?.select();
+  };
+  releaseOnLeave($("#df-table"), (i) => {
+    const r = app.dfRows?.[i];
+    return r && dfPending.has(r) && { release: () => !!(r.event || "").trim() && dfPending.delete(r) };
+  }, renderDefaults);
   $("#df-filter").addEventListener("input", renderDefaults);
   $("#df-all").addEventListener("change", (e) => { app.prefs.df_all = e.target.checked; savePrefs(); renderDefaults(); });
   // Bloomberg import
@@ -2027,6 +2076,7 @@ function wire() {
       if ((f === "rr10" && app.draft.lock_rr10f) || (f === "bf10" && app.draft.lock_bf10f)) continue;
       row[f] = Math.round((row[f] + rrSign(f) * amt) * 1e6) / 1e6;      // amounts in the RR convention shown
       if (f === "atm" && movesWithBases()) row.corr = null;
+      if (f === "atm" && app.draft.follow_parent) row.psprd = null;
     }
     changed(); renderGrid();
   };
