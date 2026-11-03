@@ -152,6 +152,19 @@ class TestExpiryDates(unittest.TestCase):
             "ON": "2026-10-22", "1W": "2026-10-28", "2W": "2026-11-04", "1M": "2026-11-19", "2M": "2026-12-21",
             "3M": "2027-01-21", "6M": "2027-04-21", "9M": "2027-07-21", "1Y": "2027-10-21", "2Y": "2028-10-19"})
 
+    def test_metals_settle_on_their_loco(self):   # gold/silver loco London (GBP), PGMs loco Zurich (CHF)
+        from volmarker.calendar import spot_date
+        mon = date(2026, 11, 9)
+        gbp, chf = {"GBP": {date(2026, 11, 10)}}, {"CHF": {date(2026, 11, 10)}}
+        for pair in ("XAUUSD", "XAGUSD"):
+            self.assertEqual(spot_date(pair, mon, gbp), date(2026, 11, 12))
+            self.assertEqual(spot_date(pair, mon, chf), date(2026, 11, 11))
+        for pair in ("XPTUSD", "XPDUSD"):
+            self.assertEqual(spot_date(pair, mon, chf), date(2026, 11, 12))
+            self.assertEqual(spot_date(pair, mon, gbp), date(2026, 11, 11))
+        # a GBP holiday on the gold value date moves it too
+        self.assertEqual(spot_date("XAUUSD", mon, {"GBP": {date(2026, 11, 11)}}), date(2026, 11, 12))
+
     def test_spot(self):
         from volmarker.calendar import spot_date
         mon = date(2026, 11, 9)

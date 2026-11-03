@@ -97,9 +97,18 @@ def is_good_day(d: date, ccys: tuple[str, str], holidays: dict[str, set]) -> boo
 #            on good value days, and end of month: spot on the month's last good
 #            value day gives the last good value day of the target month. The
 #            expiry is the delivery stepped back by the spot days (it may be a holiday).
+#   metals   settle on the calendar of their loco: gold and silver loco London (GBP),
+#            platinum and palladium loco Zurich (CHF). XAUUSD therefore counts
+#            spot days on the GBP calendar and settles on a day good for GBP and USD.
 
 SPOT_T1 = {"USDCAD", "USDTRY", "USDRUB"}
 VALUE_DATE_ONLY = {"USD", "ILS"}         # their holidays only move a value date that falls on them
+SETTLE_CCY = {"XAU": "GBP", "XAG": "GBP", "XPT": "CHF", "XPD": "CHF"}
+
+
+def _settle(ccys) -> set[str]:
+    """The calendars a pair settles on: metals on their loco's."""
+    return {SETTLE_CCY.get(c, c) for c in ccys}
 
 
 def spot_days(pair: str) -> int:
@@ -109,11 +118,11 @@ def spot_days(pair: str) -> int:
 
 def _is_spot_day(d: date, ccys: tuple[str, str], holidays: dict[str, set]) -> bool:
     return d.weekday() not in WEEKEND and not any(
-        d in holidays.get(c, ()) for c in ccys if c not in VALUE_DATE_ONLY)
+        d in holidays.get(c, ()) for c in _settle(ccys) if c not in VALUE_DATE_ONLY)
 
 
 def is_value_day(d: date, ccys: tuple[str, str], holidays: dict[str, set]) -> bool:
-    return d.weekday() not in WEEKEND and not any(d in holidays.get(c, ()) for c in {*ccys, "USD"})
+    return d.weekday() not in WEEKEND and not any(d in holidays.get(c, ()) for c in _settle(ccys) | {"USD"})
 
 
 def _step(d: date, n: int, ccys: tuple[str, str], holidays: dict[str, set]) -> date:
