@@ -15,6 +15,9 @@
       1d,<ATM spread x 0.5 x dc_factor>
   History      <history_dir>/<CCY1><CCY2>_yyyymmdd_hhmmss.csv  a copy of the Fenics file
 
+Front Arena knows some currencies under another code (config frontarena_ccy,
+e.g. CNH as CNY): its file name and lines use that code, Fenics keeps the pair's.
+
 Numbers are written like VBA does (up to 15 significant digits, '.' decimal
 point); lines end in CRLF. Files are written under a temporary name and then
 renamed, so Fenics and Front Arena never read a half-written file.
@@ -32,6 +35,11 @@ FA_TENORS = dict(zip(TENORS, ["1d", "1wk", "2wk", "1mo", "2mo", "3mo", "6mo", "9
 FEN_TENORS = dict(zip(TENORS, ["1d", "1w", "2w", "1m", "2m", "3m", "6m", "9m", "1y", "2y", "3y", "4y", "5y"]))
 
 
+def fa_pair(pair: str, fa_ccy: dict | None = None) -> tuple[str, str]:
+    """The pair's two currencies as Front Arena knows them (USDCNH -> USD, CNY)."""
+    return tuple((fa_ccy or {}).get(c, c) for c in split_pair(pair))
+
+
 def _n(x: float | None) -> str:
     """A number as VBA's implicit conversion writes it (15 significant digits)."""
     if x is None:
@@ -44,8 +52,9 @@ def _lines(lines: list[str]) -> str:
     return "".join(l + "\r\n" for l in lines)
 
 
-def frontarena_lines(pair: str, resolved: dict, spreads: dict[str, float]) -> list[str]:
-    c1, c2 = split_pair(pair)
+def frontarena_lines(pair: str, resolved: dict, spreads: dict[str, float],
+                     fa_ccy: dict | None = None) -> list[str]:
+    c1, c2 = fa_pair(pair, fa_ccy)
     out = []
     for t in TENORS:
         atm = resolved[t]["mid"]["atm"]
@@ -77,14 +86,15 @@ def dc_spread_lines(spreads: dict[str, float], dc_factor: float) -> list[str]:
 
 
 def write_exports(rec: dict, resolved: dict, dirs: dict[str, Path], history: bool = True,
-                  now: datetime | None = None) -> None:
-    """dirs: fenics, frontarena, dc_spread, history."""
+                  now: datetime | None = None, fa_ccy: dict | None = None) -> None:
+    """dirs: fenics, frontarena, dc_spread, history. fa_ccy: Front Arena's own currency codes."""
     pair = rec["pair"]
     c1, c2 = split_pair(pair)
+    f1, f2 = fa_pair(pair, fa_ccy)
     spreads = {t: rec["tenors"][t]["spread"] for t in TENORS}
     fen = _lines(fenics_lines(pair, resolved, bool(rec.get("inverse"))))
     # no flush to disk: the rename keeps readers safe, and the next publish rewrites them anyway
-    atomic_write(Path(dirs["frontarena"]) / f"{c1}{c2}volsurface.txt", _lines(frontarena_lines(pair, resolved, spreads)), fsync=False)
+    atomic_write(Path(dirs["frontarena"]) / f"{f1}{f2}volsurface.txt", _lines(frontarena_lines(pair, resolved, spreads, fa_ccy)), fsync=False)
     atomic_write(Path(dirs["fenics"]) / f"{c1}{c2}volsurface.txt", fen, fsync=False)
     dc = rec.get("dc_factor") or 0
     if dc >= 0.01:
@@ -94,12 +104,12 @@ def write_exports(rec: dict, resolved: dict, dirs: dict[str, Path], history: boo
         atomic_write(Path(dirs["history"]) / f"{c1}{c2}_{stamp}.csv", fen, fsync=False)
 
 
-def read_frontarena(text: str, pair: str, partial: bool = False) -> dict[str, dict]:
+def read_frontarena(text: str, pair: str, partial: bool = False, fa_ccy: dict | None = None) -> dict[str, dict]:
     """Parse a Front Arena volsurface file (as the Excel macro writes it) back
     into marks per tenor: atm (mid), spread (ask - bid), rr25, rr10, bf25, bf10.
     Raises ValueError if the file is incomplete, e.g. while Excel is writing it;
     partial=True returns whatever marks the file has instead."""
-    c1, c2 = split_pair(pair)
+    c1, c2 = fa_pair(pair, fa_ccy)
     tenor = {v: k for k, v in FA_TENORS.items()}
     num = lambda x: None if x.strip() == "" else float(x)
     out: dict[str, dict] = {t: {} for t in TENORS}

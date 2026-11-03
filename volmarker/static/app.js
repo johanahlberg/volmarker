@@ -727,7 +727,7 @@ function renderFollow() {
     let html = !pub.excel ? "<b>Marked in Excel</b> is switched on in the draft. Publish to hand the marks to Excel: from then on VolMarker reads the pair's export file and stops writing it."
       : !d.excel ? "<b>Marked in Excel</b> switched off in the draft. Publish to mark the pair here again; VolMarker then writes its export files."
       : `<b>Marked in Excel</b> · ` + (r.excel_file ? `last export read ${localTime(new Date(r.excel_mtime * 1000).toISOString())}`
-        : `waiting for Excel's next export of ${app.current.slice(0, 3)}${app.current.slice(3)}volsurface.txt`) +
+        : `waiting for Excel's next export of ${[app.current.slice(0, 3), app.current.slice(3)].map((c) => app.me.fa_ccy?.[c] || c).join("")}volsurface.txt`) +
         (r.excel_file ? ` <span class="muted">(${esc(r.excel_file.split(/[\\/]/).pop())})</span>` : "") +
         ` · VolMarker doesn't write this pair's files.` + (sum.excel_error ? ` <span class="warn">Last file not readable: ${esc(sum.excel_error)}</span>` : "");
     bar.className = "followbar" + (sum.excel_error ? " down" : ""); bar.innerHTML = html; bar.hidden = false;

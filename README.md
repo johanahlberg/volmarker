@@ -152,6 +152,8 @@ Every publish writes the vol files in the layout of the Excel marking workbook (
 | `<CCY1><CCY2>spreads.txt` | `dc_spread_dir` | `…\DC_SPRD\` | `1m,<ATM spread × 0.5 × DC factor>`, only for pairs with a **DC spread factor** of at least 0.01 (Setup). |
 | `<CCY1><CCY2>_yyyymmdd_hhmmss.csv` | `history_dir` | `…\History\` | A copy of the Fenics file for every manual publish, as the macro made. Not for automatic versions (FMD feed, derived and parent follow-ups); the pair's history keeps every version anyway. |
 
+Front Arena knows some currencies under another code: `frontarena_ccy` in `config.json` (default `{"CNH": "CNY"}`) renames them in everything that goes to Front Arena, i.e. the vol file's name and lines (USDCNH → `USDCNYvolsurface.txt`, `vol,USD,CNY,…`) and the FA_FX/FA_WS event files, and is used when reading those files back (pairs marked in Excel, Last export). Fenics keeps CNH.
+
 Numbers are written like VBA (up to 15 significant digits), and lines end in CRLF. Files are written under a temporary name and then renamed, so the readers never see a half-written file.
 
 ## Event calendar and event weights

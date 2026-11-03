@@ -110,10 +110,11 @@ def fenics_xml(pair: str, weights: dict, holidays: dict[str, set], today: date,
 
 
 def frontarena_lines(pair: str, weights: dict, holidays: dict[str, set], today: date,
-                     date_format: str) -> tuple[list[str], list[str]]:
-    """(FA_FX lines, FA_WS lines)"""
+                     date_format: str, fa_ccy: dict | None = None) -> tuple[list[str], list[str]]:
+    """(FA_FX lines, FA_WS lines); currencies in Front Arena's codes (fa_ccy, e.g. CNH -> CNY)"""
     c1, c2 = split_pair(pair)
-    evs = _events(pair, weights, today)
+    fa = lambda c: (fa_ccy or {}).get(c, c)
+    evs = [dict(e, ccy=fa(e["ccy"])) for e in _events(pair, weights, today)]
     fx = [f'{e["ccy"]},{e["date"].strftime(date_format)},{e["name"]},{e["weight"]:g}' for e in evs]
     ws: dict[date, dict] = {}
     for e in evs:

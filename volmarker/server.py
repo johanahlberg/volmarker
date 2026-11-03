@@ -70,7 +70,7 @@ def make_handler(svc: Service):
                 cfg = svc.store.config()
                 return self._json({"user": svc.user, "data": str(svc.store.root), "tenors": TENORS,
                                    "cuts": cfg.get("cuts") or {}, "calendar_tz": cfg.get("calendar_tz"),
-                                   "config_error": svc.store.config_error,
+                                   "config_error": svc.store.config_error, "fa_ccy": svc._fa_ccy(),
                                    "exports": {k: str(svc.store.path_from_config(f"{k}_dir"))
                                                for k in ("frontarena", "fenics", "dc_spread", "history")}})
             if p == "/api/pairs":

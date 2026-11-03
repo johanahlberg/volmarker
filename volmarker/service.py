@@ -299,7 +299,7 @@ class Service:
         """What would be sent for the published version, and whether it differs from the last send."""
         rec, w, holidays, today = self._weights_target(pair)
         cfg = self.store.config()["weights_export"]
-        fx, ws = weights_export.frontarena_lines(pair, w, holidays, today, cfg["date_format"])
+        fx, ws = weights_export.frontarena_lines(pair, w, holidays, today, cfg["date_format"], self._fa_ccy())
         items = weights_export.fenics_items(pair, w, holidays, today)
         last = self._weights_sent().get(pair)
         fp = weights_export.fingerprint(pair, w, holidays, today)
@@ -317,8 +317,8 @@ class Service:
             username, password = self.fenics.credentials()
         rec, w, holidays, today = self._weights_target(pair)
         cfg = self.store.config()["weights_export"]
-        fx, ws = weights_export.frontarena_lines(pair, w, holidays, today, cfg["date_format"])
-        c1, c2 = split_pair(pair)
+        fx, ws = weights_export.frontarena_lines(pair, w, holidays, today, cfg["date_format"], self._fa_ccy())
+        c1, c2 = exports.fa_pair(pair, self._fa_ccy())
         for key, lines in (("fa_fx_dir", fx), ("fa_ws_dir", ws)):
             atomic_write(self._export_dir(cfg[key]) / f"{c1}{c2}_events.txt", "".join(l + "\r\n" for l in lines))
         fp = weights_export.fingerprint(pair, w, holidays, today)
@@ -653,7 +653,7 @@ class Service:
     def _read_export_file(self, pair: str) -> tuple[Path, float, dict] | None:
         """The pair's newest readable Front Arena file (export folder, or Excel's
         folder if one is set): (path, mtime, marks per tenor, possibly partial)."""
-        c1, c2 = split_pair(pair)
+        c1, c2 = exports.fa_pair(pair, self._fa_ccy())
         cfg = self.store.config()
         dirs = [self.store.path_from_config("frontarena_dir")]
         if cfg.get("excel_dir"):
@@ -664,7 +664,7 @@ class Service:
             try:
                 mt = path.stat().st_mtime
                 marks = exports.read_frontarena(path.read_text(encoding="utf-8", errors="replace"),
-                                                pair, partial=True)
+                                                pair, partial=True, fa_ccy=self._fa_ccy())
             except (OSError, ValueError):
                 continue
             if any(marks.values()) and (best is None or mt > best[1]):
@@ -707,7 +707,7 @@ class Service:
             raise ValueError(f"{pair} follows FMD: switch off Follow FMD in Setup to load a file")
         found = self._read_export_file(pair)
         if not found:
-            c1, c2 = split_pair(pair)
+            c1, c2 = exports.fa_pair(pair, self._fa_ccy())
             raise ValueError(f"No readable {c1}{c2}volsurface.txt in the Front Arena folder")
         path, mt, marks = found
         self._apply_marks(state, marks)
@@ -915,7 +915,7 @@ class Service:
                     record[k] = prev[k]
             if not prev.get("excel"):
                 # switched to Excel: a file VolMarker wrote itself is the baseline, not an Excel export
-                c1, c2 = split_pair(state["pair"])
+                c1, c2 = exports.fa_pair(state["pair"], self._fa_ccy())
                 try:
                     mt = (self._excel_dir() / f"{c1}{c2}volsurface.txt").stat().st_mtime
                     if mt <= datetime.fromisoformat(prev["ts"]).timestamp() + 30:
@@ -948,7 +948,12 @@ class Service:
             return
         dirs = {k: self.store.path_from_config(f"{k}_dir") for k in ("fenics", "frontarena", "dc_spread", "history")}
         # a history copy for manual publishes, as the Excel macro made; the pair's history.jsonl keeps every version
-        exports.write_exports(rec, resolve(rec), dirs, history=rec.get("source") == "manual")
+        exports.write_exports(rec, resolve(rec), dirs, history=rec.get("source") == "manual", fa_ccy=self._fa_ccy())
+
+    def _fa_ccy(self) -> dict:
+        """Currencies Front Arena knows under another code (config frontarena_ccy, e.g. CNH -> CNY)."""
+        m = self.store.config().get("frontarena_ccy")
+        return {str(k).upper(): str(v).upper() for k, v in m.items()} if isinstance(m, dict) else {}
 
     # ---- pairs marked in Excel ------------------------------------------
     def _excel_dir(self) -> Path:
@@ -965,7 +970,7 @@ class Service:
         with self._lock:
             recs = list(self.cache.values())
         for rec in recs:
-            c1, c2 = split_pair(rec["pair"])
+            c1, c2 = exports.fa_pair(rec["pair"], self._fa_ccy())
             path = d / f"{c1}{c2}volsurface.txt"
             try:
                 mt = path.stat().st_mtime
@@ -982,7 +987,8 @@ class Service:
 
     def _import_excel(self, pair: str, path: Path, mtime: float) -> dict | None:
         try:
-            marks = exports.read_frontarena(path.read_text(encoding="utf-8", errors="replace"), pair)
+            marks = exports.read_frontarena(path.read_text(encoding="utf-8", errors="replace"), pair,
+                                            fa_ccy=self._fa_ccy())
         except (OSError, ValueError) as e:
             if self.excel_errors.get(pair) != str(e):
                 log.warning("Excel file %s: %s", path, e)

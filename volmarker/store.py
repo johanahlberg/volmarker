@@ -57,6 +57,7 @@ DEFAULT_CONFIG = {
     "dc_spread_dir": "exports/dc_spread",      # the macro's DC_SPRD folder
     "history_dir": "exports/history",          # the macro's History folder
     "excel_dir": "",                           # where Excel writes the files of pairs marked in Excel (empty: frontarena_dir)
+    "frontarena_ccy": {"CNH": "CNY"},          # currencies Front Arena knows under another code (its files only, not Fenics)
     "stale_minutes_key": 120,
     "stale_minutes_other": 1440,
     # Fenics Market Data FIX feed (password: FMD_PASSWORD env var or a local password_file)

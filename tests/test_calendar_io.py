@@ -195,6 +195,34 @@ class TestVolExports(unittest.TestCase):
             write_exports(s, resolve(s), {**dirs, "dc_spread": Path(tmp) / "dc2"}, history=False)
             self.assertFalse((Path(tmp) / "dc2").exists())
 
+    def test_cnh_as_cny_for_front_arena(self):
+        from pathlib import Path
+        from volmarker.exports import read_frontarena, write_exports
+        from volmarker.surface import new_state, clean_state, resolve
+        s = new_state("USDCNH")
+        for t in s["tenors"]:
+            s["tenors"][t].update(atm=4.5, spread=0.6, rr25=0.4, rr10f=1.9, bf25=0.15, bf10f=3.3)
+        s = clean_state(s)
+        with tempfile.TemporaryDirectory() as tmp:
+            dirs = {k: Path(tmp) / k for k in ("fenics", "frontarena", "dc_spread", "history")}
+            write_exports(s, resolve(s), dirs, history=False, fa_ccy={"CNH": "CNY"})
+            self.assertEqual([f.name for f in dirs["frontarena"].iterdir()], ["USDCNYvolsurface.txt"])
+            fa = (dirs["frontarena"] / "USDCNYvolsurface.txt").read_text()
+            self.assertTrue(fa.startswith("vol,USD,CNY,1d,4.2,4.8"))
+            self.assertNotIn("CNH", fa)
+            fen = (dirs["fenics"] / "USDCNHvolsurface.txt").read_text()                # Fenics keeps CNH
+            self.assertTrue(fen.startswith("vol,atm,USD,CNH,1d,"))
+            back = read_frontarena(fa, "USDCNH", fa_ccy={"CNH": "CNY"})
+            self.assertEqual(back["1M"]["atm"], 4.5)
+            self.assertEqual(read_frontarena(fa, "USDCNH", partial=True)["1M"], {})       # without the mapping: not this pair
+
+    def test_cnh_events_as_cny_for_front_arena(self):
+        w = normalise_weights({"events": [{"date": "2026-10-29", "ccy": "CNH", "desc": "PBoC LPR", "weight": 0.5}]})
+        fx, ws = wx.frontarena_lines("EURCNH", w, {}, date(2026, 10, 21), "%Y-%m-%d", {"CNH": "CNY"})
+        self.assertEqual(fx, ["CNY,2026-10-29,PBoC LPR,0.5"])
+        self.assertEqual(ws, ["CNY,2026-10-28,CNY PBoC LPR,1.5"])
+        self.assertEqual(wx.fenics_items("EURCNH", w, {}, date(2026, 10, 21))[0]["ccy"], "CNH")    # Fenics keeps CNH
+
 
 class TestExcelPairs(unittest.TestCase):
     def setUp(self):
