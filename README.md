@@ -127,6 +127,7 @@ data/
   config.json                 export folders and staleness limits
   journal.jsonl               change feed that all running apps read
   pairs/<PAIR>/history.jsonl  every version of the pair, append-only (audit trail)
+  pairs/<PAIR>/archive/YYYY-MM.jsonl.gz  older versions by month (see Archive)
   calendar/holidays.csv       ccy,date
   calendar/events.csv         ccy,date,description
   exports/fenics/<CCY1><CCY2>volsurface.txt      quoted surface (ATM bid/offer, RR/BF mids)
@@ -143,6 +144,8 @@ data/
   exports/weights/            Fenics message copy, FA_FX and FA_WS event files; weights_sent.jsonl
   locks/                      short-lived lock files
 ```
+
+**Archive.** Every publish adds a full copy of the surface (4–6 KB) to the pair's `history.jsonl`. Once a day the leader app moves whole months older than `archive_keep_days` (default 90; 0 switches it off) into `pairs/<PAIR>/archive/YYYY-MM.jsonl.gz`, compressed to about a tenth. Nothing is deleted: the History tab, the Changes tab's EOD and conflict checks read the archive where the recent file ends, and `history.jsonl` always keeps the latest version. The month file is written and read back before `history.jsonl` is shortened, so an interrupted run leaves a version in both places (read once, merged on the next run), never in neither. To look at an old month by hand: `gzip -dc 2026-07.jsonl.gz` or 7-Zip. `journal.jsonl` and the CSV copies in `exports/history` are not archived: every running app reads the journal by position, and the CSVs keep the macro's folder layout.
 
 Every publish writes the vol files in the layout of the Excel marking workbook (VOL_PUBLISHER). Point the folders in `config.json` at what the macro used:
 

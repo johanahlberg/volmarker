@@ -5,7 +5,7 @@ import math
 import os
 import tempfile
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from volmarker.calendar import calibrate_to_quotes, cumulative_weights, interpolate_atm, tenor_dates
@@ -457,6 +457,75 @@ if __name__ == "__main__":
         self.assertEqual(at("2026-10-27T00:00:00+00:00")["version"], 3)
         self.assertIsNone(at("2026-10-01T00:00:00+00:00"))
         self.assertIsNone(self.store.as_of("USDJPY", datetime.fromisoformat("2026-10-27T00:00:00+00:00")))
+
+
+class TestArchive(unittest.TestCase):
+    """Old months move from history.jsonl to pairs/<PAIR>/archive/YYYY-MM.jsonl.gz; nothing is lost."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(self.tmp.name)
+        self.svc = Service(self.store, "anna")
+        self.svc.create_pair("EURUSD", "marked", None, True)
+        path = self.store._history("EURUSD")
+        recs = [json.loads(l) for l in path.read_text().splitlines()]
+        base = recs[0]
+        # 40 versions, one every 5 days from 1 Mar 2026: March to September
+        lines = []
+        for i in range(40):
+            r = dict(base, version=i + 1, ts=(datetime(2026, 3, 1, 12, tzinfo=timezone.utc) + timedelta(days=5 * i)).isoformat())
+            lines.append(json.dumps(r))
+        path.write_text("".join(l + "\n" for l in lines))
+        self.path = path
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def versions(self):
+        return [json.loads(l)["version"] for l in self.path.read_text().splitlines()]
+
+    def test_moves_whole_months_and_reads_back(self):
+        before = self.store.history("EURUSD", 100)
+        eod = {d: self.store.as_of("EURUSD", datetime.fromisoformat(d))["version"]
+               for d in ("2026-03-07T00:00:00+00:00", "2026-05-01T00:00:00+00:00", "2026-08-20T00:00:00+00:00")}
+        moved = self.svc.archive_history(today=date(2026, 9, 15))     # 90 days back: 17 Jun, so before 1 Jun
+        self.assertEqual(moved, 19)                                    # March, April, May
+        self.assertEqual(self.versions()[0], 20)                       # 31 May 12:00 + 5 days = 5 Jun
+        months = [m for m, _ in self.store._archive_months("EURUSD")]
+        self.assertEqual(months, ["2026-03", "2026-04", "2026-05"])
+        self.assertEqual(self.store.history("EURUSD", 100), before)    # newest first, archive included
+        self.assertEqual([r["version"] for r in self.store.history("EURUSD", 25)], list(range(40, 15, -1)))
+        for d, v in eod.items():
+            self.assertEqual(self.store.as_of("EURUSD", datetime.fromisoformat(d))["version"], v)
+        self.assertIsNone(self.store.as_of("EURUSD", datetime.fromisoformat("2026-02-01T00:00:00+00:00")))
+        self.assertEqual(self.svc.archive_history(today=date(2026, 9, 15)), 0)    # nothing more to do
+        self.assertEqual(self.store.latest("EURUSD")["version"], 40)
+
+    def test_keeps_the_latest_version(self):                          # a pair not published for months
+        self.assertEqual(self.svc.archive_history(today=date(2027, 6, 1)), 39)
+        self.assertEqual(self.versions(), [40])
+        self.assertEqual(self.store.latest("EURUSD")["version"], 40)
+        self.assertEqual(len(self.store.history("EURUSD", 100)), 40)
+
+    def test_crash_between_archive_and_history_leaves_duplicates_not_gaps(self):
+        cutoff = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        orig = self.path.read_text()
+        self.store.archive_pair("EURUSD", cutoff)
+        self.path.write_text(orig)                                     # as if history.jsonl was never shortened
+        self.assertEqual([r["version"] for r in self.store.history("EURUSD", 100)], list(range(40, 0, -1)))
+        self.assertEqual(self.store.archive_pair("EURUSD", cutoff), 19)    # the rerun merges, no doubles
+        self.assertEqual([r["version"] for r in self.store.history("EURUSD", 100)], list(range(40, 0, -1)))
+
+    def test_off_with_zero_days(self):
+        cfg = json.loads((Path(self.tmp.name) / "config.json").read_text())
+        cfg["archive_keep_days"] = 0
+        (Path(self.tmp.name) / "config.json").write_text(json.dumps(cfg))
+        self.assertEqual(self.svc.archive_history(today=date(2027, 6, 1)), 0)
+        self.assertEqual(len(self.versions()), 40)
+
+    def test_publish_after_archiving(self):
+        self.svc.archive_history(today=date(2026, 9, 15))
+        st = flat_state("EURUSD", 7.5)
+        self.assertEqual(self.svc.publish("EURUSD", st, expected_version=40)["version"], 41)
 
 
 class TestConfigFile(unittest.TestCase):

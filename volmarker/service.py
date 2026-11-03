@@ -26,7 +26,7 @@ from .derived import CORR_CONV
 from .fenics import FenicsLogin
 from .fmd.book import daily_n
 from .market import compare, market_view, parse_fix_time
-from .store import ConflictError, LockTimeout, Store, atomic_write, write_shared
+from .store import ConflictError, LockTimeout, Store, _reverse_lines, atomic_write, write_shared
 from .surface import (ALERT_MARKS, FOLLOW_FIELDS, apply_derivation, apply_parent, check_surface, clean_state,
                       new_state, now_iso, resolve, skew_active)
 
@@ -68,6 +68,7 @@ class Service:
         self.alerts = AlertEngine()
         self.fenics = FenicsLogin(store)          # FMD 1.0 feed while a trader is logged in to Fenics
         self._leader = False
+        self._archived_on: date | None = None         # the day this app last ran the history archive
         self.excel_foreign: dict[str, float] = {}     # pair -> mtime of a file changed outside VolMarker
         self.excel_errors: dict[str, str] = {}
         self._prop_cv = threading.Condition()
@@ -303,7 +304,7 @@ class Service:
         cfg = self.store.config()["weights_export"]
         fx, ws = weights_export.frontarena_lines(pair, w, holidays, today, cfg["date_format"], self._fa_ccy())
         items = weights_export.fenics_items(pair, w, holidays, today)
-        last = self._weights_sent().get(pair)
+        last = self._last_weights_sent(pair)
         fp = weights_export.fingerprint(pair, w, holidays, today)
         return {"version": rec["version"], "fingerprint": fp, "last": last,
                 "changed": not last or not last.get("ok") or last.get("fingerprint") != fp,
@@ -349,18 +350,19 @@ class Service:
             f.write(json.dumps(entry) + "\n")
         return dict(entry, response=response[:4000], xml=shown)
 
-    def _weights_sent(self) -> dict[str, dict]:
-        """Last send per pair (from the log)."""
-        out: dict[str, dict] = {}
+    def _last_weights_sent(self, pair: str) -> dict | None:
+        """The pair's last send, from the end of the log backwards."""
         log = self.store.root / "exports" / "weights_sent.jsonl"
-        if log.exists():
-            for line in log.read_text(encoding="utf-8").splitlines():
-                try:
-                    e = json.loads(line)
-                    out[e["pair"]] = e
-                except (ValueError, KeyError):
-                    continue
-        return out
+        if not log.exists():
+            return None
+        for line in _reverse_lines(log):
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("pair") == pair:
+                return e
+        return None
 
     def _export_dir(self, p: str) -> Path:
         path = Path(p)
@@ -1253,6 +1255,9 @@ class Service:
         if not self._leader:
             return
         self.reconcile()
+        if self._archived_on != date.today():
+            self._archived_on = date.today()
+            self.archive_history()
         now = now_iso()
         for pair, rec in list(self.cache.items()):
             exp = rec.get("skew_expiry")
@@ -1265,6 +1270,28 @@ class Service:
                     self.publish(pair, state, rec["version"], "skew expired", "skew-expiry")
                 except Exception as e:  # conflict etc. - retried next round
                     log.info("skew expiry for %s deferred: %s", pair, e)
+
+    def archive_history(self, today: date | None = None) -> int:
+        """Once a day (the leader): whole months older than archive_keep_days
+        move from each pair's history.jsonl to its monthly archive files.
+        Nothing is deleted. Returns the number of versions moved."""
+        keep = int(self.store.config().get("archive_keep_days") or 0)
+        if keep <= 0:
+            return 0
+        first = ((today or date.today()) - timedelta(days=keep)).replace(day=1)
+        cutoff = datetime(first.year, first.month, 1, tzinfo=timezone.utc)
+        moved = 0
+        for pair in self.store.list_pairs():
+            if not self.store.archive_due(pair, cutoff):
+                continue
+            try:
+                with self.store.lock(pair, self.user):
+                    n = self.store.archive_pair(pair, cutoff)
+                moved += n
+                log.info("archived %d versions of %s from before %s", n, pair, first)
+            except Exception:                # tried again tomorrow; nothing is lost either way
+                log.exception("archiving %s failed", pair)
+        return moved
 
     def start_background(self) -> None:
         self.start_propagation()

@@ -3,6 +3,8 @@
 Layout under the data root:
 
     pairs/<PAIR>/history.jsonl   one JSON line per version, append-only
+    pairs/<PAIR>/archive/YYYY-MM.jsonl.gz  older versions by month (UTC), moved
+                                 there by archive_pair; read as part of the history
     journal.jsonl                one line per published version (all pairs);
                                  every running app tails this to see changes
     locks/<name>.lock            short-lived exclusive locks
@@ -14,12 +16,16 @@ Layout under the data root:
 
 Writers take the pair's lock, check that the latest version is the one the
 edit started from, then append. Lines are never rewritten, so the history
-doubles as the audit trail.
+doubles as the audit trail. Archiving moves whole old months out of
+history.jsonl into compressed month files and never drops a version: they are
+written (merged by version) before history.jsonl is shortened, so a crash in
+between leaves a version in both places, which readers skip, never in neither.
 """
 
 from __future__ import annotations
 
 import csv
+import gzip
 import hashlib
 import io
 import json
@@ -29,7 +35,7 @@ import socket
 import threading
 import time
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from .derived import upgrade_corr
@@ -58,6 +64,7 @@ DEFAULT_CONFIG = {
     "history_dir": "exports/history",          # the macro's History folder
     "excel_dir": "",                           # where Excel writes the files of pairs marked in Excel (empty: frontarena_dir)
     "frontarena_ccy": {"CNH": "CNY"},          # currencies Front Arena knows under another code (its files only, not Fenics)
+    "archive_keep_days": 90,                   # history.jsonl keeps at least this many days; older whole months go to pairs/<PAIR>/archive/
     "stale_minutes_key": 120,
     "stale_minutes_other": 1440,
     # Fenics Market Data FIX feed (password: FMD_PASSWORD env var or a local password_file)
@@ -243,10 +250,22 @@ class Store:
         return upgrade_corr(json.loads(line)) if line else None
 
     def history(self, pair: str, limit: int = 100) -> list[dict]:
+        """The last limit versions, newest first (from the archive too when needed)."""
         path = self._history(pair)
         if not path.exists():
             return []
-        return [upgrade_corr(json.loads(l)) for l in _tail_lines(path, limit)]
+        out = [upgrade_corr(json.loads(l)) for l in _tail_lines(path, limit)]
+        if len(out) < limit:
+            seen = {r["version"] for r in out}
+            for _, f in reversed(self._archive_months(pair)):
+                for line in reversed(_read_gz_lines(f)):
+                    rec = json.loads(line)
+                    if rec["version"] not in seen:
+                        seen.add(rec["version"])
+                        out.append(upgrade_corr(rec))
+                        if len(out) >= limit:
+                            return out
+        return out
 
     def as_of(self, pair: str, before: datetime) -> dict | None:
         """The last version published before a moment (e.g. the previous day's EOD)."""
@@ -257,7 +276,65 @@ class Store:
             rec = upgrade_corr(json.loads(line))
             if datetime.fromisoformat(rec["ts"]) < before:
                 return rec
+        month = _utc_month(before)
+        for m, f in reversed(self._archive_months(pair)):
+            if m > month:
+                continue
+            for line in reversed(_read_gz_lines(f)):
+                rec = json.loads(line)
+                if datetime.fromisoformat(rec["ts"]) < before:
+                    return upgrade_corr(rec)
         return None
+
+    # ---- archive ------------------------------------------------------
+    def _archive_months(self, pair: str) -> list[tuple[str, Path]]:
+        """(YYYY-MM, file) of the pair's archive, oldest first."""
+        d = self.root / "pairs" / pair / "archive"
+        if not d.is_dir():
+            return []
+        return sorted((f.name[:7], f) for f in d.glob("????-??.jsonl.gz"))
+
+    def archive_due(self, pair: str, cutoff: datetime) -> bool:
+        """Whether the pair's oldest version in history.jsonl is before the cutoff (reads one line)."""
+        path = self._history(pair)
+        try:
+            with open(path, "rb") as f:
+                first = f.readline()
+        except OSError:
+            return False
+        return bool(first.strip()) and datetime.fromisoformat(json.loads(first)["ts"]) < cutoff
+
+    def archive_pair(self, pair: str, cutoff: datetime) -> int:
+        """Move the versions before the cutoff to the monthly archive files.
+        history.jsonl always keeps the latest version. Caller must hold the pair lock.
+        Returns the number of versions moved."""
+        path = self._history(pair)
+        if not path.exists():
+            return 0
+        lines = [l for l in path.read_text(encoding="utf-8").split("\n") if l.strip()]
+        n = 0
+        while n < len(lines) - 1 and datetime.fromisoformat(json.loads(lines[n])["ts"]) < cutoff:
+            n += 1
+        if not n:
+            return 0
+        by_month: dict[str, list[str]] = {}
+        for l in lines[:n]:
+            by_month.setdefault(_utc_month(datetime.fromisoformat(json.loads(l)["ts"])), []).append(l)
+        d = path.parent / "archive"
+        d.mkdir(exist_ok=True)
+        for month, new in by_month.items():
+            f = d / f"{month}.jsonl.gz"
+            merged = {json.loads(l)["version"]: l for l in (_read_gz_lines(f) if f.exists() else [])}
+            merged.update((json.loads(l)["version"], l) for l in new)
+            tmp = f.with_name(f".{f.name}.{os.getpid()}.tmp")
+            with gzip.open(tmp, "wt", encoding="utf-8") as g:
+                g.write("".join(merged[v] + "\n" for v in sorted(merged)))
+            with open(tmp, "rb") as g:                 # read back before history.jsonl lets go of them
+                if len(_gz_lines(g.read())) != len(merged):
+                    raise OSError(f"archive {f} did not read back")
+            os.replace(tmp, f)
+        atomic_write(path, "".join(l + "\n" for l in lines[n:]))
+        return n
 
     def append(self, record: dict, expected_version: int | None) -> dict:
         """Append a new version. Caller must hold the pair lock."""
@@ -460,6 +537,19 @@ def _tail_lines(path: Path, n: int) -> list[str]:
     if pos > 0:
         lines = lines[1:]            # first one may be cut
     return [l.decode("utf-8") for l in reversed(lines[-n:])]
+
+
+def _utc_month(t: datetime) -> str:
+    return (t.astimezone(timezone.utc) if t.tzinfo else t).strftime("%Y-%m")
+
+
+def _gz_lines(data: bytes) -> list[str]:
+    return [l for l in gzip.decompress(data).decode("utf-8").split("\n") if l.strip()]
+
+
+def _read_gz_lines(path: Path) -> list[str]:
+    """An archive month's versions, oldest first."""
+    return _gz_lines(path.read_bytes())
 
 
 def _reverse_lines(path: Path):
