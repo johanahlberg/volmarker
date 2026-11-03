@@ -25,6 +25,7 @@
   --warning: #fab219;
   --critical: #d03b3b;
   --mono: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -50,8 +51,20 @@
 html, body { height: 100%; }
 body {
   margin: 0; background: var(--plane); color: var(--ink);
-  font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 13px/1.4 var(--sans);
 }
+/* display settings, per PC (the Aa button): font, contrast; the text size is a zoom on <html> */
+@font-face { font-family: "Atkinson Hyperlegible Next"; src: url("fonts/AtkinsonHyperlegibleNext.ttf") format("truetype"); font-weight: 200 800; }
+@font-face { font-family: "Atkinson Hyperlegible Mono"; src: url("fonts/AtkinsonHyperlegibleMono.ttf") format("truetype"); font-weight: 200 800; }
+:root[data-font="atkinson"] { --sans: "Atkinson Hyperlegible Next", Verdana, sans-serif; --mono: "Atkinson Hyperlegible Mono", Consolas, monospace; }
+:root[data-font="verdana"] { --sans: Verdana, Geneva, sans-serif; --mono: Consolas, "Lucida Console", Menlo, monospace; }
+:root[data-contrast="high"] { --ink-2: #2b2a28; --muted: #55534f; --grid: #c9c8bf; --border: rgba(11, 11, 11, 0.28); }
+@media (prefers-color-scheme: dark) {
+  :root[data-contrast="high"]:not([data-theme="light"]) { --ink-2: #e2e1dc; --muted: #c4c2bb; --grid: #4a4a46; --border: rgba(255, 255, 255, 0.3); }
+}
+:root[data-contrast="high"][data-theme="dark"] { --ink-2: #e2e1dc; --muted: #c4c2bb; --grid: #4a4a46; --border: rgba(255, 255, 255, 0.3); }
+#dlg-display label { margin: 8px 0; }
+#dlg-display h2 .muted { font-size: 12px; font-weight: 400; margin-left: 6px; }
 button, input, select { font: inherit; color: inherit; }
 button {
   background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
@@ -74,7 +87,9 @@ input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accen
   background: var(--surface); border-bottom: 1px solid var(--border);
 }
 .brand { font-weight: 700; letter-spacing: .02em; }
-.meta { color: var(--ink-2); display: flex; gap: 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.meta { color: var(--ink-2); display: flex; gap: 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0; }
+.topbar > * { white-space: nowrap; flex-shrink: 0; }
+.topbar > .meta { flex-shrink: 1; }
 .conn { font-size: 12px; color: var(--good); }
 .conn.down { color: var(--critical); }
 
@@ -157,6 +172,7 @@ table.grid { border-collapse: collapse; width: 100%; font-variant-numeric: tabul
   width: 100%; min-width: 62px; border: none; border-radius: 0; background: transparent; text-align: right;
   padding: 5px 8px; font-family: var(--mono);
 }
+:root[data-font] .grid input.cell { min-width: calc(7ch + 16px); }   /* wider digits */
 .grid input.cell.dirty { background: var(--dirty); color: var(--dirty-ink); font-weight: 600; }
 .grid input.cell.dirty.up { background: var(--up); color: var(--up-ink); }
 .grid input.cell.dirty.down { background: var(--down); color: var(--down-ink); }

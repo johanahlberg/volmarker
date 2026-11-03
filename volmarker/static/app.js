@@ -58,6 +58,13 @@ async function api(path, body) {
   return data;
 }
 
+// a tooltip next to the mouse; the text-size setting zooms <html>, the mouse is in screen px
+function placeTip(tip, ev) {
+  const z = +document.documentElement.style.zoom || 1;
+  tip.style.left = Math.min(ev.clientX + 14, window.innerWidth - tip.offsetWidth * z - 8) / z + "px";
+  tip.style.top = (ev.clientY + 14) / z + "px";
+}
+
 // ---------------------------------------------------------------- formatting
 function fmt(v, dp = 3) {
   if (v === null || v === undefined || v === "") return "";
@@ -846,8 +853,7 @@ function lineChart(el, { n, xLabel, xTicks, series, yLabel, markers = [] }) {
     tip.innerHTML = `<b>${esc(xLabel(i))}</b>` + series.map((se) =>
       `<div class="row"><span class="sw" style="background:${se.color}"></span>${esc(se.name)}<span class="v">${fmt(se.values[i], 3)}</span></div>`).join("");
     tip.hidden = false;
-    tip.style.left = Math.min(ev.clientX + 14, window.innerWidth - tip.offsetWidth - 8) + "px";
-    tip.style.top = ev.clientY + 14 + "px";
+    placeTip(tip, ev);
   });
   svg.addEventListener("mouseleave", () => { tip.hidden = true; xh.setAttribute("visibility", "hidden"); });
 }
@@ -1007,8 +1013,7 @@ function render3D() {
     hov.setAttribute("cx", best.x); hov.setAttribute("cy", best.y); hov.setAttribute("visibility", "visible");
     tip.innerHTML = `<b>${best.t} · ${best.d}</b><div class="row">${diff ? "Change" : "Vol"}<span class="v">${diff && best.v > 0 ? "+" : ""}${fmt(best.v, 3)}</span></div>`;
     tip.hidden = false;
-    tip.style.left = Math.min(ev.clientX + 14, window.innerWidth - tip.offsetWidth - 8) + "px";
-    tip.style.top = ev.clientY + 14 + "px";
+    placeTip(tip, ev);
   };
   svg.onmouseleave = () => { tip.hidden = true; hov.setAttribute("visibility", "hidden"); };
 
@@ -2170,6 +2175,25 @@ function wire() {
       dlg.close(); await loadPairs(); selectPair(rec.pair);
     } catch (err) { $("#np-err").textContent = err.message; }
   };
+
+  // display: text size, font and contrast, per PC (Roland's eyes, not the desk's)
+  const dsGet = (k, d) => { try { return localStorage.getItem(k) ?? d; } catch { return d; } };
+  const dsApply = () => {
+    const root = document.documentElement, z = dsGet("vm-zoom", "1"), f = dsGet("vm-font", ""), c = dsGet("vm-contrast", "");
+    root.style.zoom = z === "1" ? "" : z;
+    if (f) root.dataset.font = f; else delete root.dataset.font;
+    if (c) root.dataset.contrast = c; else delete root.dataset.contrast;
+    if (app.view) { renderTermChart(); if (app.tab === "weights") renderCurve(); if (app.tab === "s3d") render3D(); }
+  };
+  dsApply();
+  $("#display-btn").onclick = () => {
+    $("#ds-size").value = dsGet("vm-zoom", "1"); $("#ds-font").value = dsGet("vm-font", ""); $("#ds-contrast").checked = !!dsGet("vm-contrast", "");
+    $("#dlg-display").showModal();
+  };
+  const dsSet = (k, v) => { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch {} dsApply(); };
+  $("#ds-size").onchange = (e) => dsSet("vm-zoom", e.target.value === "1" ? "" : e.target.value);
+  $("#ds-font").onchange = (e) => dsSet("vm-font", e.target.value);
+  $("#ds-contrast").onchange = (e) => dsSet("vm-contrast", e.target.checked ? "high" : "");
 
   // theme
   const saved = (() => { try { return localStorage.getItem("vm-theme"); } catch { return null; } })();

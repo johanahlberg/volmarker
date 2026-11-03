@@ -16,6 +16,7 @@
   <span class="fx-every">every <input id="fx-int" type="number" min="1" step="any" class="num"><select id="fx-unit"><option value="1">s</option><option value="60">min</option></select></span>
   <span id="fmd" class="conn off" title="Fenics Market Data feed">FMD off</span>
   <span id="conn" class="conn" title="Live connection to the shared folder">● live</span>
+  <button id="display-btn" class="ghost" title="Text size, font and contrast (this PC only)">Aa</button>
   <button id="theme" class="ghost" title="Toggle light/dark">◐</button>
   <button id="newpair">+ New pair</button>
 </header>
@@ -275,6 +276,13 @@
 <datalist id="group-list"></datalist>
 <div id="tooltip" class="tooltip" hidden></div>
 
+<dialog id="dlg-display">
+  <h2>Display <span class="muted small">this PC only</span></h2>
+  <label>Text size <select id="ds-size"><option value="1">100%</option><option value="1.1">110%</option><option value="1.25">125%</option><option value="1.4">140%</option></select></label>
+  <label>Font <select id="ds-font"><option value="">Standard</option><option value="atkinson">Atkinson Hyperlegible</option><option value="verdana">Verdana / Consolas</option></select></label>
+  <label>Stronger contrast <input id="ds-contrast" type="checkbox"></label>
+  <form method="dialog"><div class="actions"><button class="primary">Close</button></div></form>
+</dialog>
 <dialog id="dlg-new">
   <form method="dialog" id="form-new">
     <h2>New pair</h2>

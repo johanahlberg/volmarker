@@ -20,7 +20,8 @@ from .store import ConflictError, DefaultsConflict, LockTimeout
 
 STATIC = Path(__file__).parent / "static"
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-                 ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml"}
+                 ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
+                 ".ttf": "font/ttf"}
 
 log = logging.getLogger("volmarker")
 
