@@ -5,7 +5,7 @@ from __future__ import annotations
 TENORS = ["ON", "1W", "2W", "1M", "2M", "3M", "6M", "9M", "1Y", "2Y", "3Y", "4Y", "5Y"]
 
 # Approximate calendar days per tenor. Used only for ordering, the calendar
-# arbitrage check and charts - Fenics owns the exact expiry date logic.
+# arbitrage check and charts; the expiry dates are calendar.tenor_dates.
 TENOR_DAYS = {
     "ON": 1, "1W": 7, "2W": 14, "1M": 30, "2M": 61, "3M": 91, "6M": 182,
     "9M": 273, "1Y": 365, "2Y": 730, "3Y": 1095, "4Y": 1461, "5Y": 1826,

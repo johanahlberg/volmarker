@@ -187,7 +187,8 @@ with seven weekday weights per pair (e.g. Mon 1.05, Tue-Fri 1, Sat/Sun 0) and a 
 - Butterflies are broker strangles, both in the marks and in FMD (`S25`/`S10`), so they compare one to one. The 3D view's ATM + BF ± RR/2 smile is therefore an approximation, for display only.
 - Fenics ATM bid/offer = quoted mid ± spread / 2, where quoted mid = mid + skew.
 - Triangle: cross = base1^s1 × base2^s2, so σ² = σ1² + σ2² + 2·s1·s2·ρ·σ1·σ2. Here ρ is the correlation between the two base pairs **as quoted**; for example, EURUSD vs USDCHF is strongly negative. The orientation signs s1 and s2 are worked out from the currencies.
-- Day weights: 1.0 on normal days. A weekend or holiday in either currency replaces it with that pair's factor (the lowest if several apply), and event weights are added on top. Total variance is interpolated linearly in weighted time between the marked tenors.
+- Day weights: weekday weight × the holiday factor of each currency with a holiday that day (0.4 × 0.4 on a holiday of both), plus the event weights. Total variance is interpolated linearly in weighted time between the marked tenors, as the Excel weight workbook does.
+- Expiry dates of the tenors, as the market (and the workbook's `fx_option_expiry`): spot is 2 spot days on (1 for USDCAD, USDTRY, USDRUB), skipping weekends and holidays of the pair's currencies other than USD and ILS; the value date must be a weekday and no holiday of either currency or of USD (crosses too), else it moves on. ON/1D is the next weekday and 1W/2W are 7/14 calendar days, holidays or not. For months and years the delivery is spot + the period as for FX forwards (modified following, end of month), and the expiry is the delivery stepped back by the spot days; it may fall on a holiday. Missing holidays in `calendar/holidays.csv` therefore move expiries too.
 - Checks: missing ATM, non-positive bid, calendar arbitrage (total ATM variance decreasing between tenors), and a correlation outside [-1, 1] when calibrating.
 
 ## Not done yet
@@ -198,4 +199,3 @@ with seven weekday weights per pair (e.g. Mon 1.05, Tue-Fri 1, Sat/Sun 0) and a 
 - Wing vols in the 3D view: a proper conversion of broker strangles to smile vols (needs forwards and per-pair delta conventions)
 - Derived RR/BF for crosses (marked by hand for now, as in Excel)
 - Inventory-driven skew (needs positions from Front Arena)
-- Exact expiry dates: the date logic in `calendar.py` is approximate and only used for weighting and display

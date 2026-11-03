@@ -141,6 +141,56 @@ class TestCalendar(unittest.TestCase):
             self.assertAlmostEqual(out[d], atm[t], places=6)
 
 
+
+class TestExpiryDates(unittest.TestCase):
+    """Spot, forward value and expiry dates by the FX market convention."""
+    D = staticmethod(lambda s: date.fromisoformat(s))
+
+    def test_as_the_excel_workbook(self):        # fx_option_expiry in the weight workbook, 21 Oct 2026
+        td = tenor_dates("EURUSD", date(2026, 10, 21), {})
+        self.assertEqual({t: d.isoformat() for t, d in td.items() if t not in ("3Y", "4Y", "5Y")}, {
+            "ON": "2026-10-22", "1W": "2026-10-28", "2W": "2026-11-04", "1M": "2026-11-19", "2M": "2026-12-21",
+            "3M": "2027-01-21", "6M": "2027-04-21", "9M": "2027-07-21", "1Y": "2027-10-21", "2Y": "2028-10-19"})
+
+    def test_spot(self):
+        from volmarker.calendar import spot_date
+        mon = date(2026, 11, 9)
+        self.assertEqual(spot_date("EURUSD", mon, {}), self.D("2026-11-11"))
+        # a USD holiday tomorrow doesn't move it, a CHF holiday does
+        self.assertEqual(spot_date("EURUSD", mon, {"USD": {self.D("2026-11-10")}}), self.D("2026-11-11"))
+        self.assertEqual(spot_date("EURCHF", mon, {"CHF": {self.D("2026-11-10")}}), self.D("2026-11-12"))
+        # a USD holiday on the value date moves it, crosses included
+        self.assertEqual(spot_date("EURUSD", mon, {"USD": {self.D("2026-11-11")}}), self.D("2026-11-12"))
+        self.assertEqual(spot_date("EURCHF", mon, {"USD": {self.D("2026-11-11")}}), self.D("2026-11-12"))
+        # ILS like USD; Friday is a value day
+        self.assertEqual(spot_date("USDILS", date(2026, 11, 11), {"ILS": {self.D("2026-11-12")}}), self.D("2026-11-13"))
+        # T+1 pairs
+        self.assertEqual(spot_date("USDCAD", mon, {}), self.D("2026-11-10"))
+        self.assertEqual(spot_date("USDCAD", mon, {"CAD": {self.D("2026-11-10")}}), self.D("2026-11-11"))
+        self.assertEqual(spot_date("USDTRY", date(2026, 11, 13), {}), self.D("2026-11-16"))   # Friday -> Monday
+
+    def test_days_and_weeks_ignore_holidays(self):
+        fri = date(2026, 10, 23)
+        hol = {"USD": {self.D("2026-10-26"), self.D("2026-10-30")}}
+        td = tenor_dates("EURUSD", fri, hol)
+        self.assertEqual(td["ON"], self.D("2026-10-26"))          # Friday expires Monday, holiday or not
+        self.assertEqual(td["1W"], self.D("2026-10-30"))
+
+    def test_months_as_fx_forwards(self):
+        # end of month: spot Fri 30 Oct is October's last value day -> delivery on November's last, Mon 30 Nov;
+        # the expiry steps back two spot days to Thanksgiving, a USD holiday: allowed
+        td = tenor_dates("EURUSD", date(2026, 10, 28), {"USD": {self.D("2026-11-26")}})
+        self.assertEqual(td["1M"], self.D("2026-11-26"))
+        # modified following: spot Thu 28 Jan + 1M = Sun 28 Feb -> Fri 26 Feb (Mon 1 Mar is next month)
+        td = tenor_dates("EURUSD", date(2027, 1, 26), {})
+        self.assertEqual(td["1M"], self.D("2027-02-24"))
+        # a CHF holiday on the way back is skipped like a spot day: delivery Mon 23 Nov, Fri 20 Nov CHF holiday
+        td = tenor_dates("EURCHF", date(2026, 10, 21), {"CHF": {self.D("2026-11-20")}})
+        self.assertEqual(td["1M"], self.D("2026-11-18"))
+        # T+1: one day back from delivery
+        td = tenor_dates("USDCAD", date(2026, 10, 21), {})
+        self.assertEqual(td["1M"], self.D("2026-11-20"))         # spot Thu 22 Oct -> delivery Mon 23 Nov -> Fri 20 Nov
+
 class TestQuoteCalibration(unittest.TestCase):
     def test_recovers_event_weight_from_the_jump(self):
         today = date(2026, 10, 26)                       # Monday

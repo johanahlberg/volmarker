@@ -84,22 +84,97 @@ def is_good_day(d: date, ccys: tuple[str, str], holidays: dict[str, set]) -> boo
     return d.weekday() not in WEEKEND and not any(d in holidays.get(c, ()) for c in ccys)
 
 
-def tenor_dates(pair: str, today: date, holidays: dict[str, set]) -> dict[str, date]:
-    """Approximate expiry dates (following business day). Fenics owns the
-    exact spot/delivery logic; this is only for weighting and display."""
+# ---- FX value and expiry dates (market convention) -------------------------
+#
+#   spot     trade date + 2 spot days (1 for USDCAD, USDTRY, USDRUB). A spot day is a
+#            weekday that is no holiday of the pair's currencies other than USD and
+#            ILS; a USD or ILS holiday only matters on the value date itself, which
+#            must be a good value day: a weekday and no holiday of either currency
+#            or of USD (crosses settle through USD).
+#   D, W     expiry = today + 1 weekday (1D on a Friday expires Monday), and
+#            today + 7 x N calendar days; holidays don't move them.
+#   M, Y     delivery = spot + the period, as for FX forwards: modified following
+#            on good value days, and end of month: spot on the month's last good
+#            value day gives the last good value day of the target month. The
+#            expiry is the delivery stepped back by the spot days (it may be a holiday).
+
+SPOT_T1 = {"USDCAD", "USDTRY", "USDRUB"}
+VALUE_DATE_ONLY = {"USD", "ILS"}         # their holidays only move a value date that falls on them
+
+
+def spot_days(pair: str) -> int:
+    c1, c2 = split_pair(pair)
+    return 1 if c1 + c2 in SPOT_T1 or c2 + c1 in SPOT_T1 else 2
+
+
+def _is_spot_day(d: date, ccys: tuple[str, str], holidays: dict[str, set]) -> bool:
+    return d.weekday() not in WEEKEND and not any(
+        d in holidays.get(c, ()) for c in ccys if c not in VALUE_DATE_ONLY)
+
+
+def is_value_day(d: date, ccys: tuple[str, str], holidays: dict[str, set]) -> bool:
+    return d.weekday() not in WEEKEND and not any(d in holidays.get(c, ()) for c in {*ccys, "USD"})
+
+
+def _step(d: date, n: int, ccys: tuple[str, str], holidays: dict[str, set]) -> date:
+    """n spot days on from d (back if n < 0)."""
+    one = timedelta(days=1 if n > 0 else -1)
+    for _ in range(abs(n)):
+        d += one
+        while not _is_spot_day(d, ccys, holidays):
+            d += one
+    return d
+
+
+def spot_date(pair: str, trade: date, holidays: dict[str, set]) -> date:
     ccys = split_pair(pair)
+    d = _step(trade, spot_days(pair), ccys, holidays)
+    while not is_value_day(d, ccys, holidays):
+        d += timedelta(days=1)
+    return d
+
+
+def _last_value_day(y: int, m: int, ccys: tuple[str, str], holidays: dict[str, set]) -> date:
+    d = date(y, m, _cal.monthrange(y, m)[1])
+    while not is_value_day(d, ccys, holidays):
+        d -= timedelta(days=1)
+    return d
+
+
+def forward_date(pair: str, spot: date, months: int, holidays: dict[str, set]) -> date:
+    """Value date of an N-month forward from spot (modified following, end of month)."""
+    ccys = split_pair(pair)
+    d = _add_months(spot, months)
+    if spot == _last_value_day(spot.year, spot.month, ccys, holidays):
+        return _last_value_day(d.year, d.month, ccys, holidays)
+    f = d
+    while not is_value_day(f, ccys, holidays):
+        f += timedelta(days=1)
+    if f.month != d.month:                  # modified following: stay in the month
+        f = d
+        while not is_value_day(f, ccys, holidays):
+            f -= timedelta(days=1)
+    return f
+
+
+def tenor_dates(pair: str, today: date, holidays: dict[str, set]) -> dict[str, date]:
+    """Expiry date per tenor, by the market convention above."""
+    ccys = split_pair(pair)
+    spot = spot_date(pair, today, holidays)
     out = {}
     for t in TENORS:
-        if t == "ON":
-            d = today + timedelta(days=1)
-        elif t.endswith("W"):
-            d = today + timedelta(days=7 * int(t[:-1]))
-        elif t.endswith("M"):
-            d = _add_months(today, int(t[:-1]))
+        n, unit = (1, "D") if t == "ON" else (int(t[:-1]), t[-1])
+        if unit == "D":
+            d = today
+            for _ in range(n):
+                d += timedelta(days=1)
+                while d.weekday() in WEEKEND:
+                    d += timedelta(days=1)
+        elif unit == "W":
+            d = today + timedelta(days=7 * n)
         else:
-            d = _add_months(today, 12 * int(t[:-1]))
-        while not is_good_day(d, ccys, holidays):
-            d += timedelta(days=1)
+            delivery = forward_date(pair, spot, n * (12 if unit == "Y" else 1), holidays)
+            d = _step(delivery, -spot_days(pair), ccys, holidays)
         out[t] = d
     return out
 
