@@ -2189,6 +2189,9 @@ function wire() {
   $("#display-btn").onclick = () => {
     $("#ds-size").value = dsGet("vm-zoom", "1"); $("#ds-font").value = dsGet("vm-font", ""); $("#ds-contrast").checked = !!dsGet("vm-contrast", "");
     $("#dlg-display").showModal();
+    // the bundled font may be missing on this PC (files not copied or blocked): say so, it falls back to Verdana / Consolas
+    const atk = (ok) => { $("#ds-font option[value=atkinson]").textContent = "Atkinson Hyperlegible" + (ok ? "" : " (not on this PC: Verdana)"); };
+    document.fonts.load('13px "Atkinson Hyperlegible Next"').then((f) => atk(f.length > 0), () => atk(false));
   };
   const dsSet = (k, v) => { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch {} dsApply(); };
   $("#ds-size").onchange = (e) => dsSet("vm-zoom", e.target.value === "1" ? "" : e.target.value);
