@@ -130,8 +130,10 @@ class Service:
         if rec is None:
             return None
         bases = {b: self._resolved_mid_atm(b) for b in (rec.get("bases") or [])}
+        holidays, _ = self.store.load_calendar()
+        expiries = {t: d.isoformat() for t, d in tenor_dates(pair, date.today(), holidays).items()}
         return {"record": rec, "resolved": resolve(rec), "bases": bases,
-                "dependents": self.dependents(pair)}
+                "dependents": self.dependents(pair), "expiries": expiries}
 
     def as_of(self, pair: str, before: datetime) -> dict | None:
         """The pair as last published before a moment, to compare today's marks with."""

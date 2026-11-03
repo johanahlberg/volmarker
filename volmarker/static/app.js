@@ -317,6 +317,14 @@ function visibleCols() {
   return COLS.filter((c) => (!c.derived || app.draft.mode === "derived") && (!c.parentCol || app.draft.spread_ref) && (!c.diff || showDiff()));
 }
 
+// the tenor's expiry date (FX convention, from the server), for the hover on the tenor
+function expiryTitle(t) {
+  const iso = app.view?.expiries?.[t];
+  if (!iso) return "";
+  const d = new Date(iso + "T00:00:00"), today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = Math.round((d - today) / 864e5);
+  return `Expiry ${d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" })} (${days} day${days === 1 ? "" : "s"})`;
+}
 function buildGrid() {
   const cols = visibleCols();
   const groups = [];
@@ -364,6 +372,7 @@ function renderGrid() {
     el.checked = !!app.draft[k];
     el.parentElement.classList.toggle("dirty", app.draft[k] !== app.published[k]);
   }
+  for (const td of $$("#grid tbody td.tn")) td.title = expiryTitle(td.parentElement.dataset.t);   // refreshed with each update of the pair
   $("#rr-head").textContent = app.draft.rr_put ? "Risk reversal (put − call)" : "Risk reversal";
   for (const el of $$("#grid tbody input")) {
     const t = el.dataset.t, f = el.dataset.f;
