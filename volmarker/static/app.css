@@ -150,6 +150,9 @@ table.grid { border-collapse: collapse; width: 100%; font-variant-numeric: tabul
 .grid td.sep, .grid th.sep { border-left: 1px solid var(--border); }
 .grid td.calc { background: var(--calc); color: var(--ink-2); padding: 0 8px; font-family: var(--mono); }
 .grid td.q { color: var(--ink); }
+.grid td.diff { padding: 0 6px; min-width: 52px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.grid td.diff.up { color: var(--up-ink); font-weight: 600; }
+.grid td.diff.down { color: var(--down-ink); font-weight: 600; }
 .grid input.cell {
   width: 100%; min-width: 62px; border: none; border-radius: 0; background: transparent; text-align: right;
   padding: 5px 8px; font-family: var(--mono);

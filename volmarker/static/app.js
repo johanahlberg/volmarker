@@ -287,21 +287,27 @@ const COLS = [
   { f: "corr", label: "Corr", dp: 3, derived: true, group: "" },
   { f: "atm", label: "ATM", dp: 3, group: "ATM", sep: true },
   { f: "psprd", label: "vs", dp: 3, parentCol: true },
+  { diff: "atm", label: "Δ", dp: 3, title: "Draft − published" },
   { f: "spread", label: "Spread", dp: 2 },
   { calc: (r) => r.quoted.atm_bid, label: "Bid", dp: 3, q: true, title: "Fenics ATM bid (incl. skew)" },
   { calc: (r) => r.quoted.atm_offer, label: "Offer", dp: 3, q: true, title: "Fenics ATM offer (incl. skew)" },
   { f: "rr25", label: "25D", dp: 3, group: "Risk reversal", sep: true, groupToggle: true },
+  { diff: "rr25", label: "Δ", dp: 3, title: "Draft − published" },
   { f: "rr10", label: "10D", dp: 3, lock: "lock_rr10f", role: "tenD" },
+  { diff: "rr10", label: "Δ", dp: 3, title: "Draft − published" },
   { f: "rr10f", label: "10D fac", dp: 3, lock: "lock_rr10f", role: "factor" },
   { f: "bf25", label: "25D", dp: 3, group: "Butterfly", sep: true },
+  { diff: "bf25", label: "Δ", dp: 3, title: "Draft − published" },
   { f: "bf10", label: "10D", dp: 3, lock: "lock_bf10f", role: "tenD" },
+  { diff: "bf10", label: "Δ", dp: 3, title: "Draft − published" },
   { f: "bf10f", label: "10D fac", dp: 3, lock: "lock_bf10f", role: "factor" },
   { f: "skew_atm", label: "ATM", dp: 2, group: "Skew → Fenics only", sep: true, skew: true },
   { f: "skew_rr", label: "RR", dp: 2, skew: true },
   { f: "skew_bf", label: "BF", dp: 2, skew: true },
 ];
+function showDiff() { try { return localStorage.getItem("vm-diff") !== "0"; } catch { return true; } }
 function visibleCols() {
-  return COLS.filter((c) => (!c.derived || app.draft.mode === "derived") && (!c.parentCol || app.draft.spread_ref));
+  return COLS.filter((c) => (!c.derived || app.draft.mode === "derived") && (!c.parentCol || app.draft.spread_ref) && (!c.diff || showDiff()));
 }
 
 function buildGrid() {
@@ -324,6 +330,7 @@ function buildGrid() {
     cols.forEach((c, i) => {
       const cls = c.sep ? "sep" : "";
       if (c.calc) h += `<td class="calc ${c.q ? "q" : ""} ${cls}" data-t="${t}" data-c="${i}"></td>`;
+      else if (c.diff) h += `<td class="diff ${cls}" data-t="${t}" data-d="${c.diff}"></td>`;
       else {
         const mk = MKT_FIELDS[c.f];
         h += `<td class="${cls}${mk ? " mk" : ""}"${mk ? ` data-t="${t}" data-m="${mk}"` : ""}><input class="cell${c.skew ? " skew" : ""}" data-t="${t}" data-f="${c.f}" inputmode="decimal" autocomplete="off" ${c.skew ? 'placeholder=" "' : ""}>` +
@@ -386,6 +393,13 @@ function renderGrid() {
   for (const td of $$("#grid td.calc")) {
     const col = cols[+td.dataset.c];
     td.textContent = fmt(col.calc(resolved[td.dataset.t]), col.dp);
+  }
+  // draft − published, as shown (put − call on favour-puts pairs); blank when unchanged
+  for (const td of $$("#grid td.diff")) {
+    const t = td.dataset.t, f = td.dataset.d, v = app.draft.tenors[t][f], pub = publishedRow(t)[f];
+    const d = v == null || pub == null ? 0 : rrSign(f) * (v - pub), on = Math.abs(d) >= 0.0005;
+    td.textContent = on ? (d > 0 ? "+" : "") + fmt(d, 3) : "";
+    td.classList.toggle("up", on && d > 0); td.classList.toggle("down", on && d < 0);
   }
 }
 
@@ -2018,6 +2032,11 @@ function wire() {
   $("#ch-ref").onchange = () => loadChanges();
   $("#ch-date").onchange = () => { $("#ch-ref").value = "date"; loadChanges(); };
   $("#mkt-show").onchange = () => { renderMarket(); renderTermChart(); };
+  $("#diff-show").checked = showDiff();
+  $("#diff-show").onchange = (e) => {
+    try { localStorage.setItem("vm-diff", e.target.checked ? "1" : "0"); } catch {}
+    if (app.current) { buildGrid(); renderAll(); }
+  };
   $("#mkt-brand").onchange = () => loadMarket();
   const followBlock = () => {
     if (!app.draft.follow_market && !app.draft.excel) return false;
