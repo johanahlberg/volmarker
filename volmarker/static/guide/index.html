@@ -258,7 +258,7 @@
 
 <h3>Derived pairs (correlation triangle)</h3>
 <figure><img src="shots/derived.png" alt="EURCHF derived pair"><figcaption>EURCHF derived from EURUSD and USDCHF: a <b>Corr</b> column and blue ATMs.</figcaption></figure>
-<p>A derived pair's ATM comes from its two base pairs and a correlation per tenor: σ² = σ₁² + σ₂² + 2·s₁·s₂·ρ·σ₁·σ₂. The correlation is between the two bases <i>as quoted</i>, so EURUSD against USDCHF is strongly negative.</p>
+<p>A derived pair's ATM comes from its two base pairs and a correlation per tenor: σ² = σ₁² + σ₂² − 2·ρ·σ₁·σ₂. This is the triangle correlation, as in the Excel workbook, whichever way the bases are quoted, so EURCHF from EURUSD and USDCHF has a strongly positive correlation.</p>
 <ul>
   <li>When a base is published, the derived pair follows by itself.</li>
   <li>Type an ATM to calibrate that tenor's correlation to it; the pair then keeps running off its bases.</li>
