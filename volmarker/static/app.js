@@ -5,12 +5,39 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type", "lock_rr10f", "lock_bf10f",
-  "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "inverse", "follow_bases", "tenors"];
+  "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "inverse", "follow_bases",
+  "deltas", "extra_tenors", "wing_locks", "tenors"];
 // pair settings the Setup tab saves on its own (service.SETTING_KEYS)
 const SETUP_KEYS = ["mode", "bases", "key", "group", "spread_ref", "follow_parent", "follow_bases", "cut", "dc_factor",
   "atm_type", "follow_market", "excel", "alert_tol", "alerts_off", "alerts_smile_off", "inverse"];
-const MKT_FIELDS = { atm: "atm", rr25: "rr25", rr10: "rr10", bf25: "bf25", bf10: "bf10" };
-const FOLLOW_FIELDS = ["atm", "rr25", "rr10f", "rr10", "bf25", "bf10f", "bf10"];   // owned by the feed on Follow FMD pairs
+// marks with a market quote: ATM and the RR and BF of every delta (rr25, rr10, a pair's extra rr5 ...)
+const isMark = (f) => /^(atm|rr\d+|bf\d+)$/.test(f);
+// owned by the feed on Follow FMD pairs: the marks and the wings' factors
+const isFollowField = (f) => f === "atm" || /^(rr|bf)\d+f?$/.test(f);
+// a pair's deltas: 25D, 10D and its extra ones (e.g. 5D, 1D for steep wings, or 30D), inside out
+const allDeltas = (d = app.draft) => [25, 10, ...(d?.deltas || [])].sort((a, b) => b - a);
+const wingDeltas = (d = app.draft) => allDeltas(d).filter((x) => x !== 25);
+const allMarks = (d = app.draft) => ["atm", ...allDeltas(d).map((x) => "rr" + x), ...allDeltas(d).map((x) => "bf" + x)];
+const markLabel = (m) => (m === "atm" ? "ATM" : `${m.slice(2)}D ${m.slice(0, 2).toUpperCase()}`);
+// the standard tenors and the pair's extra ones (e.g. 3W over an event), by maturity
+const STD_TENOR_DAYS = { ON: 1, "1W": 7, "2W": 14, "1M": 30, "2M": 61, "3M": 91, "6M": 182, "9M": 273, "1Y": 365, "2Y": 730, "3Y": 1095, "4Y": 1461, "5Y": 1826 };
+function tenorDays(t) {
+  if (STD_TENOR_DAYS[t]) return STD_TENOR_DAYS[t];
+  const m = /^(\d+)([WMY])$/.exec(t);
+  return m ? Math.round(+m[1] * { W: 7, M: 30.4375, Y: 365 }[m[2]]) : 1e9;
+}
+const tenorList = (d = app.draft) => [...Object.keys(STD_TENOR_DAYS), ...Object.keys(d?.extra_tenors || {})].sort((a, b) => tenorDays(a) - tenorDays(b));
+// the lock of a wing: lock_rr10f / lock_bf10f, an extra delta's in wing_locks ({rr5: true})
+function getLock(k, s = app.draft) {
+  const m = /^lock_(rr|bf)(\d+)f$/.exec(k);
+  if (!m || m[2] === "10") return s[k];
+  return s.wing_locks?.[m[1] + m[2]] !== false;
+}
+function setLock(k, v, s = app.draft) {
+  const m = /^lock_(rr|bf)(\d+)f$/.exec(k);
+  if (!m || m[2] === "10") s[k] = v;
+  else s.wing_locks = { ...(s.wing_locks || {}), [m[1] + m[2]]: v };
+}
 // marks from outside VolMarker (surface.external); a derived pair's correlation is then implied by them
 const external = (d = app.draft) => !!(d.excel || d.follow_market);
 // a derived pair whose ATMs move with the bases at a fixed correlation (else the correlation follows)
@@ -20,8 +47,8 @@ const cutLabel = (c) => [c.time, ...Object.entries(c.times || {}).map(([d, t]) =
   " " + c.tz.split("/").pop().replace("_", " ");
 const MARK_LABEL = { atm: "ATM", rr25: "25D RR", rr10: "10D RR", bf25: "25D BF", bf10: "10D BF" };
 // favour puts (pair setting rr_put): the GUI shows and takes RRs as put − call; stored and exported RRs stay call − put
-const RR_FIELDS = ["rr25", "rr10", "skew_rr"];
-function rrSign(f, put = app.draft?.rr_put) { return put && RR_FIELDS.includes(f) ? -1 : 1; }
+const isRR = (f) => /^rr\d+$/.test(f) || f === "skew_rr";
+function rrSign(f, put = app.draft?.rr_put) { return put && isRR(f) ? -1 : 1; }
 function rrFlip(q) {               // a call − put quote in put − call terms: bid and offer swap
   const neg = (v) => (v == null ? v : -v);
   return { ...q, bid: neg(q.offer), offer: neg(q.bid), mid: neg(q.mid) };
@@ -253,6 +280,7 @@ async function reloadView() {
   app.baseVersion = v.record.version;
   app.published = pick(v.record);
   app.draft = pick(v.record);
+  app.tenors = tenorList();
   app.preview = { state: v.record, resolved: v.resolved, warnings: v.record.warnings || [] };
   app.dirty = false;
   hideBanner();
@@ -271,7 +299,7 @@ async function loadParent() {
   try {
     const v = await api(`/api/pairs/${ref}`);
     app.parent = { pair: ref, version: v.record.version, ts: v.record.ts,
-      atm: Object.fromEntries(app.tenors.map((t) => [t, v.resolved[t].mid.atm])) };
+      atm: Object.fromEntries(Object.entries(v.resolved).map(([t, r]) => [t, r.mid.atm])) };
   } catch { app.parent = { pair: ref, atm: {}, missing: true }; }
 }
 function pick(rec) {
@@ -283,38 +311,51 @@ function pick(rec) {
   s.follow_market = !!s.follow_market; s.alerts_off = !!s.alerts_off; s.alerts_smile_off = !!s.alerts_smile_off; s.rr_put = !!s.rr_put; s.inverse = !!s.inverse;
   s.follow_bases = s.follow_bases !== false;
   for (const r of Object.values(s.tenors)) {   // records from before the 10D values were stored
-    if (r.rr10 == null) r.rr10 = r.rr25 * r.rr10f;
-    if (r.bf10 == null) r.bf10 = r.bf25 * r.bf10f;
+    for (const d of wingDeltas(s)) for (const w of ["rr", "bf"])
+      if (r[`${w}${d}`] == null && r[`${w}${d}f`] != null) r[`${w}${d}`] = r[`${w}25`] * r[`${w}${d}f`];
   }
   return s;
 }
 
 // ---------------------------------------------------------------- grid
-const COLS = [
-  { f: "corr", label: "Corr", dp: 3, derived: true, group: "" },
-  { f: "atm", label: "ATM", dp: 3, group: "ATM", sep: true },
-  { f: "psprd", label: "vs", dp: 3, parentCol: true },
-  { diff: "atm", label: "Δ", dp: 3, title: "Draft − published" },
-  { f: "spread", label: "Spread", dp: 2 },
-  { calc: (r) => r.quoted.atm_bid, label: "Bid", dp: 3, q: true, title: "Fenics ATM bid (incl. skew)" },
-  { calc: (r) => r.quoted.atm_offer, label: "Offer", dp: 3, q: true, title: "Fenics ATM offer (incl. skew)" },
-  { f: "rr25", label: "25D", dp: 3, group: "Risk reversal", sep: true, groupToggle: true },
-  { diff: "rr25", label: "Δ", dp: 3, title: "Draft − published" },
-  { f: "rr10", label: "10D", dp: 3, lock: "lock_rr10f", role: "tenD" },
-  { diff: "rr10", label: "Δ", dp: 3, title: "Draft − published" },
-  { f: "rr10f", label: "10D fac", dp: 3, lock: "lock_rr10f", role: "factor" },
-  { f: "bf25", label: "25D", dp: 3, group: "Butterfly", sep: true },
-  { diff: "bf25", label: "Δ", dp: 3, title: "Draft − published" },
-  { f: "bf10", label: "10D", dp: 3, lock: "lock_bf10f", role: "tenD" },
-  { diff: "bf10", label: "Δ", dp: 3, title: "Draft − published" },
-  { f: "bf10f", label: "10D fac", dp: 3, lock: "lock_bf10f", role: "factor" },
-  { f: "skew_atm", label: "ATM", dp: 2, group: "Skew → Fenics only", sep: true, skew: true },
-  { f: "skew_rr", label: "RR", dp: 2, skew: true },
-  { f: "skew_bf", label: "BF", dp: 2, skew: true },
-];
+// the RR and BF columns of each delta the pair marks: 25D, then each wing with its factor
+function wingCols(w, group, toggle) {
+  const out = [];
+  allDeltas().forEach((d, i) => {
+    const head = i ? {} : { group, sep: true, groupToggle: toggle };
+    const extra = d !== 25 && d !== 10;
+    if (d === 25) out.push({ f: `${w}25`, label: "25D", dp: 3, ...head });
+    else out.push({ f: `${w}${d}`, label: `${d}D`, dp: 3, lock: `lock_${w}${d}f`, role: "tenD", delta: d, extra, ...head });
+    out.push({ diff: `${w}${d}`, label: "Δ", dp: 3, title: "Draft − published" });
+    if (d !== 25) out.push({ f: `${w}${d}f`, label: `${d}D fac`, dp: 3, lock: `lock_${w}${d}f`, role: "factor", delta: d, extra });
+  });
+  return out;
+}
+function gridCols() {
+  return [
+    { f: "corr", label: "Corr", dp: 3, derived: true, group: "" },
+    { f: "atm", label: "ATM", dp: 3, group: "ATM", sep: true },
+    { f: "psprd", label: "vs", dp: 3, parentCol: true },
+    { diff: "atm", label: "Δ", dp: 3, title: "Draft − published" },
+    { f: "spread", label: "Spread", dp: 2 },
+    { calc: (r) => r.quoted.atm_bid, label: "Bid", dp: 3, q: true, title: "Fenics ATM bid (incl. skew)" },
+    { calc: (r) => r.quoted.atm_offer, label: "Offer", dp: 3, q: true, title: "Fenics ATM offer (incl. skew)" },
+    ...wingCols("rr", "Risk reversal", true),
+    ...wingCols("bf", "Butterfly", false),
+    { f: "skew_atm", label: "ATM", dp: 2, group: "Skew → Fenics only", sep: true, skew: true },
+    { f: "skew_rr", label: "RR", dp: 2, skew: true },
+    { f: "skew_bf", label: "BF", dp: 2, skew: true },
+  ];
+}
 function showDiff() { try { return localStorage.getItem("vm-diff") !== "0"; } catch { return true; } }
 function visibleCols() {
-  return COLS.filter((c) => (!c.derived || app.draft.mode === "derived") && (!c.parentCol || app.draft.spread_ref) && (!c.diff || showDiff()));
+  return gridCols().filter((c) => (!c.derived || app.draft.mode === "derived") && (!c.parentCol || app.draft.spread_ref) && (!c.diff || showDiff()));
+}
+// an extra tenor's hover: until when the pair carries it
+function extraTitle(t) {
+  if (!(t in (app.draft.extra_tenors || {}))) return "";
+  const until = app.draft.extra_tenors[t];
+  return `\nExtra tenor: ${until ? `removed on ${new Date(until + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" })}` : "kept until removed"} (toolbar above)`;
 }
 
 // the tenor's expiry date (FX convention, from the server), for the hover on the tenor
@@ -336,18 +377,19 @@ function buildGrid() {
   let h = `<thead><tr><th class="tn"></th>${groups.map((g) => `<th class="grp" colspan="${g.n}">` + (g.toggle ?
     `<span id="rr-head">${esc(g.label)}</span><label class="lock put" title="${esc(putTitle)}"><input type="checkbox" data-lock="rr_put"> favour puts</label>` :
     esc(g.label)) + `</th>`).join("")}</tr>`;
-  const lockTitle = "Ticked: type the factor; 10D = 25D × factor (10D locked).\nUnticked: type the 10D quote; factor = 10D / 25D.";
-  h += `<tr><th class="tn">Tenor</th>${cols.map((c) => `<th class="${c.sep ? "sep" : ""}" title="${esc(c.title || "")}">` +
-    (c.role === "factor" ? `<label class="lock" title="${esc(lockTitle)}"><input type="checkbox" data-lock="${c.lock}"> lock</label>` : "") +
+  const lockTitle = (d) => `Ticked: type the factor; ${d}D = 25D × factor (${d}D locked).\nUnticked: type the ${d}D quote; factor = ${d}D / 25D.`;
+  h += `<tr><th class="tn">Tenor</th>${cols.map((c) => `<th class="${c.sep ? "sep" : ""}${c.extra ? " xd" : ""}" title="${esc(c.title || (c.extra ? "Extra delta of this pair" : ""))}">` +
+    (c.role === "factor" ? `<label class="lock" title="${esc(lockTitle(c.delta))}"><input type="checkbox" data-lock="${c.lock}"> lock</label>` : "") +
     `${c.parentCol ? `vs ${esc(app.draft.spread_ref)}` : c.label}</th>`).join("")}</tr></thead><tbody>`;
   for (const t of app.tenors) {
-    h += `<tr data-t="${t}"><td class="tn">${t}</td>`;
+    const xt = t in (app.draft.extra_tenors || {});
+    h += `<tr data-t="${t}"${xt ? ' class="xt"' : ""}><td class="tn">${t}</td>`;
     cols.forEach((c, i) => {
       const cls = c.sep ? "sep" : "";
       if (c.calc) h += `<td class="calc ${c.q ? "q" : ""} ${cls}" data-t="${t}" data-c="${i}"></td>`;
       else if (c.diff) h += `<td class="diff ${cls}" data-t="${t}" data-d="${c.diff}"></td>`;
       else {
-        const mk = MKT_FIELDS[c.f];
+        const mk = isMark(c.f) ? c.f : null;
         h += `<td class="${cls}${mk ? " mk" : ""}"${mk ? ` data-t="${t}" data-m="${mk}"` : ""}><input class="cell${c.skew ? " skew" : ""}" data-t="${t}" data-f="${c.f}" inputmode="decimal" autocomplete="off" ${c.skew ? 'placeholder=" "' : ""}>` +
           (mk ? `<div class="mq" data-t="${t}" data-m="${mk}"></div>` : "") + `</td>`;
       }
@@ -355,9 +397,93 @@ function buildGrid() {
     h += `</tr>`;
   }
   $("#grid").innerHTML = h + "</tbody>";
+  fillShiftControls();
+  renderExtras();
 }
 
-function publishedRow(t) { return app.published.tenors[t]; }
+const gridShape = () => JSON.stringify([app.tenors, allDeltas()]);
+// ATM and the 25Ds before the wings, so a wing's factor is calibrated to the new 25D
+const marksBaseFirst = () => ["atm", "rr25", "bf25", ...allMarks().filter((m) => m !== "atm" && m.slice(2) !== "25")];
+// the shift toolbar's fields and tenor range follow the pair's deltas and tenors
+function fillShiftControls() {
+  const f = $("#sh-field"), cur = f.value;
+  const fields = [["atm", "ATM"], ["spread", "ATM spread"],
+    ...["rr", "bf"].flatMap((w) => allDeltas().map((d) => [`${w}${d}`, `${d}D ${w.toUpperCase()}${d === 25 ? "" : " (unlocked)"}`])),
+    ["corr", "Correlation"], ["skew_atm", "Skew ATM"], ["skew_rr", "Skew RR"], ["skew_bf", "Skew BF"]];
+  f.innerHTML = fields.map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
+  f.value = fields.some(([v]) => v === cur) ? cur : "atm";
+  for (const el of [$("#sh-from"), $("#sh-to")]) {
+    const v = el.value || el.dataset.v;
+    el.innerHTML = app.tenors.map((t) => `<option>${t}</option>`).join("");
+    el.value = app.tenors.includes(v) ? v : el.dataset.v;
+  }
+}
+
+// ---- extra tenors and deltas: in the draft, published with the marks
+function renderExtras() {
+  const d = app.draft, el = $("#extras");
+  if (!el) return;
+  const off = !!d.excel;
+  const xt = Object.entries(d.extra_tenors || {});
+  el.innerHTML = `<span class="lbl" title="Extra tenors of this pair, e.g. 3W over an event between 2W and 1M. Marked and exported like the others until removed with ×, or on an end date if one is set">Extra tenors</span>` +
+    xt.map(([t, until]) => `<span class="chip" title="${esc(expiryTitle(t))}">${t} <span class="muted">ends</span>` +
+      `<input type="date" data-xt-until="${t}" value="${until || ""}" title="Optional: removed on this date by the leader app (empty: kept until removed with ×)">` +
+      `<button class="ghost x" data-xt-del="${t}" title="Remove ${t}">×</button></span>`).join("") +
+    `<input id="xt-new" class="tenor-in" placeholder="3W" title="A week, month or year tenor, e.g. 3W, 4M, 18M" ${off ? "disabled" : ""}>` +
+    `<button id="xt-add" class="ghost" ${off ? "disabled" : ""}>+ Tenor</button>` +
+    `<span class="lbl sep" title="Extra deltas of this pair, e.g. 5D or 1D for steep wings: RR and BF like the 10D, typed or as a factor of the 25D">Extra deltas</span>` +
+    (d.deltas || []).map((x) => `<span class="chip">${x}D <button class="ghost x" data-xd-del="${x}" title="Remove ${x}D">×</button></span>`).join("") +
+    `<input id="xd-new" class="tenor-in" placeholder="5" title="Delta 1–45, e.g. 5, 1 or 30" ${off ? "disabled" : ""}>` +
+    `<button id="xd-add" class="ghost" ${off ? "disabled" : ""}>+ Delta</button>` +
+    (off ? `<span class="muted">Marked in Excel: standard tenors and 25D/10D only</span>` : "");
+}
+async function addExtraTenor() {
+  const txt = $("#xt-new").value.trim().toUpperCase();
+  if (!txt) return;
+  try {
+    const r = await api(`/api/pairs/${app.current}/tenor-row`, { state: app.draft, tenor: txt });
+    if (app.tenors.includes(r.tenor)) throw new Error(`${r.tenor} is already a tenor of ${app.current}`);
+    app.draft.extra_tenors = { ...(app.draft.extra_tenors || {}), [r.tenor]: null };     // no end date unless one is set
+    app.draft.tenors[r.tenor] = r.row;
+    app.view.expiries = { ...app.view.expiries, [r.tenor]: r.expiry };
+    hideBanner("error");
+    $("#xt-new").value = "";
+  } catch (e) { showBanner(`Extra tenor: ${esc(e.message)}`, [["OK", () => hideBanner()]], "error"); return; }
+  reshape();
+}
+function addExtraDelta() {
+  const x = Number($("#xd-new").value.trim());
+  if (!Number.isInteger(x) || x < 1 || x > 45 || x === 25 || x === 10 || (app.draft.deltas || []).includes(x)) {
+    showBanner("Extra delta: a whole number from 1 to 45 that the pair doesn't mark yet, e.g. 5, 1 or 30.", [["OK", () => hideBanner()]], "error");
+    return;
+  }
+  app.draft.deltas = [...(app.draft.deltas || []), x].sort((a, b) => b - a);
+  $("#xd-new").value = "";
+  for (const r of Object.values(app.draft.tenors)) Object.assign(r, { [`rr${x}`]: null, [`rr${x}f`]: null, [`bf${x}`]: null, [`bf${x}f`]: null });
+  reshape();       // the preview fills them: 25D × the starting factor
+}
+function removeExtra(kind, key) {
+  const d = app.draft;
+  if (kind === "tenor") {
+    const { [key]: _, ...rest } = d.extra_tenors; d.extra_tenors = Object.keys(rest).length ? rest : null;
+    delete d.tenors[key];
+  } else {
+    const x = +key;
+    d.deltas = (d.deltas || []).filter((v) => v !== x); if (!d.deltas.length) d.deltas = null;
+    for (const r of Object.values(d.tenors)) for (const f of [`rr${x}`, `rr${x}f`, `bf${x}`, `bf${x}f`]) delete r[f];
+    if (d.wing_locks) { delete d.wing_locks[`rr${x}`]; delete d.wing_locks[`bf${x}`]; }
+  }
+  reshape();
+}
+async function reshape() {
+  app.tenors = tenorList();
+  app.dirty = true; updateButtons();
+  buildGrid();
+  await runPreview();
+}
+
+// a tenor the published version doesn't have (an extra one just added) compares with nothing
+function publishedRow(t) { return app.published.tenors[t] || {}; }
 function same(a, b) {
   if ((a === null || a === undefined) && (b === null || b === undefined)) return true;
   if (typeof a === "boolean" || typeof b === "boolean") return !!a === !!b;
@@ -369,10 +495,10 @@ function renderGrid() {
   const resolved = app.preview.resolved;
   for (const el of $$("#grid thead input[data-lock]")) {
     const k = el.dataset.lock;
-    el.checked = !!app.draft[k];
-    el.parentElement.classList.toggle("dirty", app.draft[k] !== app.published[k]);
+    el.checked = !!getLock(k);
+    el.parentElement.classList.toggle("dirty", !!getLock(k) !== !!getLock(k, app.published));
   }
-  for (const td of $$("#grid tbody td.tn")) td.title = expiryTitle(td.parentElement.dataset.t);   // refreshed with each update of the pair
+  for (const td of $$("#grid tbody td.tn")) td.title = expiryTitle(td.parentElement.dataset.t) + extraTitle(td.parentElement.dataset.t);   // refreshed with each update of the pair
   $("#rr-head").textContent = app.draft.rr_put ? "Risk reversal (put − call)" : "Risk reversal";
   for (const el of $$("#grid tbody input")) {
     const t = el.dataset.t, f = el.dataset.f;
@@ -383,13 +509,13 @@ function renderGrid() {
     if (document.activeElement !== el) el.value = col.skew && !v ? "" : fmt(v == null ? v : rrSign(f) * v, col.dp);
     el.classList.toggle("dirty", changed);
     // ATM, RR and BF: green above the published value, red below (as shown, so in put − call on favour-puts pairs)
-    const dir = changed && MKT_FIELDS[f] && v != null && pub != null ? Math.sign(rrSign(f) * (v - pub)) : 0;
+    const dir = changed && isMark(f) && v != null && pub != null ? Math.sign(rrSign(f) * (v - pub)) : 0;
     el.classList.toggle("up", dir > 0); el.classList.toggle("down", dir < 0);
-    const xl = !!app.draft.excel && (FOLLOW_FIELDS.includes(f) || f === "spread");
-    const fol = (app.draft.follow_market && FOLLOW_FIELDS.includes(f)) || xl;
+    const xl = !!app.draft.excel && (isFollowField(f) || f === "spread");
+    const fol = (app.draft.follow_market && isFollowField(f)) || xl;
     const held = f === "corr" && !movesWithBases();
     if (col.lock || fol || held || el.readOnly) {
-      const lockRo = !!col.lock && (col.role === "factor") !== !!app.draft[col.lock];
+      const lockRo = !!col.lock && (col.role === "factor") !== !!getLock(col.lock);
       const ro = fol || lockRo || held;
       el.readOnly = ro; el.tabIndex = ro ? -1 : 0;
       el.classList.toggle("ro", ro);
@@ -397,7 +523,7 @@ function renderGrid() {
         held ? (external() ? `Implied by the ATM ${app.draft.excel ? "from Excel" : "from FMD"} and the bases; it moves when either is published`
           : "Implied by the ATM and the bases (tick Move with bases in Setup to keep the correlation instead)") :
         fol ? "Follows FMD: published by the feed (untick Follow FMD in Setup to mark by hand)" :
-        lockRo ? (col.role === "factor" ? "Calibrated from the 10D quote (untick lock to edit)" : "25D × factor (untick lock to type the 10D)") : "";
+        lockRo ? (col.role === "factor" ? `Calibrated from the ${col.delta}D quote (untick lock to edit)` : `25D × factor (untick lock to type the ${col.delta}D)`) : "";
     }
     el.classList.toggle("follow", fol);
     if (f === "atm") el.classList.toggle("derived", movesWithBases() || !!app.draft.follow_parent);
@@ -407,8 +533,8 @@ function renderGrid() {
     }
   }
   for (const td of $$("#grid td.calc")) {
-    const col = cols[+td.dataset.c];
-    td.textContent = fmt(col.calc(resolved[td.dataset.t]), col.dp);
+    const col = cols[+td.dataset.c], r = resolved[td.dataset.t];
+    td.textContent = r ? fmt(col.calc(r), col.dp) : "";
   }
   // draft − published, as shown (put − call on favour-puts pairs); blank when unchanged
   for (const td of $$("#grid td.diff")) {
@@ -427,7 +553,7 @@ function renderParentCell(el, t) {
   const p = app.parent, pa = p?.atm?.[t], row = app.draft.tenors[t], fp = !!app.draft.follow_parent;
   const v = fp && row.psprd != null ? row.psprd : parentSpread(t, row.atm);
   if (document.activeElement !== el) el.value = fmt(v, 3);
-  const pub = fp && publishedRow(t).psprd != null ? publishedRow(t).psprd : parentSpread(t, app.view.resolved[t].mid.atm);
+  const pub = fp && publishedRow(t).psprd != null ? publishedRow(t).psprd : parentSpread(t, app.view.resolved[t]?.mid.atm);
   el.classList.toggle("dirty", !same(v, pub));
   const ro = app.draft.follow_market || !!app.draft.excel || pa == null;
   el.readOnly = ro; el.tabIndex = ro ? -1 : 0; el.classList.toggle("ro", ro);
@@ -459,7 +585,7 @@ function setDraftValue(t, f, v) {
   } else if (f === "corr") {
     row.corr = v;
   } else {
-    row[f] = v === null && !["atm", "rr10", "bf10"].includes(f) ? 0 : v;
+    row[f] = v === null && f !== "atm" && !/^(rr|bf)(?!25$)\d+$/.test(f) ? 0 : v;     // an empty wing: 25D × factor
   }
 }
 function revertDraftValue(t, f) {
@@ -471,8 +597,11 @@ function revertDraftValue(t, f) {
 // a cell's value and the cells calculated from it, restored together by Esc
 const LINKED = new Proxy({
   atm: ["atm", "corr", "psprd"], corr: ["corr", "atm"], psprd: ["psprd", "atm"],
-  rr10: ["rr10", "rr10f"], rr10f: ["rr10f", "rr10"], bf10: ["bf10", "bf10f"], bf10f: ["bf10f", "bf10"],
-}, { get: (o, f) => o[f] ?? [f] });
+}, { get: (o, f) => {
+  const m = /^(rr|bf)(\d+)(f?)$/.exec(f);        // a wing's quote and its factor: 10D, extra deltas
+  if (m && m[2] !== "25") return m[3] ? [f, f.slice(0, -1)] : [f, f + "f"];
+  return o[f] ?? [f];
+} });
 let focusSnap = null;
 
 function moveFocus(el, dRow) {
@@ -504,7 +633,8 @@ async function runPreview() {
     const a = document.activeElement, typing = a?.matches?.("#grid input.cell") ? a : null;
     const sync = (t, f) => { if (!(typing && typing.dataset.t === t && typing.dataset.f === f)) app.draft.tenors[t][f] = p.state.tenors[t][f]; };
     for (const t of app.tenors) {
-      for (const f of ["rr10", "rr10f", "bf10", "bf10f"]) sync(t, f);       // the calculated side of each 10D pair
+      if (!p.state.tenors[t]) continue;
+      for (const d of wingDeltas()) for (const f of [`rr${d}`, `rr${d}f`, `bf${d}`, `bf${d}f`]) sync(t, f);   // the calculated side of each wing
       if (app.draft.follow_parent) { sync(t, "atm"); sync(t, "psprd"); }     // ATM/spread computed from the parent
       if (app.draft.mode === "derived") { sync(t, "atm"); sync(t, "corr"); } // derived ATM/corr
     }
@@ -530,6 +660,7 @@ async function publish() {
   if (!app.dirty || $("#publish").disabled) return;      // settings alone are saved in Setup
   clearTimeout(previewTimer);
   $("#publish").disabled = true;
+  app.publishing = true;          // our own version's live event may come before the reply: not someone else's
   try {
     await api(`/api/pairs/${app.current}/publish`, {
       state: app.draft, expected_version: app.baseVersion, comment: $("#comment").value,
@@ -548,7 +679,7 @@ async function publish() {
       showBanner(`Publish failed: ${esc(e.message)}`, [], "error");
     }
     updateButtons();
-  }
+  } finally { app.publishing = false; }
 }
 async function rebase(latest) {
   // keep the draft, but compare against / build on the latest version
@@ -562,7 +693,7 @@ async function loadExportFile() {
   let r;
   try { r = await api(`/api/pairs/${app.current}/load-export`, { state: app.draft }); }
   catch (e) { showBanner(`Last export: ${esc(e.message)}`, [["OK", () => hideBanner()]], "error"); return; }
-  app.draft = pick(r.state);
+  app.draft = pick(r.state); app.tenors = tenorList();
   const at = localTime(new Date(r.mtime * 1000).toISOString());
   $("#comment").value = `From ${r.file} (${at})`;
   changed(); buildGrid(); renderAll();
@@ -724,7 +855,7 @@ function renderMarket() {
     el.textContent = (q.bid != null || q.offer != null) && q.bid !== q.offer ? `${two(q.bid)} / ${two(q.offer)}` : `mid ${two(q.mid)}`;
     if (q.alt_atm) el.textContent += "*";
     el.classList.toggle("stale", !!q.stale);
-    const v = res[t].mid[m] == null ? null : sg * res[t].mid[m];
+    const v = res[t]?.mid[m] == null ? null : sg * res[t].mid[m];
     let side = "";                   // only a real range: a source quoting bid = offer gives a mid, not a range
     const ranged = q.bid != null && q.offer != null && q.offer - q.bid > 1e-9;
     if (v != null && ranged && v < q.bid - 1e-9) side = `below bid by ${(q.bid - v).toFixed(3)}`;
@@ -743,10 +874,10 @@ function setFromMarket(t, m, v, force = false) {
   const row = app.draft.tenors[t];
   if (v == null || ((app.draft.follow_market || app.draft.excel) && !force)) return;
   if (m === "atm") setDraftValue(t, "atm", v);      // as typed: recalibrates the correlation / spread to the parent
-  else if (m === "rr10" || m === "bf10") {
+  else if (/^(rr|bf)\d+$/.test(m) && m.slice(2) !== "25") {
     const w = m.slice(0, 2);
-    row[m] = v;                                     // the 10D quote itself (input when unlocked or following FMD)
-    if (Math.abs(row[`${w}25`]) > 1e-12) row[`${w}10f`] = v / row[`${w}25`];   // locked: calibrate the factor
+    row[m] = v;                                     // the wing's quote itself (input when unlocked or following FMD)
+    if (Math.abs(row[`${w}25`]) > 1e-12) row[`${m}f`] = v / row[`${w}25`];   // locked: calibrate the factor
   } else row[m] = v;
 }
 
@@ -788,7 +919,7 @@ function renderFollow() {
         (f.waiting ? " · next publish due (throttled)" : "");
     if (h !== "down" && f.missing) html += ` · <span title="${esc((f.missing_list || []).join(", "))}">${f.missing} mark(s) without a fresh FMD quote keep their last value</span>`;
     for (const j of (h !== "down" && f.held) || [])
-      html += `<br>Held: ${j.tenor} ${MARK_LABEL[j.mark]}${rrSign(j.mark) < 0 ? " (P−C)" : ""} ${fmt(rrSign(j.mark) * j.from, 2)} → ${fmt(rrSign(j.mark) * j.to, 2)}, taken in ${j.accept_in}s unless it reverts`;
+      html += `<br>Held: ${j.tenor} ${markLabel(j.mark)}${rrSign(j.mark) < 0 ? " (P−C)" : ""} ${fmt(rrSign(j.mark) * j.from, 2)} → ${fmt(rrSign(j.mark) * j.to, 2)}, taken in ${j.accept_in}s unless it reverts`;
     html += " · You keep spread, skew and event weights." +
       (d.mode === "derived" ? " The correlation is implied from the FMD ATMs and the bases." : "");
   }
@@ -872,15 +1003,15 @@ function niceStep(raw) {
 }
 
 function renderTermChart() {
-  const T = app.tenors, res = app.preview.resolved;
+  const res = app.preview.resolved, T = app.tenors.filter((t) => res[t]);
   const series = [{ name: app.dirty ? "Draft" : "Mid", color: "var(--s1)", values: T.map((t) => res[t].mid.atm), dots: true }];
-  if (app.dirty) series.push({ name: "Published", color: "var(--muted)", dash: true, values: T.map((t) => app.view.resolved[t].mid.atm) });
+  if (app.dirty) series.push({ name: "Published", color: "var(--muted)", dash: true, values: T.map((t) => app.view.resolved[t]?.mid.atm ?? null) });
   if (T.some((t) => Math.abs(res[t].quoted.atm - res[t].mid.atm) > 1e-9))
     series.push({ name: "Fenics", color: "var(--s2)", values: T.map((t) => res[t].quoted.atm) });
   if (app.draft.mode === "derived") {
     ["var(--s3)", "var(--s4)"].forEach((color, k) => {
       const b = app.draft.bases[k], bv = app.view.bases[b];
-      if (bv) series.push({ name: b, color, values: T.map((t) => bv.atm[t]) });
+      if (bv) series.push({ name: b, color, values: T.map((t) => bv.atm[t] ?? null) });
     });
   }
   if (app.parent && app.draft.mode !== "derived" && !app.parent.missing)
@@ -897,15 +1028,15 @@ function renderTermChart() {
 }
 
 // ---------------------------------------------------------------- 3D surface
-const TENOR_DAYS = { ON: 1, "1W": 7, "2W": 14, "1M": 30, "2M": 61, "3M": 91, "6M": 182, "9M": 273, "1Y": 365, "2Y": 730, "3Y": 1095, "4Y": 1461, "5Y": 1826 };
-const DELTAS = ["10D P", "25D P", "ATM", "25D C", "10D C"];
+// smile points left to right: the puts from the far wing in, ATM, the calls out (10P 25P ATM 25C 10C)
+const smileLabels = (ds) => [...[...ds].reverse().map((d) => `${d}D P`), "ATM", ...ds.map((d) => `${d}D C`)];
 const SEQ = ["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"];
 const view3d = { yaw: -0.65, pitch: 0.55 };
 
-function smile(r) {   // pillar vols left to right: 10P 25P ATM 25C 10C
-  if (r.atm == null) return null;
-  return [r.atm + r.bf10 - r.rr10 / 2, r.atm + r.bf25 - r.rr25 / 2, r.atm,
-          r.atm + r.bf25 + r.rr25 / 2, r.atm + r.bf10 + r.rr10 / 2];
+function smile(r, ds = allDeltas()) {   // pillar vols, as smileLabels
+  if (!r || r.atm == null) return null;
+  const v = (d, s) => (r[`bf${d}`] == null ? null : r.atm + r[`bf${d}`] + (s * r[`rr${d}`]) / 2);
+  return [...[...ds].reverse().map((d) => v(d, -1)), r.atm, ...ds.map((d) => v(d, 1))];
 }
 function hexRgb(h) { return [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)); }
 function mix(a, b, t) { const A = hexRgb(a), B = hexRgb(b); return `rgb(${A.map((v, i) => Math.round(v + (B[i] - v) * t)).join(",")})`; }
@@ -926,22 +1057,24 @@ function divColor(t) {   // t in [-1, 1]: blue (down) - gray - red (up)
 function surfaceData() {
   const src = $('input[name="s3-src"]:checked').value;
   const res = app.preview.resolved;
-  const T = app.tenors.filter((t) => res[t].mid.atm != null);
+  const T = app.tenors.filter((t) => res[t]?.mid.atm != null);
+  const ds = allDeltas(), n = 2 * ds.length + 1;
   let grid;
   if (src === "diff") {
     grid = T.map((t) => {
-      const a = smile(res[t].mid), b = smile(app.view.resolved[t].mid);
-      return a && b ? a.map((v, j) => v - b[j]) : [0, 0, 0, 0, 0];
+      const a = smile(res[t].mid, ds), b = smile(app.view.resolved[t]?.mid, ds);
+      return a && b ? a.map((v, j) => (v == null || b[j] == null ? 0 : v - b[j])) : Array(n).fill(0);
     });
   } else {
-    grid = T.map((t) => smile(src === "quoted" ? res[t].quoted : res[t].mid));
+    grid = T.map((t) => smile(src === "quoted" ? res[t].quoted : res[t].mid, ds));
   }
-  return { T, grid, diff: src === "diff" };
+  return { T, grid, diff: src === "diff", labels: smileLabels(ds) };
 }
 
 function render3D() {
   const el = $("#surf3d");
-  const { T, grid, diff } = surfaceData();
+  const { T, grid, diff, labels } = surfaceData();
+  const N = labels.length;
   if (T.length < 2) { el.innerHTML = `<div class="muted" style="padding:20px">Need at least two tenors with an ATM</div>`; return; }
   const W = el.clientWidth || 900, H = el.clientHeight || 560;
   const flat = grid.flat();
@@ -952,9 +1085,9 @@ function render3D() {
 
   // model coordinates: x = delta (-1..1), y = tenor (-1 short .. 1 long), z = vol (-0.42..0.42)
   const ax = $("#s3-axis").value;
-  const tpos = T.map((t) => (ax === "sqrt" ? Math.sqrt(TENOR_DAYS[t]) : T.indexOf(t)));
+  const tpos = T.map((t) => (ax === "sqrt" ? Math.sqrt(tenorDays(t)) : T.indexOf(t)));
   const ty = (i) => -1 + (2 * (tpos[i] - tpos[0])) / (tpos[tpos.length - 1] - tpos[0]);
-  const dx = (j) => -1 + j / 2;
+  const dx = (j) => -1 + (2 * j) / (N - 1);
   const vz = (v) => -0.42 + (0.84 * (v - lo)) / (hi - lo);
 
   const { yaw, pitch } = view3d, cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
@@ -970,7 +1103,7 @@ function render3D() {
   // floor grid + back walls
   const zf = -0.42;
   const line = (a, b, attrs) => `<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" ${attrs}/>`;
-  for (let j = 0; j < 5; j++) s += line(P(dx(j), -1, zf), P(dx(j), 1, zf), `stroke="var(--grid)"`);
+  for (let j = 0; j < N; j++) s += line(P(dx(j), -1, zf), P(dx(j), 1, zf), `stroke="var(--grid)"`);
   T.forEach((_, i) => (s += line(P(-1, ty(i), zf), P(1, ty(i), zf), `stroke="var(--grid)"`)));
   // vertical axis on the back corner (the one farthest from the viewer)
   const corners = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
@@ -986,7 +1119,7 @@ function render3D() {
 
   // quads, painted back to front
   const quads = [];
-  for (let i = 0; i < T.length - 1; i++) for (let j = 0; j < 4; j++) {
+  for (let i = 0; i < T.length - 1; i++) for (let j = 0; j < N - 1; j++) {
     const pts = [[i, j], [i, j + 1], [i + 1, j + 1], [i + 1, j]].map(([a, b]) => P(dx(b), ty(a), vz(grid[a][b])));
     const avg = (grid[i][j] + grid[i][j + 1] + grid[i + 1][j] + grid[i + 1][j + 1]) / 4;
     quads.push({ pts, depth: pts.reduce((m, p) => m + p[2], 0) / 4, fill: color(avg) });
@@ -997,9 +1130,9 @@ function render3D() {
   // axis labels on the front floor edges
   const front = corners.reduce((b, c) => (P(c[0], c[1], 0)[2] < P(b[0], b[1], 0)[2] ? c : b));
   const yEdge = front[1], xEdge = front[0];
-  DELTAS.forEach((d, j) => { const a = P(dx(j), yEdge * 1.12, zf); s += `<text x="${a[0]}" y="${a[1] + 12}" text-anchor="middle">${d}</text>`; });
+  labels.forEach((d, j) => { const a = P(dx(j), yEdge * 1.12, zf); s += `<text x="${a[0]}" y="${a[1] + 12}" text-anchor="middle">${d}</text>`; });
   T.forEach((t, i) => {
-    if (ax === "sqrt" && ["1W", "2W", "2M", "9M", "4Y"].includes(t)) return;   // crowded at the short end
+    if (ax === "sqrt" && (["1W", "2W", "2M", "9M", "4Y"].includes(t) || !STD_TENOR_DAYS[t])) return;   // crowded at the short end
     const a = P(xEdge * 1.12, ty(i), zf); s += `<text x="${a[0]}" y="${a[1] + 12}" text-anchor="middle">${t}</text>`;
   });
   const da = P(0, yEdge * 1.32, zf), ta = P(xEdge * 1.36, 0, zf);
@@ -1011,7 +1144,7 @@ function render3D() {
 
   // hover: nearest vertex
   const verts = [];
-  T.forEach((t, i) => grid[i].forEach((v, j) => { const p = P(dx(j), ty(i), vz(v)); verts.push({ t, d: DELTAS[j], v, x: p[0], y: p[1], depth: p[2] }); }));
+  T.forEach((t, i) => grid[i].forEach((v, j) => { const p = P(dx(j), ty(i), vz(v)); verts.push({ t, d: labels[j], v, x: p[0], y: p[1], depth: p[2] }); }));
   const svg = el.firstChild, hov = $(".hov", svg);
   svg.onmousemove = (ev) => {
     if (drag3d) return;
@@ -1629,11 +1762,12 @@ const setting = (v) => (v && typeof v === "object" && !Array.isArray(v) && !Obje
 function otherEdits(d = app.draft, p = app.published) {
   const ck = (k) => JSON.stringify(setting(d[k])) !== JSON.stringify(setting(p[k]));
   const skip = new Set([...(ck("mode") || ck("bases") || (d.mode === "derived" && external(d) !== external(p)) ? ["corr"] : []), ...(ck("spread_ref") || ck("follow_parent") ? ["psprd"] : []),
-    ...(!p.follow_market && d.follow_market ? FOLLOW_FIELDS : [])]);
+    ]);
+  const skipped = (f) => skip.has(f) || (!p.follow_market && d.follow_market && isFollowField(f));
   const keys = STATE_KEYS.filter((k) => !SETUP_KEYS.includes(k) && k !== "pair" && k !== "tenors" && JSON.stringify(d[k]) !== JSON.stringify(p[k]));
   const cells = [];
   for (const t of app.tenors) for (const [f, v] of Object.entries(d.tenors[t]))
-    if (!skip.has(f) && !same(v, p.tenors[t]?.[f])) cells.push([t, f]);
+    if (!skipped(f) && !same(v, p.tenors[t]?.[f])) cells.push([t, f]);
   return { keys, cells };
 }
 function setupDirty() {
@@ -1660,8 +1794,9 @@ async function saveSettings() {
   // put back the trader's other edits (marks, weights, locks) on the saved version
   let kept = 0;
   for (const k of edits.keys) if (JSON.stringify(oldDraft[k]) !== JSON.stringify(app.draft[k])) { app.draft[k] = clone(oldDraft[k]); kept++; }
+  for (const t of Object.keys(oldDraft.tenors)) if (!app.draft.tenors[t]) app.draft.tenors[t] = clone(oldDraft.tenors[t]);   // an extra tenor added in the draft
   for (const [t, f] of edits.cells) if (!same(oldDraft.tenors[t][f], app.draft.tenors[t][f])) { app.draft.tenors[t][f] = oldDraft.tenors[t][f]; kept++; }
-  if (kept) { changed(); renderGrid(); }
+  if (kept) { app.tenors = tenorList(); buildGrid(); changed(); renderGrid(); }
   showTab("surface");             // back to the marks once the settings are saved
   await loadPairs();
   showBanner(`Settings saved${kept ? ". Your other edits are still in the draft; publish them when ready." : "."}`, [["OK", () => hideBanner()]]);
@@ -1734,7 +1869,7 @@ function onSetupChange() {
   if (follow && !d.follow_market) {
     // start from the market so the publish that switches it on already shows FMD levels
     let n = 0;
-    for (const t of app.tenors) for (const m of ["atm", "rr25", "bf25", "rr10", "bf10"]) {
+    for (const t of app.tenors) for (const m of marksBaseFirst()) {
       const q = app.market?.view?.[t]?.[m];
       if (q && q.mid != null && !q.stale && !q.alt_atm) { setFromMarket(t, m, Math.round(q.mid * 1e4) / 1e4, true); n++; }
     }
@@ -1742,10 +1877,10 @@ function onSetupChange() {
   }
   if (!follow && d.follow_market) {
     // FMD 10D quotes can give factors a locked factor can't hold (25D near zero, opposite signs)
-    for (const w of ["rr", "bf"]) {
-      if (d[`lock_${w}10f`] && app.tenors.some((t) => !(d.tenors[t][`${w}10f`] > 0))) {
-        d[`lock_${w}10f`] = false;
-        showBanner(`Follow FMD off: the ${w.toUpperCase()} 10D factor lock was unticked because some FMD factors are zero or negative. The 10D quotes stay as they are.`, [["OK", () => hideBanner()]]);
+    for (const w of ["rr", "bf"]) for (const x of wingDeltas(d)) {
+      if (getLock(`lock_${w}${x}f`, d) && app.tenors.some((t) => !(d.tenors[t][`${w}${x}f`] > 0))) {
+        setLock(`lock_${w}${x}f`, false, d);
+        showBanner(`Follow FMD off: the ${w.toUpperCase()} ${x}D factor lock was unticked because some FMD factors are zero or negative. The ${x}D quotes stay as they are.`, [["OK", () => hideBanner()]]);
       }
     }
   }
@@ -1754,8 +1889,8 @@ function onSetupChange() {
   d.excel = !follow && $("#su-excel").checked;
   if (wasExcel && !d.excel) {
     // Excel's 10D quotes can give factors a locked factor can't hold
-    for (const w of ["rr", "bf"]) {
-      if (d[`lock_${w}10f`] && app.tenors.some((t) => !(d.tenors[t][`${w}10f`] > 0))) d[`lock_${w}10f`] = false;
+    for (const w of ["rr", "bf"]) for (const x of wingDeltas(d)) {
+      if (getLock(`lock_${w}${x}f`, d) && app.tenors.some((t) => !(d.tenors[t][`${w}${x}f`] > 0))) setLock(`lock_${w}${x}f`, false, d);
     }
   }
   d.alerts_off = $("#su-alerts-off").checked;
@@ -1779,12 +1914,12 @@ async function renderHistory() {
 
 // ---------------------------------------------------------------- changes vs an earlier EOD
 // the EOD of a day is the last version published before the next local midnight
-const CH_FIELDS = [
+const chFields = () => [
   { f: "corr", label: "Corr", dp: 3, row: true, derived: true },
   { f: "atm", label: "ATM", dp: 3 },
   { f: "spread", label: "Spread", dp: 2, row: true },
-  { f: "rr25", label: "RR 25D", dp: 3 }, { f: "rr10", label: "RR 10D", dp: 3 },
-  { f: "bf25", label: "BF 25D", dp: 3 }, { f: "bf10", label: "BF 10D", dp: 3 },
+  ...allDeltas().map((d) => ({ f: `rr${d}`, label: `RR ${d}D`, dp: 3 })),
+  ...allDeltas().map((d) => ({ f: `bf${d}`, label: `BF ${d}D`, dp: 3 })),
 ];
 function chRefDay() {
   const d = new Date(); d.setHours(0, 0, 0, 0);
@@ -1814,12 +1949,12 @@ function renderChanges() {
   const dayTxt = c?.day.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
   $("#ch-info").textContent = !c ? "" : !ref ? `${app.current} was not published before the end of ${dayTxt}` :
     `Now: ${app.dirty ? "your draft" : `v${app.baseVersion}`}. EOD ${dayTxt}: v${ref.record.version}, ${localTime(ref.record.ts)} by ${ref.record.user} (${ref.record.source})`;
-  const fields = CH_FIELDS.filter((x) => !x.derived || app.draft.mode === "derived");
+  const fields = chFields().filter((x) => !x.derived || app.draft.mode === "derived");
   const val = (res, rec, t, x) => {
     const v = x.row ? rec.tenors[t]?.[x.f] : res[t]?.mid?.[x.f];
     return v == null ? null : rrSign(x.f) * v;
   };
-  let h = `<thead><tr><th class="tn"></th>${fields.map((x) => `<th class="grp sep" colspan="3">${esc(x.label)}${RR_FIELDS.includes(x.f) && app.draft.rr_put ? " (put − call)" : ""}</th>`).join("")}</tr>
+  let h = `<thead><tr><th class="tn"></th>${fields.map((x) => `<th class="grp sep" colspan="3">${esc(x.label)}${isRR(x.f) && app.draft.rr_put ? " (put − call)" : ""}</th>`).join("")}</tr>
     <tr><th class="tn">Tenor</th>${fields.map(() => `<th class="sep">Now</th><th>EOD</th><th>Δ</th>`).join("")}</tr></thead><tbody>`;
   for (const t of app.tenors) {
     h += `<tr><td class="tn">${t}</td>`;
@@ -1878,6 +2013,7 @@ function connect() {
     flash = ev.pair;
     clearTimeout(t); t = setTimeout(() => loadPairs(flash), 150);
     if (!app.current) return;
+    if (app.publishing && ev.pair === app.current && ev.user === app.me.user && ev.source === "manual") return;   // our own publish
     const auto = (ev.source === "market" && app.published.follow_market) || ev.source === "propagation" ||
       (ev.source === "excel" && app.published.excel);
     if (ev.pair === app.current && ev.version > app.baseVersion && auto) {
@@ -1906,13 +2042,18 @@ function connect() {
 async function quietUpdate(source) {
   const v = await api(`/api/pairs/${app.current}`);
   if (!app.dirty) {
+    const shape = gridShape();
     app.view = v; app.baseVersion = v.record.version; app.published = pick(v.record); app.draft = pick(v.record);
+    app.tenors = tenorList();
     app.preview = { state: v.record, resolved: v.resolved, warnings: v.record.warnings || [] };
+    if (gridShape() !== shape) buildGrid();       // an extra tenor or delta added or removed (e.g. its end date)
     renderAll();
   } else if (source === "market" || source === "excel") {   // take the feed's / Excel's fields, keep the trader's other edits
     const pub = pick(v.record);
-    const fields = source === "excel" ? FOLLOW_FIELDS.concat("spread") : FOLLOW_FIELDS;
-    for (const t of app.tenors) for (const f of fields) app.draft.tenors[t][f] = pub.tenors[t][f];
+    for (const t of app.tenors) {
+      if (!pub.tenors[t] || !app.draft.tenors[t]) continue;
+      for (const f of Object.keys(pub.tenors[t])) if (isFollowField(f) || (source === "excel" && f === "spread")) app.draft.tenors[t][f] = pub.tenors[t][f];
+    }
     app.view = v; app.baseVersion = v.record.version; app.published = pub;
     runPreview();
   } else {                              // propagation: re-derive the draft on the new bases
@@ -2012,7 +2153,7 @@ function wire() {
   });
   grid.addEventListener("change", (e) => {
     if (!e.target.dataset.lock) return;
-    app.draft[e.target.dataset.lock] = e.target.checked;
+    setLock(e.target.dataset.lock, e.target.checked);
     changed(); renderGrid(); renderMarket();
   });
   grid.addEventListener("focusin", (e) => {
@@ -2060,8 +2201,8 @@ function wire() {
   };
   $("#sh-mkt").onclick = () => {
     if (followBlock()) return;
-    const f = $("#sh-field").value, m = MKT_FIELDS[f];
-    if (!m) { showBanner("Market levels exist for ATM, 25D/10D RR and 25D/10D BF only.", [["OK", () => hideBanner()]]); return; }
+    const f = $("#sh-field").value, m = isMark(f) ? f : null;
+    if (!m) { showBanner("Market levels exist for ATM, RR and BF only.", [["OK", () => hideBanner()]]); return; }
     const i0 = app.tenors.indexOf($("#sh-from").value), i1 = app.tenors.indexOf($("#sh-to").value);
     let n = 0;
     for (const t of app.tenors.slice(Math.min(i0, i1), Math.max(i0, i1) + 1)) {
@@ -2076,7 +2217,7 @@ function wire() {
     const i0 = app.tenors.indexOf($("#sh-from").value), i1 = app.tenors.indexOf($("#sh-to").value);
     let n = 0;
     for (const t of app.tenors.slice(Math.min(i0, i1), Math.max(i0, i1) + 1))
-      for (const m of ["atm", "rr25", "bf25", "rr10", "bf10"]) {      // 25D before 10D (factor calibration)
+      for (const m of marksBaseFirst()) {      // 25D before the wings (factor calibration)
         const q = mktQuote(t, m); if (q && q.mid != null && !q.stale) { setFromMarket(t, m, q.mid); n++; }
       }
     if (n) { changed(); renderGrid(); }
@@ -2092,21 +2233,37 @@ function wire() {
   });
   window.addEventListener("beforeunload", (e) => { if (app.dirty) { e.preventDefault(); e.returnValue = ""; } });
 
-  // shift toolbar
-  const shiftable = [["atm", "ATM"], ["spread", "ATM spread"], ["rr25", "25D RR"], ["rr10", "10D RR (unlocked)"],
-    ["bf25", "25D BF"], ["bf10", "10D BF (unlocked)"],
-    ["corr", "Correlation"], ["skew_atm", "Skew ATM"], ["skew_rr", "Skew RR"], ["skew_bf", "Skew BF"]];
-  $("#sh-field").innerHTML = shiftable.map(([f, l]) => `<option value="${f}">${l}</option>`).join("");
+  // extra tenors and deltas
+  const ex = $("#extras");
+  ex.addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    if (b.id === "xt-add") addExtraTenor();
+    else if (b.id === "xd-add") addExtraDelta();
+    else if (b.dataset.xtDel) removeExtra("tenor", b.dataset.xtDel);
+    else if (b.dataset.xdDel) removeExtra("delta", b.dataset.xdDel);
+  });
+  ex.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    if (e.target.id === "xt-new") addExtraTenor();
+    if (e.target.id === "xd-new") addExtraDelta();
+  });
+  ex.addEventListener("change", (e) => {
+    const t = e.target.dataset.xtUntil; if (!t) return;
+    app.draft.extra_tenors = { ...app.draft.extra_tenors, [t]: e.target.value || null };
+    changed(); renderGrid();
+  });
+
+  // shift toolbar (fields and tenors per pair: fillShiftControls)
   $("#sh-apply").onclick = () => {
     const f = $("#sh-field").value, amt = Number($("#sh-amt").value);
     const i0 = app.tenors.indexOf($("#sh-from").value), i1 = app.tenors.indexOf($("#sh-to").value);
     if (!Number.isFinite(amt)) return;
-    if (FOLLOW_FIELDS.includes(f) && followBlock()) return;
+    if (isFollowField(f) && followBlock()) return;
     for (const t of app.tenors.slice(Math.min(i0, i1), Math.max(i0, i1) + 1)) {
       const row = app.draft.tenors[t];
       if (f === "corr") { if (row.corr !== null) row.corr = Math.max(-1, Math.min(1, row.corr + amt)); continue; }
       if (row[f] === null) continue;
-      if ((f === "rr10" && app.draft.lock_rr10f) || (f === "bf10" && app.draft.lock_bf10f)) continue;
+      if (/^(rr|bf)\d+$/.test(f) && f.slice(2) !== "25" && getLock(`lock_${f}f`)) continue;
       row[f] = Math.round((row[f] + rrSign(f) * amt) * 1e6) / 1e6;      // amounts in the RR convention shown
       if (f === "atm" && movesWithBases()) row.corr = null;
       if (f === "atm" && app.draft.follow_parent) row.psprd = null;
@@ -2147,7 +2304,7 @@ function wire() {
   $("#history").addEventListener("click", (e) => {
     if (!e.target.matches(".restore")) return;
     const r = app.historyRows[+e.target.dataset.i];
-    app.draft = pick(r); buildGrid(); changed();
+    app.draft = pick(r); app.tenors = tenorList(); buildGrid(); changed();
     $("#comment").value = `restore v${r.version}`;
     $$(".tabs button")[0].click();
   });
@@ -2236,9 +2393,7 @@ async function init() {
     w.className = "warn"; w.textContent = " · config.json problem (hover)"; w.title = app.me.config_error;
     $("#datadir").after(w);
   }
-  const opts = app.tenors.map((t) => `<option>${t}</option>`).join("");
-  $("#sh-from").innerHTML = opts; $("#sh-to").innerHTML = opts;
-  $("#sh-from").value = "1M"; $("#sh-to").value = "1Y";
+  $("#sh-from").dataset.v = "1M"; $("#sh-to").dataset.v = "1Y";
   try { app.prefs = await api("/api/prefs"); } catch { app.prefs = {}; }
   wire();
   loadFenics();

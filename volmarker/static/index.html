@@ -63,11 +63,12 @@
           <span class="lbl">to</span><select id="sh-to"></select>
           <button id="sh-apply">Apply to draft</button>
           <button id="sh-mkt" title="Set the selected field over the tenor range to the broker mid">Market mid</button>
-          <button id="sh-mktall" title="Take ATM, 25D/10D RR and BF from the market over the tenor range">Market surface</button>
+          <button id="sh-mktall" title="Take ATM, RR and BF (every delta the pair marks) from the market over the tenor range">Market surface</button>
           <div class="spacer"></div>
           <label class="check" title="Columns with the change from the published value"><input id="diff-show" type="checkbox" checked> Δ</label>
           <label class="check"><input id="mkt-show" type="checkbox" checked> Market</label>
           <select id="mkt-brand" title="Broker source"><option value="auto">Auto (FMD first)</option><option value="best">Best of brands</option></select>
+          <div id="extras" class="toolbar-row extras"></div>
           <div class="toolbar-row">
             <span class="lbl">Skew expiry</span>
             <input id="skew-exp" type="datetime-local">

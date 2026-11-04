@@ -8,7 +8,9 @@ updates are merged onto them.
 
 from __future__ import annotations
 
-from ..conventions import TENORS
+import re
+
+from ..conventions import TENOR_RE, TENORS
 
 # FIX tags (spec section 6.2)
 SECURITY_ID, UPDATE_ACTION = 48, 279
@@ -22,6 +24,17 @@ PRICE_TYPES = {
     "RR25": "rr25", "RR10": "rr10", "RR5": "rr5",
     "S25": "bf25", "S10": "bf10", "S5": "bf5",
 }
+
+# any other delta the same way: RR1 -> rr1, S30 -> bf30 (pairs with extra deltas)
+PRICE_TYPE_RE = re.compile(r"^(RR|S)(\d{1,2})$")
+
+
+def price_mark(ptype: str) -> str | None:
+    if ptype in PRICE_TYPES:
+        return PRICE_TYPES[ptype]
+    m = PRICE_TYPE_RE.match(ptype)
+    return f"{'rr' if m.group(1) == 'RR' else 'bf'}{int(m.group(2))}" if m else None
+
 
 # "1D".."14D" are dailies and are kept as they are (not merged into ON)
 TENOR_ALIASES = {"O/N": "ON", "ON": "ON", "12M": "1Y", "24M": "2Y", "36M": "3Y",
@@ -64,7 +77,7 @@ class QuoteBook:
             q["tenor"] = norm_tenor(entry[TENOR])
         if entry.get(PRICE_TYPE):
             q["ptype"] = entry[PRICE_TYPE].strip().upper()
-            q["mark"] = PRICE_TYPES.get(q["ptype"])
+            q["mark"] = price_mark(q["ptype"])
         for tag, key in ((BRAND, "brand"), (CUTOFF, "cut"), (TRANSACT_TIME, "ts")):
             if entry.get(tag):
                 q[key] = entry[tag]
@@ -77,10 +90,12 @@ class QuoteBook:
         return q.get("pair")
 
     def pair_quotes(self, pair: str) -> list[dict]:
-        """Usable quotes for one pair: known tenor and a mapped mark."""
+        """Usable quotes for one pair: known tenor (standard, daily, or another week, month or
+        year tenor a pair may mark extra) and a mapped mark."""
         return [dict(q) for q in self.by_id.values()
                 if q.get("pair") == pair and q.get("mark")
-                and (q.get("tenor") in TENORS or daily_n(q.get("tenor")) is not None)]
+                and (q.get("tenor") in TENORS or daily_n(q.get("tenor")) is not None
+                     or TENOR_RE.match(q.get("tenor") or ""))]
 
 
 def daily_n(tenor: str | None) -> int | None:

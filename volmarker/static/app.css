@@ -21,6 +21,7 @@
   --up: #d9f2d9; --up-ink: #0b5e0b;
   --down: #fbdcdc; --down-ink: #8a1f1f;
   --calc: #f3f2ee;
+  --xt-bg: #eaf2fc;   /* extra tenors and deltas */
   --good: #0ca30c;
   --warning: #fab219;
   --critical: #d03b3b;
@@ -34,7 +35,7 @@
     --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, 0.10);
     --accent: #3987e5; --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
     --dirty: #3d3110; --dirty-ink: #ffd77a; --calc: #151514;
-    --up: #133d16; --up-ink: #8fe39a; --down: #45191a; --down-ink: #ffa3a3;
+    --up: #133d16; --up-ink: #8fe39a; --down: #45191a; --down-ink: #ffa3a3; --xt-bg: #172434;
   }
 }
 :root[data-theme="dark"] {
@@ -43,7 +44,7 @@
   --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, 0.10);
   --accent: #3987e5; --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
   --dirty: #3d3110; --dirty-ink: #ffd77a; --calc: #151514;
-  --up: #133d16; --up-ink: #8fe39a; --down: #45191a; --down-ink: #ffa3a3;
+  --up: #133d16; --up-ink: #8fe39a; --down: #45191a; --down-ink: #ffa3a3; --xt-bg: #172434;
 }
 
 * { box-sizing: border-box; }
@@ -155,6 +156,16 @@ main { flex: 1; overflow: auto; padding: 14px 18px 30px; min-width: 0; }
 .setup .su-save { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .grid.small input.tq { width: 64px; text-align: right; font-family: var(--mono); }
 .toolbar-row { flex-basis: 100%; display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+/* extra tenors and deltas of the pair */
+.toolbar-row.extras { justify-content: flex-start; }
+.toolbar-row.extras .lbl.sep { margin-left: 14px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 2px 1px 8px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--xt-bg); font-variant-numeric: tabular-nums; }
+.chip input[type="date"] { padding: 0 2px; font-size: 12px; }
+.chip button.x { padding: 0 6px; line-height: 1.2; }
+input.tenor-in { width: 4.5em; }
+.grid tr.xt td.tn { background: var(--xt-bg); font-style: italic; }
+.grid th.xd { background: var(--xt-bg); }
 .lbl { color: var(--muted); font-size: 12px; }
 
 .gridwrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }

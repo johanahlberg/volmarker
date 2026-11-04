@@ -166,12 +166,14 @@ def forward_date(pair: str, spot: date, months: int, holidays: dict[str, set]) -
     return f
 
 
-def tenor_dates(pair: str, today: date, holidays: dict[str, set]) -> dict[str, date]:
-    """Expiry date per tenor, by the market convention above."""
+def tenor_dates(pair: str, today: date, holidays: dict[str, set],
+                tenors: list[str] | None = None) -> dict[str, date]:
+    """Expiry date per tenor (the standard ones, or `tenors`, e.g. with a pair's extra
+    3W or 4M), by the market convention above."""
     ccys = split_pair(pair)
     spot = spot_date(pair, today, holidays)
     out = {}
-    for t in TENORS:
+    for t in tenors or TENORS:
         n, unit = (1, "D") if t == "ON" else (int(t[:-1]), t[-1])
         if unit == "D":
             d = today
@@ -335,9 +337,8 @@ def interpolate_atm(pair: str, atm_by_tenor: dict[str, float], today: date,
                     holidays: dict[str, set]) -> dict[date, float]:
     """ATM vol for arbitrary expiry dates, interpolating total variance in
     weighted time between marked tenors (flat forward weighted vol beyond)."""
-    tdates = tenor_dates(pair, today, holidays)
-    pillars = [(tdates[t], atm_by_tenor[t]) for t in TENORS
-               if atm_by_tenor.get(t) is not None]
+    tdates = tenor_dates(pair, today, holidays, list(atm_by_tenor))
+    pillars = sorted((tdates[t], v) for t, v in atm_by_tenor.items() if v is not None)
     if not pillars:
         return {}
     end = max([p[0] for p in pillars] + targets)
@@ -499,8 +500,8 @@ def calibrate_to_quotes(pair: str, atm_by_tenor: dict[str, float], today: date,
         labels.setdefault(d, []).append(ev.get("desc") or "")
     ext = sorted((d, v) for d, v in quotes.items() if d > today and v and v > 0)
     warnings: list[str] = []
-    tdates = tenor_dates(pair, today, holidays)
-    pillar = {tdates[t]: t for t in TENORS if atm_by_tenor.get(t) is not None}
+    tdates = tenor_dates(pair, today, holidays, list(atm_by_tenor))
+    pillar = {tdates[t]: t for t, v in atm_by_tenor.items() if v is not None}
     if not pillar:
         return {"intervals": [], "events": [], "warnings": ["No ATM marks to interpolate"], "anchors": []}
     anchors = [(d, atm_by_tenor[pillar[d]] - v) for d, v in ext if d in pillar]   # our mark - their mid

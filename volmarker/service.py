@@ -19,7 +19,7 @@ from . import exports
 from .alerts import AlertEngine, deviation, iso, level
 from .analysis import Exporter
 from .tz import to_local
-from .conventions import TENORS, normalise_pair
+from .conventions import TENORS, norm_extra_tenor, normalise_pair
 from . import bbg, weights_export
 from .calendar import (DEFAULT_CUT, calibrate_to_quotes, cumulative_weights, daily_dates, default_events, expiry_for,
                        implied_daily_weights, interpolate_atm, is_good_day, normalise_weights,
@@ -30,13 +30,19 @@ from .fenics import FenicsLogin
 from .fmd.book import daily_n
 from .market import compare, market_view, parse_fix_time
 from .store import ConflictError, LockTimeout, Store, _reverse_lines, atomic_write, write_shared
-from .surface import (ALERT_MARKS, FOLLOW_FIELDS, apply_derivation, apply_parent, check_surface, clean_state,
-                      new_state, now_iso, resolve, skew_active)
+from .surface import (all_marks, apply_derivation, apply_parent, check_surface, clean_state, follow_fields,
+                      new_state, now_iso, resolve, skew_active, tenor_list, tol_mark)
 
 log = logging.getLogger("volmarker")
 
+
+def _atms(rec: dict) -> dict[str, float | None]:
+    """ATM per tenor, the pair's extra tenors included (pillars of the interpolation)."""
+    return {t: rec["tenors"][t]["atm"] for t in tenor_list(rec) if t in rec["tenors"]}
+
 STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type",
-              "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "inverse", "follow_bases", "tenors"]
+              "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "inverse", "follow_bases",
+              "deltas", "extra_tenors", "wing_locks", "tenors"]
 LEADER_STALE = 45.0
 FEED_STALE = 15.0
 FOLLOW_STALE = 30.0
@@ -139,7 +145,7 @@ class Service:
             return None
         bases = {b: self._resolved_mid_atm(b) for b in (rec.get("bases") or [])}
         holidays, _ = self.store.load_calendar()
-        expiries = {t: d.isoformat() for t, d in tenor_dates(pair, date.today(), holidays).items()}
+        expiries = {t: d.isoformat() for t, d in tenor_dates(pair, date.today(), holidays, tenor_list(rec)).items()}
         return {"record": rec, "resolved": resolve(rec), "bases": bases,
                 "dependents": self.dependents(pair), "expiries": expiries}
 
@@ -213,10 +219,10 @@ class Service:
             return {"rows": [], "events": [], "warnings": [], "feed": m["feed"], "basis": basis}
         dd = daily_dates(pair, today, sorted(daily), holidays, basis)
         vols = {dd[n]: q["atm"]["mid"] for n, q in daily.items() if q.get("atm") and q["atm"].get("mid")}
-        pillar_dates = tenor_dates(pair, today, holidays)
+        pillar_dates = tenor_dates(pair, today, holidays, tenor_list(rec))
         res = implied_daily_weights(pair, today, vols, rec.get("weights"), holidays,
-                                    pillars=[pillar_dates[t] for t in TENORS])
-        atm = {t: rec["tenors"][t]["atm"] for t in TENORS}
+                                    pillars=list(pillar_dates.values()))
+        atm = _atms(rec)
         model = interpolate_atm(pair, atm, today, sorted(vols), eff, holidays)
         ccys = split_pair(pair)
         cur_events: dict[str, list] = {}
@@ -470,7 +476,7 @@ class Service:
                    if is_good_day(d, ccys, holidays)]
 
         def run(rec):
-            atm = {t: rec["tenors"][t]["atm"] for t in TENORS}
+            atm = _atms(rec)
             w = self.effective_weights(pair, rec.get("weights"), cal, holidays, rec)
             return interpolate_atm(pair, atm, today, targets, w, holidays), w["events"]
         vols, events = run(pub)
@@ -499,13 +505,14 @@ class Service:
         ccys = split_pair(pair)
         w = self.effective_weights(pair, rec.get("weights"), cal, holidays, rec)
         wp = self.effective_weights(pair, pub.get("weights"), cal, holidays, pub)
-        v = interpolate_atm(pair, {t: rec["tenors"][t]["atm"] for t in TENORS}, today, ds, w, holidays)
-        vp = interpolate_atm(pair, {t: pub["tenors"][t]["atm"] for t in TENORS}, today, ds, wp, holidays)
+        v = interpolate_atm(pair, _atms(rec), today, ds, w, holidays)
+        vp = interpolate_atm(pair, _atms(pub), today, ds, wp, holidays)
         cum = cumulative_weights(pair, today, ds[-1], w, holidays)
         evs: dict[str, list] = {}
         for e in w["events"]:
             evs.setdefault(e["date"], []).append(e)
-        tdates = tenor_dates(pair, today, holidays)
+        tenors = tenor_list(rec)
+        tdates = tenor_dates(pair, today, holidays, tenors)
         rows, prev_n, prev_tv = [], 0, 0.0
         for d in ds:
             n = (d - today).days
@@ -516,14 +523,14 @@ class Service:
                 fwd = max(tv - prev_tv, 0) * 365 / (n - prev_n)
                 fwd = fwd ** 0.5
             iso = d.isoformat()
-            after = [t for t in TENORS if tdates[t] >= d]
+            after = [t for t in tenors if tdates[t] >= d]
             rows.append({
                 "date": iso, "weekday": d.strftime("%a"), "days": n,
                 "weighted_days": round(cum[n], 3), "day_weight": round(cum[n] - cum[n - 1], 3),
                 "good_day": is_good_day(d, ccys, holidays),
                 "atm": vol, "published": vp.get(d), "fwd": fwd,
-                "between": after[0] if after else TENORS[-1],
-                "pillar": next((t for t in TENORS if tdates[t] == d), None),
+                "between": after[0] if after else tenors[-1],
+                "pillar": next((t for t in tenors if tdates[t] == d), None),
                 "events": [f"{e['desc']} ({e['weight']:+g})" for e in evs.get(iso, [])],
             })
             prev_n, prev_tv = n, tv
@@ -543,7 +550,7 @@ class Service:
                 mids[date.fromisoformat(q["date"])] = sum(vs) / len(vs)
         holidays, cal = self.store.load_calendar()
         w = self.effective_weights(pair, rec.get("weights"), cal, holidays, rec)
-        out = calibrate_to_quotes(pair, {t: rec["tenors"][t]["atm"] for t in TENORS}, date.today(),
+        out = calibrate_to_quotes(pair, _atms(rec), date.today(),
                                   mids, w, holidays, floor=floor)
         out["events"] = split_by_ccy(out["events"], w["events"])     # a day with events in both currencies: half each
         return out
@@ -598,7 +605,38 @@ class Service:
         if r is None:
             return None
         return {"version": r["version"], "ts": r["ts"],
-                "atm": {t: r["tenors"][t]["atm"] for t in TENORS}}
+                "atm": _atms(r)}
+
+    def new_tenor_row(self, pair: str, draft: dict, tenor: str) -> dict:
+        """Marks for an extra tenor being added to the draft: the ATM the curve already gives
+        its expiry (interpolated with the event weights, so adding it changes nothing until
+        it is marked), the rest interpolated in days between its neighbours (flat beyond)."""
+        t = norm_extra_tenor(tenor)
+        draft = dict(draft, extra_tenors={k: v for k, v in (draft.get("extra_tenors") or {}).items()
+                                          if k.strip().upper() != t})
+        rec = self._state_for(pair, draft)
+        if rec is None:
+            raise ValueError(f"Unknown pair {pair}")
+        holidays, cal = self.store.load_calendar()
+        today = date.today()
+        others = tenor_list(rec)
+        dates = tenor_dates(pair, today, holidays, others + [t])
+        d = dates[t]
+        w = self.effective_weights(pair, rec.get("weights"), cal, holidays, rec)
+        atm = interpolate_atm(pair, _atms(rec), today, [d], w, holidays).get(d)
+        before = [x for x in others if dates[x] < d]
+        after = [x for x in others if dates[x] >= d]
+        lo, hi = (before or after)[-1 if before else 0], (after or before)[0 if after else -1]
+        frac = 0.0 if dates[hi] == dates[lo] else (d - dates[lo]).days / (dates[hi] - dates[lo]).days
+        a, b = rec["tenors"][lo], rec["tenors"][hi]
+        row = {}
+        for f, va in a.items():
+            vb = b.get(f)
+            if f in ("atm", "corr", "psprd") or va is None or vb is None:
+                continue
+            row[f] = round(va + (vb - va) * frac, 4)
+        row.update(atm=None if atm is None else round(atm, 4), corr=None, psprd=None)
+        return {"tenor": t, "expiry": d.isoformat(), "row": row}
 
     def preview(self, pair: str, draft: dict) -> dict:
         state = self._prepare(pair, draft)
@@ -762,18 +800,18 @@ class Service:
                 (latest.get("spread_ref"), bool(latest.get("follow_parent")))
             follow_on = bool(state["follow_market"]) and not latest.get("follow_market")
             dt = draft.get("tenors") or {}
-            for t in TENORS:
+            for t in tenor_list(state):
                 row = state["tenors"][t]
                 if rederive:
                     row["corr"] = None                   # calibrated to the current ATMs
                 if reparent:
                     row["psprd"] = None
                 if follow_on and t in dt:
-                    row.update({f: dt[t].get(f) for f in FOLLOW_FIELDS})   # FMD mids the draft took
+                    row.update({f: dt[t].get(f) for f in follow_fields(state)})   # FMD mids the draft took
             if bool(state["follow_market"]) != bool(latest.get("follow_market")) or \
                     bool(state["excel"]) != bool(latest.get("excel")):
-                for k in ("lock_rr10f", "lock_bf10f"):  # may have been unticked for factors a lock can't hold
-                    state[k] = draft.get(k)
+                for k in ("lock_rr10f", "lock_bf10f", "wing_locks"):  # may have been unticked for factors a lock can't hold
+                    state[k] = copy.deepcopy(draft.get(k))
             state = self._prepare(pair, state)
             self._check_cycle(state)
             state, warnings = self._derive(state)
@@ -793,9 +831,12 @@ class Service:
         if any(r.get("source") not in ("market", "propagation", "excel") for r in newer):
             return state, expected                    # a real conflict - reported by append
         if state.get("follow_market") or state.get("excel"):
-            for t in TENORS:
-                for f in FOLLOW_FIELDS + (["spread"] if state.get("excel") else []):
-                    state["tenors"][t][f] = latest["tenors"][t][f]
+            for t in tenor_list(state):
+                if t not in latest["tenors"]:
+                    continue
+                for f in follow_fields(state) + (["spread"] if state.get("excel") else []):
+                    if f in latest["tenors"][t]:
+                        state["tenors"][t][f] = latest["tenors"][t][f]
         return state, latest["version"]
 
     def _prepare(self, pair: str, draft: dict) -> dict:
@@ -826,8 +867,8 @@ class Service:
             view = self.fresh_view(pair, rec, cfg)
             res = resolve(rec)
             own = rec.get("alert_tol") or {}
-            marks = ["atm"] if rec.get("alerts_smile_off") else ALERT_MARKS     # RR and BF muted, ATM kept
-            for t in TENORS:
+            marks = ["atm"] if rec.get("alerts_smile_off") else all_marks(rec)     # RR and BF muted, ATM kept
+            for t in tenor_list(rec):
                 for m in marks:
                     q = view.get(t, {}).get(m)
                     v = res[t]["mid"][m]
@@ -836,7 +877,8 @@ class Service:
                     dev = deviation(v, q, acfg.get("basis", "mid"))
                     if dev is None:
                         continue
-                    tol = (own.get(m) or acfg["tolerance"][m]) * acfg.get("tenor_scale", {}).get(t, 1.0)
+                    tm = tol_mark(m)       # an extra delta: the 10D's tolerance (25D's inside 25D)
+                    tol = (own.get(tm) or acfg["tolerance"][tm]) * acfg.get("tenor_scale", {}).get(t, 1.0)
                     cands[(pair, t, m)] = {
                         "level": level(dev, tol, acfg.get("clear_ratio", 0.8)), "kind": "market",
                         "pair": pair, "tenor": t, "mark": m, "value": v, "mkt": q.get("mid"),
@@ -1150,8 +1192,8 @@ class Service:
         if source in self.THROTTLED:
             pc = self.store.config().get("propagation") or {}
             def move(f):
-                return max((abs((new["tenors"][t][f] or 0) - (latest["tenors"][t][f] or 0)) for t in TENORS),
-                           default=0.0)
+                return max((abs((new["tenors"][t][f] or 0) - (latest["tenors"][t][f] or 0))
+                            for t in new["tenors"] if t in latest["tenors"]), default=0.0)
             if move("atm") < pc.get("min_change", 0.005) and move("corr") < pc.get("min_corr_change", 0.005):
                 return None             # too small to republish; it adds up until it isn't
             wait = pc.get("min_interval_s", 5) - (time.time() - datetime.fromisoformat(latest["ts"]).timestamp())
@@ -1287,6 +1329,29 @@ class Service:
                     self.publish(pair, state, rec["version"], "skew expired", "skew-expiry")
                 except Exception as e:  # conflict etc. - retried next round
                     log.info("skew expiry for %s deferred: %s", pair, e)
+        self.expire_tenors()
+
+    def expire_tenors(self, today: date | None = None) -> list[str]:
+        """The leader removes extra tenors on their removal date (a new version, so the
+        exports drop them). Returns the pairs changed."""
+        today = (today or date.today()).isoformat()
+        done = []
+        for pair in sorted(self.cache):
+            rec = self.get(pair)
+            gone = [t for t, until in (rec.get("extra_tenors") or {}).items() if until and until <= today]
+            if not gone:
+                continue
+            state = {k: copy.deepcopy(rec.get(k)) for k in STATE_KEYS}
+            for t in gone:
+                state["extra_tenors"].pop(t)
+                state["tenors"].pop(t, None)
+            try:
+                self.publish(pair, state, rec["version"], f"extra tenor {', '.join(gone)} removed (end date)",
+                             "tenor-expiry")
+                done.append(pair)
+            except Exception as e:      # conflict etc. - retried next round
+                log.info("tenor removal for %s deferred: %s", pair, e)
+        return done
 
     def archive_history(self, today: date | None = None) -> int:
         """Once a day (the leader): whole months older than archive_keep_days

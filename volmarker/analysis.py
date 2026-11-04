@@ -44,7 +44,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from .calendar import tenor_dates
-from .conventions import TENORS
+from .conventions import TENORS, sort_tenors
 from .exports import FEN_TENORS
 from .store import Store, _read_gz_lines, _reverse_lines, atomic_write
 from .tz import localize, to_local
@@ -52,7 +52,7 @@ from .tz import localize, to_local
 log = logging.getLogger(__name__)
 
 MARK_COLS = ["time_utc", "time_local", "date", "pair", "tenor", "expiry", "atm_mid", "atm_bid", "atm_offer",
-             "spread", "rr25", "rr10", "bf25", "bf10", "source", "user", "version"]
+             "spread", "rr25", "rr10", "bf25", "bf10", "source", "user", "version", "wings"]
 MARKET_COLS = ["time_utc", "time_local", "date", "pair", "tenor", "mark", "ptype", "brand",
                "bid", "offer", "mid", "quote_time", "full_set"]
 FILE_RE = re.compile(r"^([A-Z]{6})_(\d{8})_(\d{6})\.csv$", re.I)
@@ -91,8 +91,10 @@ def read_fenics_copy(text: str, inverse: bool) -> dict[str, dict]:
 
 
 def version_marks(rec: dict) -> dict[str, dict]:
+    """Marks per tenor (the pair's extra tenors included); extra deltas under "wings"."""
     out = {}
-    for t in TENORS:
+    extra = sorted(rec.get("deltas") or [], reverse=True)
+    for t in sort_tenors(rec["tenors"]):
         r = rec["tenors"].get(t) or {}
         atm, spread = r.get("atm"), r.get("spread") or 0
         rr10 = r.get("rr10") if r.get("rr10") is not None else (r.get("rr25") or 0) * (r.get("rr10f") or 0)
@@ -100,7 +102,21 @@ def version_marks(rec: dict) -> dict[str, dict]:
         out[t] = {"atm_mid": atm, "atm_bid": None if atm is None else atm - spread / 2,
                   "atm_offer": None if atm is None else atm + spread / 2, "spread": spread,
                   "rr25": r.get("rr25"), "rr10": rr10, "bf25": r.get("bf25"), "bf10": bf10}
+        wings = {}
+        for w in ("rr", "bf"):
+            for d in extra:
+                v = r.get(f"{w}{d}")
+                if v is None and r.get(f"{w}{d}f") is not None:
+                    v = (r.get(f"{w}25") or 0) * r[f"{w}{d}f"]
+                if v is not None:
+                    wings[f"{w}{d}"] = v
+        out[t]["wings"] = wings
     return out
+
+
+def wings_text(wings: dict | None) -> str:
+    """Extra deltas in one column: rr5=-1.2;rr1=-2.4;bf5=0.9;bf1=2.1"""
+    return ";".join(f"{k}={_r(v)}" for k, v in (wings or {}).items())
 
 
 def _csv(rows: list[list], header: list[str] | None) -> bytes:
@@ -233,15 +249,20 @@ class Exporter:
                 self._exp[k] = {}
         exp = self._exp[k]
         out = []
-        for t in TENORS:
+        for t in sort_tenors(marks):
             m = marks.get(t)
             if not m:
                 continue
+            if t not in exp:             # an extra tenor
+                try:
+                    exp.update(tenor_dates(pair, d, self.holidays, [t]))
+                except Exception:
+                    exp[t] = None
             e = exp.get(t)
             out.append([utc.strftime("%Y-%m-%d %H:%M:%S"), local.strftime("%Y-%m-%d %H:%M:%S"), d.isoformat(), pair, t,
                         e.isoformat() if e else "", _r(m.get("atm_mid")), _r(m.get("atm_bid")), _r(m.get("atm_offer")),
                         _r(m.get("spread")), _r(m.get("rr25")), _r(m.get("rr10")), _r(m.get("bf25")), _r(m.get("bf10")),
-                        source, user, version])
+                        source, user, version, wings_text(m.get("wings"))])
         return d, out
 
     def day_start(self, d: date) -> datetime:
@@ -404,6 +425,9 @@ class Exporter:
             p = self.path(kind, month)
             p.parent.mkdir(parents=True, exist_ok=True)
             new = not p.exists() or p.stat().st_size == 0
+            if not new:      # a month begun before a column was added keeps its own columns
+                n = len(_header(p) or MARK_COLS)
+                rows = [r[:n] for r in rows]
             if rows or new:
                 with open(p, "ab") as f:      # a gzip member per day
                     f.write(gzip.compress(_csv(rows, MARK_COLS if new else None)))
@@ -414,6 +438,14 @@ class Exporter:
         st.update(through=d.isoformat(), month=month, sizes=self._sizes(month))
         st.pop("backfill_running", None)
         self.save_state(st)
+
+
+def _header(path: Path) -> list[str] | None:
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as g:
+            return next(csv.reader([g.readline()]), None)
+    except (OSError, EOFError):
+        return None
 
 
 def _recorded_rounds(path: Path):

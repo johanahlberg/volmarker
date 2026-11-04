@@ -4,8 +4,8 @@ Runs inside the feed process, which is already the single writer of market
 data for the folder, so exactly one follower publishes. Each round, for each
 following pair:
 
-  * takes the fresh FMD mid (brand per fmd_brand) for ATM, 25D/10D RR and BF;
-    tenors without a fresh quote keep their last value
+  * takes the fresh FMD mid (brand per fmd_brand) for ATM, 25D/10D RR and BF (and the
+    pair's extra tenors and deltas); marks without a fresh quote keep their last value
   * publishes when any mark has moved at least min_change, at most once per
     min_publish_interval_s - through the normal publish, so the Fenics and
     Front Arena files, derived crosses, history and journal all follow
@@ -27,10 +27,9 @@ import threading
 import time
 
 from .alerts import iso
-from .conventions import TENORS
 from .service import STATE_KEYS, Service
 from .store import ConflictError, LockTimeout, write_shared
-from .surface import ALERT_MARKS, resolve
+from .surface import all_marks, resolve, tenor_list, tol_mark
 
 log = logging.getLogger("volmarker.follow")
 
@@ -79,8 +78,8 @@ class Follower:
         view = svc.fresh_view(pair, rec, cfg)
         res = resolve(rec)
         take, held, missing, moved = {}, [], [], []
-        for t in TENORS:
-            for m in ALERT_MARKS:
+        for t in tenor_list(rec):
+            for m in all_marks(rec):
                 key = (pair, t, m)
                 q = view.get(t, {}).get(m)
                 if not q or q.get("mid") is None or q.get("stale") or q.get("alt_atm"):
@@ -90,7 +89,7 @@ class Follower:
                 mid = round(q["mid"], 4)
                 cur = res[t]["mid"][m]
                 d = None if cur is None else mid - cur
-                if d is not None and abs(d) > fc["max_jump"].get(m, float("inf")):
+                if d is not None and abs(d) > fc["max_jump"].get(m, fc["max_jump"].get(tol_mark(m), float("inf"))):
                     first = self.pending.setdefault(key, now)
                     if now - first < fc["jump_confirm_s"]:
                         held.append({"tenor": t, "mark": m, "from": cur, "to": mid, "since": iso(first),
@@ -108,15 +107,14 @@ class Follower:
         if now - self.last_pub.get(pair, 0) < fc["min_publish_interval_s"]:
             return dict(st, waiting=True)
         state = {k: copy.deepcopy(rec.get(k)) for k in STATE_KEYS}
-        for (t, m), v in take.items():          # ALERT_MARKS order: rr25 before rr10, bf25 before bf10
+        for (t, m), v in take.items():
+            state["tenors"][t][m] = v
+        for (t, m), v in take.items():          # the wings' factors, to the 25D just taken
             row = state["tenors"][t]
-            row[m] = v
-            if m in ("rr10", "bf10"):
-                w = m[:2]
-                if abs(row[f"{w}25"]) > 1e-9:
-                    row[f"{w}10f"] = v / row[f"{w}25"]
+            if m[:2] in ("rr", "bf") and m[2:] != "25" and abs(row[f"{m[:2]}25"]) > 1e-9:
+                row[f"{m}f"] = v / row[f"{m[:2]}25"]
         _, t, m, d = max(moved, key=lambda x: x[0])
-        put = rec.get("rr_put") and m in ("rr25", "rr10")     # favour puts: RR moves as shown, put - call
+        put = rec.get("rr_put") and m.startswith("rr")     # favour puts: RR moves as shown, put - call
         comment = f"FMD: {t} {m.upper()}{' P-C' if put else ''} " + (f"{-d if put else d:+.2f}" if d is not None else "new")
         if len(moved) > 1:
             comment += f" (+{len(moved) - 1} more)"

@@ -6,11 +6,11 @@ market/<PAIR>.json. The view is tenor -> mark -> {bid, offer, mid, brand, ...}.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
-from .conventions import TENORS
-
 MARKS = ["atm", "rr25", "rr10", "bf25", "bf10"]
+MARK_RE = re.compile(r"^(atm|rr\d+|bf\d+)$")       # extra deltas too: rr5, bf1, rr30 ...
 BRAND_ORDER = ["FMD", "FMD1", "BGC", "GFI", "RPM"]   # FMD = aggregated, FMD1 = FMD 1.0 via the Fenics XML poster
 
 
@@ -26,7 +26,7 @@ def market_view(quotes: list[dict], atm_type: str = "DNS", brand: str = "auto", 
     view: dict[str, dict] = {}
     groups: dict[tuple[str, str], list[dict]] = {}
     for q in quotes:
-        if q.get("mark") not in MARKS:
+        if not MARK_RE.match(q.get("mark") or ""):
             continue
         groups.setdefault((q["tenor"], q["mark"]), []).append(q)
     for (tenor, mark), qs in groups.items():
@@ -59,7 +59,7 @@ def market_view(quotes: list[dict], atm_type: str = "DNS", brand: str = "auto", 
         if pick.get("mid") is None and pick.get("bid") is not None and pick.get("offer") is not None:
             pick["mid"] = (pick["bid"] + pick["offer"]) / 2
         pick["alt_atm"] = alt
-        if inverse and mark in ("rr25", "rr10"):
+        if inverse and mark.startswith("rr"):
             neg = lambda x: None if x is None else -x
             pick["bid"], pick["offer"], pick["mid"] = neg(pick.get("offer")), neg(pick.get("bid")), neg(pick.get("mid"))
         view.setdefault(tenor, {})[mark] = pick
@@ -69,10 +69,9 @@ def market_view(quotes: list[dict], atm_type: str = "DNS", brand: str = "auto", 
 def compare(resolved: dict, view: dict, tol: float = 1e-9) -> list[dict]:
     """Marks (mid) outside the broker bid/offer."""
     out = []
-    for t in TENORS:
-        for m in MARKS:
+    for t, r in resolved.items():
+        for m, v in r["mid"].items():
             q = view.get(t, {}).get(m)
-            v = resolved[t]["mid"].get(m)
             if not q or v is None:
                 continue
             if q.get("bid") is not None and q.get("offer") is not None and q["offer"] - q["bid"] <= tol:

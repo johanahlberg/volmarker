@@ -15,6 +15,9 @@
       1d,<ATM spread x 0.5 x dc_factor>
   History      <history_dir>/<CCY1><CCY2>_yyyymmdd_hhmmss.csv  a copy of the Fenics file
 
+A pair's extra tenors go out in the same notation (3W: 3wk / 3w, 18M: 18mo / 18m) and its
+extra deltas like the 10D (5D: vol5,...,strangle / vol,s5,... and rr5).
+
 Front Arena knows some currencies under another code (config frontarena_ccy,
 e.g. CNH as CNY): its file name and lines use that code, Fenics keeps the pair's.
 
@@ -33,6 +36,16 @@ from .store import atomic_write
 
 FA_TENORS = dict(zip(TENORS, ["1d", "1wk", "2wk", "1mo", "2mo", "3mo", "6mo", "9mo", "1yr", "2yr", "3yr", "4yr", "5yr"]))
 FEN_TENORS = dict(zip(TENORS, ["1d", "1w", "2w", "1m", "2m", "3m", "6m", "9m", "1y", "2y", "3y", "4y", "5y"]))
+
+
+def fa_tenor(t: str) -> str:
+    """Front Arena's tenor code: 1d, 3wk, 4mo, 1yr ..."""
+    return FA_TENORS.get(t) or t[:-1] + {"W": "wk", "M": "mo", "Y": "yr"}[t[-1]]
+
+
+def fen_tenor(t: str) -> str:
+    """Fenics' tenor code: 1d, 3w, 4m, 1y ..."""
+    return FEN_TENORS.get(t) or t.lower()
 
 
 def fa_pair(pair: str, fa_ccy: dict | None = None) -> tuple[str, str]:
@@ -55,34 +68,44 @@ def _lines(lines: list[str]) -> str:
 def frontarena_lines(pair: str, resolved: dict, spreads: dict[str, float],
                      fa_ccy: dict | None = None) -> list[str]:
     c1, c2 = fa_pair(pair, fa_ccy)
+    tenors = list(resolved)
     out = []
-    for t in TENORS:
+    for t in tenors:
         atm = resolved[t]["mid"]["atm"]
         half = spreads[t] / 2
-        out.append(f"vol,{c1},{c2},{FA_TENORS[t]},{_n(None if atm is None else atm - half)},"
+        out.append(f"vol,{c1},{c2},{fa_tenor(t)},{_n(None if atm is None else atm - half)},"
                    f"{_n(None if atm is None else atm + half)}")
-    for prefix, d in (("vol25", "25"), ("vol10", "10")):
+    for d in _deltas(resolved):
         for name, mark in (("strangle", f"bf{d}"), ("riskreversal", f"rr{d}")):
-            out += [f"{prefix},{c1},{c2},{name},{FA_TENORS[t]},{_n(resolved[t]['mid'][mark])}" for t in TENORS]
+            out += [f"vol{d},{c1},{c2},{name},{fa_tenor(t)},{_n(resolved[t]['mid'][mark])}" for t in tenors]
     return out
+
+
+def _deltas(resolved: dict) -> list[int]:
+    """25, 10, then the pair's extra deltas from the inside out (the files' order so far)."""
+    marks = next(iter(resolved.values()))["mid"] if resolved else {}
+    extra = sorted((int(m[2:]) for m in marks if m.startswith("rr") and m not in ("rr25", "rr10")), reverse=True)
+    return [25, 10] + extra
 
 
 def fenics_lines(pair: str, resolved: dict, inverse: bool = False) -> list[str]:
     """inverse: Fenics reads the pair's RRs in the inverted pair's terms (e.g. the
     desk marks NOKCHF RRs as CHFNOK), so they go out with the sign flipped."""
     c1, c2 = split_pair(pair)
-    out = [f"vol,atm,{c1},{c2},{FEN_TENORS[t]},{_n(resolved[t]['quoted']['atm_bid'])},"
-           f"{_n(resolved[t]['quoted']['atm_offer'])}" for t in TENORS]
-    for code, mark in (("s25", "bf25"), ("rr25", "rr25"), ("s10", "bf10"), ("rr10", "rr10")):
-        sign = -1 if inverse and mark.startswith("rr") else 1
-        vals = [resolved[t]["quoted"][mark] for t in TENORS]
-        vals = [None if v is None else sign * v for v in vals]
-        out += [f"vol,{code},{c1},{c2},{FEN_TENORS[t]},{_n(v)},{_n(v)}" for t, v in zip(TENORS, vals)]
+    tenors = list(resolved)
+    out = [f"vol,atm,{c1},{c2},{fen_tenor(t)},{_n(resolved[t]['quoted']['atm_bid'])},"
+           f"{_n(resolved[t]['quoted']['atm_offer'])}" for t in tenors]
+    for d in _deltas(resolved):
+        for code, mark in ((f"s{d}", f"bf{d}"), (f"rr{d}", f"rr{d}")):
+            sign = -1 if inverse and mark.startswith("rr") else 1
+            vals = [resolved[t]["quoted"][mark] for t in tenors]
+            vals = [None if v is None else sign * v for v in vals]
+            out += [f"vol,{code},{c1},{c2},{fen_tenor(t)},{_n(v)},{_n(v)}" for t, v in zip(tenors, vals)]
     return out
 
 
 def dc_spread_lines(spreads: dict[str, float], dc_factor: float) -> list[str]:
-    return [f"{FEN_TENORS[t]},{_n(spreads[t] * 0.5 * dc_factor)}" for t in TENORS]
+    return [f"{fen_tenor(t)},{_n(v * 0.5 * dc_factor)}" for t, v in spreads.items()]
 
 
 def write_exports(rec: dict, resolved: dict, dirs: dict[str, Path], history: bool = True,
@@ -91,7 +114,7 @@ def write_exports(rec: dict, resolved: dict, dirs: dict[str, Path], history: boo
     pair = rec["pair"]
     c1, c2 = split_pair(pair)
     f1, f2 = fa_pair(pair, fa_ccy)
-    spreads = {t: rec["tenors"][t]["spread"] for t in TENORS}
+    spreads = {t: rec["tenors"][t]["spread"] for t in resolved}
     fen = _lines(fenics_lines(pair, resolved, bool(rec.get("inverse"))))
     # no flush to disk: the rename keeps readers safe, and the next publish rewrites them anyway
     atomic_write(Path(dirs["frontarena"]) / f"{f1}{f2}volsurface.txt", _lines(frontarena_lines(pair, resolved, spreads, fa_ccy)), fsync=False)
