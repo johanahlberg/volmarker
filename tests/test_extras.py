@@ -236,6 +236,31 @@ class TestService(unittest.TestCase):
         fen = (Path(self.tmp.name) / "exports" / "fenics" / "EURUSDvolsurface.txt").read_text()
         self.assertNotIn(",3w,", fen)
 
+    def test_setup_save_adds_and_removes(self):
+        """Setup's Save: new tenor rows and deltas come from the draft, mark edits stay out."""
+        d = self.draft()
+        d["tenors"]["3W"] = self.svc.new_tenor_row("EURUSD", d, "3W")["row"]
+        d["extra_tenors"] = {"3W": None}
+        d["removed_tenors"] = ["5Y"]
+        d["deltas"] = [5]
+        d["wing_locks"] = {"rr5": False, "bf5": True}
+        d["tenors"]["1M"]["atm"] = 9.9                  # a mark edit: not saved
+        rec = self.svc.save_settings("EURUSD", d, 2)
+        self.assertEqual((rec["extra_tenors"], rec["removed_tenors"], rec["deltas"]), ({"3W": None}, ["5Y"], [5]))
+        self.assertAlmostEqual(rec["tenors"]["3W"]["atm"], d["tenors"]["3W"]["atm"])
+        self.assertNotIn("5Y", rec["tenors"])
+        self.assertAlmostEqual(rec["tenors"]["1M"]["atm"], 6.3)
+        self.assertAlmostEqual(rec["tenors"]["1M"]["rr5"], rec["tenors"]["1M"]["rr25"] * rec["tenors"]["1M"]["rr5f"])
+        self.assertEqual(rec["wing_locks"], {"rr5": False, "bf5": True})
+        # and back
+        d = self.draft()
+        d["tenors"]["5Y"] = self.svc.new_tenor_row("EURUSD", d, "5Y")["row"]
+        d["extra_tenors"] = d["removed_tenors"] = d["deltas"] = None
+        rec = self.svc.save_settings("EURUSD", d, 3)
+        self.assertNotIn("3W", rec["tenors"])
+        self.assertIn("5Y", rec["tenors"])
+        self.assertNotIn("rr5", rec["tenors"]["1M"])
+
     def test_alerts_on_extra_delta_use_10d_tolerance(self):
         d = self.draft()
         d["deltas"] = [5]

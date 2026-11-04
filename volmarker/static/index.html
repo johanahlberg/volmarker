@@ -68,7 +68,6 @@
           <label class="check" title="Columns with the change from the published value"><input id="diff-show" type="checkbox" checked> Δ</label>
           <label class="check"><input id="mkt-show" type="checkbox" checked> Market</label>
           <select id="mkt-brand" title="Broker source"><option value="auto">Auto (FMD first)</option><option value="best">Best of brands</option></select>
-          <div id="extras" class="toolbar-row extras"></div>
           <div class="toolbar-row">
             <span class="lbl">Skew expiry</span>
             <input id="skew-exp" type="datetime-local">
@@ -222,6 +221,10 @@
           <label>Expiry cut <select id="su-cut" title="Events released after the cut weigh on the next expiry"></select></label>
           <label title="Shows a column next to ATM with this pair's ATM minus the parent's ATM. Type either the ATM or the spread.">Spread parent <select id="su-spref"></select></label>
           <label class="check su-indent"><input id="su-follow-parent" type="checkbox"><span><b>Move with parent</b>: keep the spread per tenor; every publish of the parent moves this pair's ATMs (typing an ATM recalibrates that tenor's spread)</span></label>
+          <div class="su-extras">
+            <div class="lbl">Tenors and deltas</div>
+            <div id="extras" class="extras"></div>
+          </div>
           <label>Group <input id="su-group" list="group-list" placeholder="e.g. Scandies" maxlength="40" autocomplete="off"></label>
           <label class="check"><input id="su-key" type="checkbox"> Key pair (auto-quoted, tighter staleness limit)</label>
           <label>ATM convention (for broker ATM quotes)
@@ -237,7 +240,8 @@
             <label class="check"><input id="su-alerts-off" type="checkbox"> Mute market alerts for this pair</label>
             <label class="check"><input id="su-alerts-smile" type="checkbox"> Mute RR and BF alerts only (keep the ATM alerts)</label>
           </div>
-          <p class="muted">Click <b>Save</b> to apply the settings. Marks you are editing stay in the draft and are not published by Save.<br>
+          <p class="muted">Click <b>Save</b> to apply the settings. Marks you are editing stay in the draft and are not published by Save.
+          A tenor added here starts from the curve (the ATM its expiry already has) and a delta from 25D × the starting factor; mark them on the Surface tab after saving.<br>
           Derived: ATM = triangle(base ATMs, correlation). Type an ATM on a derived pair to calibrate the correlation to it. Untick <i>Move with bases</i> to keep the ATMs fixed while the bases move.
           The correlation is between the two base pairs as quoted (e.g. EURUSD vs USDCHF is typically negative).</p>
         </div>

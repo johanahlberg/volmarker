@@ -49,7 +49,8 @@ FOLLOW_STALE = 30.0
 MAX_TEST_DATES = 120
 # pair settings saved by the Setup tab's Save (the rest of a version comes from the latest one)
 SETTING_KEYS = ["mode", "bases", "key", "group", "spread_ref", "follow_parent", "follow_bases", "cut", "dc_factor",
-                "atm_type", "follow_market", "excel", "alert_tol", "alerts_off", "alerts_smile_off", "inverse"]
+                "atm_type", "follow_market", "excel", "alert_tol", "alerts_off", "alerts_smile_off", "inverse",
+                "deltas", "extra_tenors", "removed_tenors"]
 
 
 def _labels(own: list, cal: list) -> list[str]:
@@ -811,6 +812,10 @@ class Service:
             follow_on = bool(state["follow_market"]) and not latest.get("follow_market")
             dt = draft.get("tenors") or {}
             for t in tenor_list(state):
+                if t not in state["tenors"]:             # a tenor added in Setup: the draft's interpolated row
+                    if t not in dt:
+                        raise ValueError(f"{t}: no marks for the new tenor")
+                    state["tenors"][t] = copy.deepcopy(dt[t])
                 row = state["tenors"][t]
                 if rederive:
                     row["corr"] = None                   # calibrated to the current ATMs
@@ -818,6 +823,13 @@ class Service:
                     row["psprd"] = None
                 if follow_on and t in dt:
                     row.update({f: dt[t].get(f) for f in follow_fields(state)})   # FMD mids the draft took
+            new_deltas = set(state["deltas"] or []) - set(latest.get("deltas") or [])
+            if new_deltas:                               # a delta added in Setup: its lock as the draft has it
+                locks = dict(state.get("wing_locks") or {})
+                for d in new_deltas:
+                    for w in ("rr", "bf"):
+                        locks[f"{w}{d}"] = (draft.get("wing_locks") or {}).get(f"{w}{d}", True)
+                state["wing_locks"] = locks
             if bool(state["follow_market"]) != bool(latest.get("follow_market")) or \
                     bool(state["excel"]) != bool(latest.get("excel")):
                 for k in ("lock_rr10f", "lock_bf10f", "wing_locks"):  # may have been unticked for factors a lock can't hold

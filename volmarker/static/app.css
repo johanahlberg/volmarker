@@ -157,8 +157,10 @@ main { flex: 1; overflow: auto; padding: 14px 18px 30px; min-width: 0; }
 .grid.small input.tq { width: 64px; text-align: right; font-family: var(--mono); }
 .toolbar-row { flex-basis: 100%; display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
 /* extra tenors and deltas of the pair */
-.toolbar-row.extras { justify-content: flex-start; }
-.toolbar-row.extras .lbl.sep { margin-left: 14px; }
+.su-extras { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); padding: 8px 0; }
+.extras { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.extras .su-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.extras .su-row > .lbl:first-child { width: 8.5em; white-space: nowrap; }
 .chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 2px 1px 8px; border: 1px solid var(--border); border-radius: 12px;
   background: var(--xt-bg); font-variant-numeric: tabular-nums; }
 .chip input[type="date"] { padding: 0 2px; font-size: 12px; }

@@ -9,7 +9,8 @@ const STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "a
   "deltas", "extra_tenors", "removed_tenors", "wing_locks", "tenors"];
 // pair settings the Setup tab saves on its own (service.SETTING_KEYS)
 const SETUP_KEYS = ["mode", "bases", "key", "group", "spread_ref", "follow_parent", "follow_bases", "cut", "dc_factor",
-  "atm_type", "follow_market", "excel", "alert_tol", "alerts_off", "alerts_smile_off", "inverse"];
+  "atm_type", "follow_market", "excel", "alert_tol", "alerts_off", "alerts_smile_off", "inverse",
+  "deltas", "extra_tenors", "removed_tenors"];
 // marks with a market quote: ATM and the RR and BF of every delta (rr25, rr10, a pair's extra rr5 ...)
 const isMark = (f) => /^(atm|rr\d+|bf\d+)$/.test(f);
 // owned by the feed on Follow FMD pairs: the marks and the wings' factors
@@ -421,27 +422,28 @@ function fillShiftControls() {
   }
 }
 
-// ---- extra tenors and deltas: in the draft, published with the marks
+// ---- extra tenors and deltas (Setup tab): in the draft, saved with the settings
 function renderExtras() {
   const d = app.draft, el = $("#extras");
-  if (!el) return;
-  const off = !!d.excel;
+  if (!el || !d) return;
+  const off = !!d.excel, dis = off ? "disabled" : "";
   const xt = Object.entries(d.extra_tenors || {});
-  el.innerHTML = `<span class="lbl" title="Extra tenors of this pair, e.g. 3W over an event between 2W and 1M. Marked and exported like the others until removed with ×, or on an end date if one is set">Extra tenors</span>` +
+  el.innerHTML =
+    `<div class="su-row"><span class="lbl" title="Extra tenors of this pair, e.g. 3W over an event between 2W and 1M. Marked and exported like the others until removed with ×, or on an end date if one is set">Extra tenors</span>` +
     xt.map(([t, until]) => `<span class="chip" title="${esc(expiryTitle(t))}">${t} <span class="muted">ends</span>` +
       `<input type="date" data-xt-until="${t}" value="${until || ""}" title="Optional: removed on this date by the leader app (empty: kept until removed with ×)">` +
       `<button class="ghost x" data-xt-del="${t}" title="Remove ${t}">×</button></span>`).join("") +
-    `<input id="xt-new" class="tenor-in" placeholder="3W" title="A week, month or year tenor, e.g. 3W, 4M, 18M" ${off ? "disabled" : ""}>` +
-    `<button id="xt-add" class="ghost" ${off ? "disabled" : ""}>+ Tenor</button>` +
-    `<span class="lbl sep" title="Standard tenors this pair doesn't mark (e.g. beyond 2Y): left out of the grid, the checks and the exports. ↺ brings one back">Removed tenors</span>` +
+    `<input id="xt-new" class="tenor-in" placeholder="3W" title="A week, month or year tenor, e.g. 3W, 4M, 18M" ${dis}>` +
+    `<button id="xt-add" class="ghost" ${dis}>+ Tenor</button></div>` +
+    `<div class="su-row"><span class="lbl" title="Standard tenors this pair doesn't mark (e.g. beyond 2Y): left out of the grid, the checks and the exports. ↺ brings one back">Removed tenors</span>` +
     (d.removed_tenors || []).map((t) => `<span class="chip">${t} <button class="ghost x" data-xt-back="${t}" title="Mark ${t} again">↺</button></span>`).join("") +
-    `<select id="xt-rm" title="Remove a standard tenor from this pair" ${off ? "disabled" : ""}><option value="">− Tenor</option>` +
-    app.tenors.filter((t) => STD_TENOR_DAYS[t]).map((t) => `<option>${t}</option>`).join("") + `</select>` +
-    `<span class="lbl sep" title="Extra deltas of this pair, e.g. 5D or 1D for steep wings: RR and BF like the 10D, typed or as a factor of the 25D">Extra deltas</span>` +
+    `<select id="xt-rm" title="Remove a standard tenor from this pair" ${dis}><option value="">− Tenor</option>` +
+    app.tenors.filter((t) => STD_TENOR_DAYS[t]).map((t) => `<option>${t}</option>`).join("") + `</select></div>` +
+    `<div class="su-row"><span class="lbl" title="Extra deltas of this pair, e.g. 5D or 1D for steep wings: RR and BF like the 10D, typed or as a factor of the 25D">Extra deltas</span>` +
     (d.deltas || []).map((x) => `<span class="chip">${x}D <button class="ghost x" data-xd-del="${x}" title="Remove ${x}D">×</button></span>`).join("") +
-    `<input id="xd-new" class="tenor-in" placeholder="5" title="Delta 1–45, e.g. 5, 1 or 30" ${off ? "disabled" : ""}>` +
-    `<button id="xd-add" class="ghost" ${off ? "disabled" : ""}>+ Delta</button>` +
-    (off ? `<span class="muted">Marked in Excel: standard tenors and 25D/10D only</span>` : "");
+    `<input id="xd-new" class="tenor-in" placeholder="5" title="Delta 1–45, e.g. 5, 1 or 30" ${dis}>` +
+    `<button id="xd-add" class="ghost" ${dis}>+ Delta</button></div>` +
+    (off ? `<div class="muted">Marked in Excel: standard tenors and 25D/10D only</div>` : "");
 }
 async function addExtraTenor(txt = $("#xt-new").value.trim().toUpperCase()) {
   if (!txt) return;
@@ -1776,10 +1778,15 @@ function otherEdits(d = app.draft, p = app.published) {
   const skip = new Set([...(ck("mode") || ck("bases") || (d.mode === "derived" && external(d) !== external(p)) ? ["corr"] : []), ...(ck("spread_ref") || ck("follow_parent") ? ["psprd"] : []),
     ]);
   const skipped = (f) => skip.has(f) || (!p.follow_market && d.follow_market && isFollowField(f));
-  const keys = STATE_KEYS.filter((k) => !SETUP_KEYS.includes(k) && k !== "pair" && k !== "tenors" && JSON.stringify(d[k]) !== JSON.stringify(p[k]));
+  // wing locks of a delta added or removed in Setup go with the setting
+  const locks = (x) => JSON.stringify((p.deltas || []).filter((v) => (d.deltas || []).includes(v)).map((v) => [x?.[`rr${v}`], x?.[`bf${v}`]]));
+  const keys = STATE_KEYS.filter((k) => !SETUP_KEYS.includes(k) && k !== "pair" && k !== "tenors" &&
+    (k === "wing_locks" ? locks(d[k]) !== locks(p[k]) : JSON.stringify(d[k]) !== JSON.stringify(p[k])));
+  // a tenor or delta added in Setup comes with its rows and fields: part of the settings
+  const pd = new Set(p.deltas || []), xd = (f) => { const m = /^(?:rr|bf)(\d+)f?$/.exec(f); return m && +m[1] !== 25 && +m[1] !== 10 && !pd.has(+m[1]); };
   const cells = [];
-  for (const t of app.tenors) for (const [f, v] of Object.entries(d.tenors[t]))
-    if (!skipped(f) && !same(v, p.tenors[t]?.[f])) cells.push([t, f]);
+  for (const t of app.tenors) if (p.tenors[t]) for (const [f, v] of Object.entries(d.tenors[t]))
+    if (!skipped(f) && !xd(f) && !same(v, p.tenors[t][f])) cells.push([t, f]);
   return { keys, cells };
 }
 function setupDirty() {
@@ -1806,7 +1813,6 @@ async function saveSettings() {
   // put back the trader's other edits (marks, weights, locks) on the saved version
   let kept = 0;
   for (const k of edits.keys) if (JSON.stringify(oldDraft[k]) !== JSON.stringify(app.draft[k])) { app.draft[k] = clone(oldDraft[k]); kept++; }
-  for (const t of Object.keys(oldDraft.tenors)) if (!app.draft.tenors[t]) app.draft.tenors[t] = clone(oldDraft.tenors[t]);   // an extra tenor added in the draft
   for (const [t, f] of edits.cells) if (!same(oldDraft.tenors[t][f], app.draft.tenors[t][f])) { app.draft.tenors[t][f] = oldDraft.tenors[t][f]; kept++; }
   if (kept) { app.tenors = tenorList(); buildGrid(); changed(); renderGrid(); }
   showTab("surface");             // back to the marks once the settings are saved
@@ -1847,6 +1853,7 @@ function renderSetup() {
   $("#su-alerts-smile").checked = !!d.alerts_smile_off;
   $("#su-alerts-smile").disabled = !!d.alerts_off;
   $(".su-tol").hidden = !!d.follow_market;
+  renderExtras();
 }
 function onSetupChange() {
   const d = app.draft, mode = $("#su-mode").value;
