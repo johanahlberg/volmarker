@@ -429,8 +429,22 @@
 <h3>History and archive</h3>
 <p>Every version of every pair is kept. Once a day, whole months older than 90 days move into compressed monthly archive files next to the pair's history. Nothing is deleted: the History and Changes tabs read the archive when they need to.</p>
 
+<h3>Market history</h3>
+<p>Every 5 minutes, the leader app also records the FMD quotes of every pair, so the desk can later study how the market moved around events. Only quotes that changed are stored, so quiet periods cost almost nothing. Recording runs in the background and doesn't slow VolMarker down.</p>
+
+<h3>Analysing the history</h3>
+<p>The <code>analysis</code> folder in the data folder holds the desk's vol history as tables you can open in Excel or load into Python or R, one file per month:</p>
+<table>
+  <tr><th>Folder</th><th>Content</th></tr>
+  <tr><td><code>marks/</code></td><td>Every published surface, with its time, pair, tenor, expiry date, ATM mid/bid/offer, spread, RR and BF, and who published it. Includes the dated copies from the Excel years.</td></tr>
+  <tr><td><code>marks_eod/</code></td><td>Each pair's end-of-day surface.</td></tr>
+  <tr><td><code>atm_eod_wide/</code></td><td>The end-of-day ATMs of all pairs side by side, one column per pair and tenor.</td></tr>
+  <tr><td><code>market/</code></td><td>The recorded FMD quotes, one file per day.</td></tr>
+</table>
+<p>Every morning VolMarker adds the previous day by itself. The files are compressed (<code>.csv.gz</code>): 7-Zip unpacks them for Excel, and Python and R read them directly.</p>
+
 <h3>The leader</h3>
-<p>One running VolMarker at a time does the desk's shared housekeeping: the daily archive, expiring skews, reading Excel's files for pairs marked in Excel, and the alert log. It is normally the first one started in the morning. If it closes, another running app takes over within about 45 seconds. Nobody has to do anything about it.</p>
+<p>One running VolMarker at a time does the desk's shared housekeeping: the daily archive, recording the market, adding the previous day to the analysis tables, expiring skews, reading Excel's files for pairs marked in Excel, and the alert log. It is normally the first one started in the morning. If it closes, another running app takes over within about 45 seconds. Nobody has to do anything about it.</p>
 
 <!-- ------------------------------------------------------------------ -->
 <h2 id="trouble">18. Troubleshooting</h2>
@@ -468,7 +482,7 @@
   <tr><td><code>fenics_dir</code></td><td><code>exports/fenics</code></td><td>Where the Fenics vol files go (quoted surface, skew included).</td></tr>
   <tr><td><code>frontarena_dir</code></td><td><code>exports/frontarena</code></td><td>Where the Front Arena vol files go (pure mids).</td></tr>
   <tr><td><code>dc_spread_dir</code></td><td><code>exports/dc_spread</code></td><td>DC spread files, for pairs with a DC spread factor.</td></tr>
-  <tr><td><code>history_dir</code></td><td><code>exports/history</code></td><td>A dated copy of the Fenics file for every manual publish.</td></tr>
+  <tr><td><code>history_dir</code></td><td><code>exports/history</code></td><td>A dated copy of the Fenics file for every manual publish. Empty (<code>""</code>): no copies.</td></tr>
   <tr><td><code>excel_dir</code></td><td>empty</td><td>Where Excel writes the files of pairs marked in Excel. Empty: <code>frontarena_dir</code>.</td></tr>
   <tr><td><code>frontarena_ccy</code></td><td><code>{"CNH": "CNY"}</code></td><td>Currencies Front Arena knows under another code. Used in Front Arena file names and lines only; Fenics keeps the original code.</td></tr>
 </table>
@@ -483,6 +497,10 @@
   <tr><td><code>fmd_brand</code></td><td><code>auto</code></td><td>Default market source: <code>auto</code> (FMD first), <code>best</code> (best of brands) or one brand.</td></tr>
   <tr><td><code>fmd_daily_basis</code></td><td><code>calendar</code></td><td>Dailies: "ND" = today + N calendar days, rolled to a good day.</td></tr>
   <tr><td><code>calendar_tz</code></td><td><code>Europe/Zurich</code></td><td>Time zone of the Bloomberg terminal the calendar is exported from.</td></tr>
+  <tr><td><code>market_record.interval_min</code></td><td>5</td><td>How often the leader app records the FMD quotes for analysis. 0 switches recording off.</td></tr>
+  <tr><td><code>market_record.brands</code></td><td><code>["FMD", "FMD1"]</code></td><td>Which brands to record. Empty: all.</td></tr>
+  <tr><td><code>market_record.dir</code></td><td><code>market_history</code></td><td>Where the recordings go, one compressed file per month.</td></tr>
+  <tr><td><code>analysis_dir</code></td><td><code>analysis</code></td><td>Where the tables for analysis go. Each morning the leader adds the previous day. Empty (<code>""</code>): off. To fill in the past once, including the dated copies from the Excel years, run <code>python scripts/export_history.py --data …\vol_data</code>; see the README.</td></tr>
 </table>
 
 <h3>Market data feed (<code>fmd</code>)</h3>
@@ -538,6 +556,8 @@
   <tr><td><code>calendar/event_defaults.csv</code></td><td>The desk's relevant events and default weights (edited in the app).</td></tr>
   <tr><td><code>calendar/bloomberg/</code></td><td>The last Bloomberg calendar import per currency.</td></tr>
   <tr><td><code>pairs/&lt;PAIR&gt;/</code></td><td>Every version of the pair, plus its monthly archive.</td></tr>
+  <tr><td><code>market_history/</code></td><td>The recorded FMD quotes, one compressed file per month: only quotes that changed since the last round, and a full set at the start of each day.</td></tr>
+  <tr><td><code>analysis/</code></td><td>The tables for analysis (section 17), one file per month, and <code>_state.json</code>, which records the last day added.</td></tr>
   <tr><td><code>users/</code></td><td>Each trader's own sidebar order, folded groups and test dates.</td></tr>
   <tr><td><code>market/</code>, <code>alerts/</code>, <code>locks/</code></td><td>Market levels from the feed, the alert log, and short-lived lock files.</td></tr>
 </table>

@@ -528,6 +528,48 @@ class TestArchive(unittest.TestCase):
         self.assertEqual(self.svc.publish("EURUSD", st, expected_version=40)["version"], 41)
 
 
+class TestMarketRecorder(unittest.TestCase):
+    """The leader keeps an FMD history for analysis: changed quotes only, a full set per day."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(self.tmp.name)
+        self.svc = Service(self.store, "anna")
+        q = lambda tenor, mark, bid, brand="FMD": {"tenor": tenor, "mark": mark, "ptype": "DNS", "brand": brand,
+                                                   "bid": bid, "offer": bid + 0.3, "mid": bid + 0.15, "ts": "x"}
+        self.svc.market = {"EURUSD": [q("1M", "atm", 7.0), q("3M", "atm", 7.2), q("1M", "atm", 6.9, "BGC")],
+                           "USDJPY": [q("1M", "atm", 10.0)]}
+        self.q = q
+        self.t0 = datetime(2026, 11, 4, 9, 0, tzinfo=timezone.utc).timestamp()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def lines(self):
+        import gzip
+        f = Path(self.tmp.name) / "market_history" / "2026-11.jsonl.gz"
+        return [json.loads(l) for l in gzip.decompress(f.read_bytes()).decode().splitlines()]
+
+    def test_changes_only(self):
+        self.assertEqual(self.svc.record_market(self.t0), 3)              # FMD only, not BGC
+        self.assertEqual(self.svc.record_market(self.t0 + 60), 0)         # too soon
+        self.assertEqual(self.svc.record_market(self.t0 + 300), 0)        # nothing moved
+        self.svc.market["EURUSD"][0] = self.q("1M", "atm", 7.1)
+        self.assertEqual(self.svc.record_market(self.t0 + 600), 1)
+        rec = self.lines()
+        self.assertEqual([(r["p"], r["full"], len(r["q"])) for r in rec],
+                         [("EURUSD", True, 2), ("USDJPY", True, 1), ("EURUSD", False, 1)])
+        self.assertEqual(rec[-1]["q"][0][:5], ["1M", "atm", "DNS", "FMD", 7.1])
+        self.assertEqual(self.svc.record_market(self.t0 + 86400), 3)      # a new UTC day: every quote again
+        self.assertTrue(all(r["full"] for r in self.lines()[-2:]))
+
+    def test_off(self):
+        cfg = json.loads((Path(self.tmp.name) / "config.json").read_text())
+        cfg["market_record"]["interval_min"] = 0
+        (Path(self.tmp.name) / "config.json").write_text(json.dumps(cfg))
+        self.assertEqual(self.svc.record_market(self.t0), 0)
+        self.assertFalse((Path(self.tmp.name) / "market_history").exists())
+
+
 class TestConfigFile(unittest.TestCase):
     def test_bad_json_is_reported(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -783,6 +825,16 @@ class TestBackgroundPropagation(unittest.TestCase):
         hist = list((Path(self.tmp.name) / "exports" / "history").glob("USDCHF_*.csv"))
         self.assertTrue(hist)                # manual USDCHF publishes get a copy, the follow-up (1M 7.8) doesn't
         self.assertFalse(any("vol,atm,USD,CHF,1m,7.55,8.05" in h.read_text() for h in hist))
+
+    def test_no_history_copies_with_empty_history_dir(self):
+        cfg_path = Path(self.tmp.name) / "config.json"
+        cfg = json.loads(cfg_path.read_text())
+        cfg["history_dir"] = ""
+        cfg_path.write_text(json.dumps(cfg))
+        before = sorted(p.name for p in Path(self.tmp.name).rglob("*.csv"))
+        self._move_eurusd(0.2)
+        self.assertEqual(sorted(p.name for p in Path(self.tmp.name).rglob("*.csv")), before)
+        self.assertTrue((Path(self.tmp.name) / "exports" / "fenics" / "EURUSDvolsurface.txt").exists())
 
     def test_queue_collapses_and_manual_wins(self):
         self.svc._prop_thread = object()      # worker "busy": things only queue up

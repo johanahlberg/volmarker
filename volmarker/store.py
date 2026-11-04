@@ -61,7 +61,7 @@ DEFAULT_CONFIG = {
     "fenics_dir": "exports/fenics",
     "frontarena_dir": "exports/frontarena",
     "dc_spread_dir": "exports/dc_spread",      # the macro's DC_SPRD folder
-    "history_dir": "exports/history",          # the macro's History folder
+    "history_dir": "exports/history",          # the macro's History folder: a dated copy per manual publish ("" = none)
     "excel_dir": "",                           # where Excel writes the files of pairs marked in Excel (empty: frontarena_dir)
     "frontarena_ccy": {"CNH": "CNY"},          # currencies Front Arena knows under another code (its files only, not Fenics)
     "archive_keep_days": 90,                   # history.jsonl keeps at least this many days; older whole months go to pairs/<PAIR>/archive/
@@ -139,6 +139,11 @@ DEFAULT_CONFIG = {
     "fmd_brand": "auto",
     "fmd_daily_basis": "calendar",   # FXO convention: "ND" = today + N calendar days, rolled to a good day
     "market_stale_minutes": 30,
+    # FMD history for analysis: the leader appends the quotes that changed since its last round
+    # to <dir>/YYYY-MM.jsonl.gz (UTC month), every interval_min (0 = off); brands: which to keep
+    "market_record": {"interval_min": 5, "brands": ["FMD", "FMD1"], "dir": "market_history"},
+    # tables for analysis (volmarker/analysis.py): the leader appends each finished day ("" = off)
+    "analysis_dir": "analysis",
     # Market mode: pairs with "Follow FMD" get FMD mids published automatically by the feed process
     "follow": {
         "interval_s": 2,                # how often the follower looks at the market
@@ -202,7 +207,11 @@ class Store:
         return json.loads(cached[1])
 
     def path_from_config(self, key: str) -> Path:
-        p = Path(self.config()[key])
+        return self.path_from_config_value(self.config()[key])
+
+    def path_from_config_value(self, value: str) -> Path:
+        """A folder from config.json: absolute, or relative to the data folder."""
+        p = Path(value)
         return p if p.is_absolute() else self.root / p
 
     # ---- locking ------------------------------------------------------

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import gzip
 import json
 import logging
 import queue
@@ -16,6 +17,8 @@ from pathlib import Path
 
 from . import exports
 from .alerts import AlertEngine, deviation, iso, level
+from .analysis import Exporter
+from .tz import to_local
 from .conventions import TENORS, normalise_pair
 from . import bbg, weights_export
 from .calendar import (DEFAULT_CUT, calibrate_to_quotes, cumulative_weights, daily_dates, default_events, expiry_for,
@@ -69,6 +72,10 @@ class Service:
         self.fenics = FenicsLogin(store)          # FMD 1.0 feed while a trader is logged in to Fenics
         self._leader = False
         self._archived_on: date | None = None         # the day this app last ran the history archive
+        self._analysed_on: date | None = None         # ... and the daily export for analysis
+        self._rec_at = 0.0                            # market recorder: last round (time.time())
+        self._rec_day = ""                            # ... its UTC day; a new day starts with every quote
+        self._rec_last: dict[str, dict] = {}          # ... pair -> {(tenor, mark, ptype, brand): (bid, offer, mid)}
         self.excel_foreign: dict[str, float] = {}     # pair -> mtime of a file changed outside VolMarker
         self.excel_errors: dict[str, str] = {}
         self._prop_cv = threading.Condition()
@@ -951,8 +958,10 @@ class Service:
         if rec.get("excel"):            # Excel writes this pair's files; never overwrite them
             return
         dirs = {k: self.store.path_from_config(f"{k}_dir") for k in ("fenics", "frontarena", "dc_spread", "history")}
-        # a history copy for manual publishes, as the Excel macro made; the pair's history.jsonl keeps every version
-        exports.write_exports(rec, resolve(rec), dirs, history=rec.get("source") == "manual", fa_ccy=self._fa_ccy())
+        # a history copy for manual publishes, as the Excel macro made (empty history_dir: none); the
+        # pair's history.jsonl keeps every version anyway
+        copy = rec.get("source") == "manual" and bool(self.store.config().get("history_dir"))
+        exports.write_exports(rec, resolve(rec), dirs, history=copy, fa_ccy=self._fa_ccy())
 
     def _fa_ccy(self) -> dict:
         """Currencies Front Arena knows under another code (config frontarena_ccy, e.g. CNH -> CNY)."""
@@ -1253,11 +1262,19 @@ class Service:
     def housekeeping(self) -> None:
         self._leader = self.is_leader()
         if not self._leader:
+            self._rec_last = {}          # a later leadership starts with every quote again
             return
         self.reconcile()
         if self._archived_on != date.today():
             self._archived_on = date.today()
             self.archive_history()
+        try:
+            self.record_market()
+        except Exception:
+            log.exception("recording the market failed")
+        if self._analysed_on != date.today():
+            self._analysed_on = date.today()
+            self.export_analysis()
         now = now_iso()
         for pair, rec in list(self.cache.items()):
             exp = rec.get("skew_expiry")
@@ -1292,6 +1309,64 @@ class Service:
             except Exception:                # tried again tomorrow; nothing is lost either way
                 log.exception("archiving %s failed", pair)
         return moved
+
+    def export_analysis(self, today: date | None = None) -> list[date]:
+        """Once a day (the leader): the finished days since the last export appended to
+        the analysis tables (analysis_dir; empty = off). See volmarker.analysis."""
+        if not self.store.config().get("analysis_dir"):
+            return []
+        try:
+            days = Exporter(self.store).daily(today)
+            if days:
+                log.info("analysis tables: %s exported", ", ".join(d.isoformat() for d in days))
+            return days
+        except Exception:                    # tried again tomorrow; the state says where it got to
+            log.exception("analysis export failed")
+            return []
+
+    def record_market(self, now: float | None = None) -> int:
+        """The leader, every market_record.interval_min: the FMD quotes that changed
+        since the last round, appended to <dir>/YYYY-MM.jsonl.gz (UTC month), one
+        line per pair: {"t": time, "p": pair, "full": bool, "q": [[tenor, mark,
+        ptype, brand, bid, offer, mid, quote time], ...]}. The first round of a local
+        day (calendar_tz; and of a new leader) writes every quote ("full"), so a day
+        can be read on its own. Unchanged quotes cost nothing. Returns the quotes written."""
+        cfg = self.store.config().get("market_record") or {}
+        every = float(cfg.get("interval_min") or 0) * 60
+        now = time.time() if now is None else now
+        if every <= 0 or now - self._rec_at < every:
+            return 0
+        self._rec_at = now
+        t = datetime.fromtimestamp(now, timezone.utc)
+        day = to_local(t, self.store.config().get("calendar_tz") or "Europe/Zurich").strftime("%Y-%m-%d")
+        if day != self._rec_day:
+            self._rec_day, self._rec_last = day, {}
+        brands = set(cfg.get("brands") or [])
+        with self._lock:
+            market = {p: list(q) for p, q in self.market.items()}
+        lines, n = [], 0
+        for pair in sorted(market):
+            last = self._rec_last.get(pair)
+            cur, rows = {}, []
+            for q in market[pair]:
+                if brands and q.get("brand") not in brands:
+                    continue
+                key = (q.get("tenor"), q.get("mark"), q.get("ptype"), q.get("brand"))
+                val = (q.get("bid"), q.get("offer"), q.get("mid"))
+                cur[key] = val
+                if last is None or last.get(key) != val:
+                    rows.append([*key, *val, q.get("ts")])
+            self._rec_last[pair] = cur
+            if rows:
+                lines.append(json.dumps({"t": iso(now), "p": pair, "full": last is None, "q": rows},
+                                        separators=(",", ":")))
+                n += len(rows)
+        if lines:
+            path = self.store.path_from_config_value(cfg.get("dir") or "market_history") / f"{t:%Y-%m}.jsonl.gz"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with self.store.lock("market-record", self.user), gzip.open(path, "ab") as f:
+                f.write(("\n".join(lines) + "\n").encode("utf-8"))      # one gzip member per round
+        return n
 
     def start_background(self) -> None:
         self.start_propagation()

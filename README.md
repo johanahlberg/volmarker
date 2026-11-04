@@ -91,6 +91,7 @@ The WebAPI uses the bank's HTTPS proxy from `HTTPS_PROXY`. A proxy that inspects
   - An event lands on the first daily expiry that contains it.
   - Dailies follow the FXO convention: "ND" = today + N calendar days, rolled to a good day for both currencies (`fmd_daily_basis`: "calendar"). Dailies that share an expiry, e.g. over a weekend, collapse into one.
 - **Audit:** every manual publish stores the broker mids at that moment (`market_at_publish`) in the history.
+- **Market history:** the leader app records the FMD quotes every `market_record.interval_min` (5) into `market_history/YYYY-MM.jsonl.gz`, for analysis (see below). Only quotes that changed since the last round are written, and each day starts with a full set. `brands` picks which to keep (FMD and FMD1 by default); `interval_min: 0` switches it off. A round takes a few milliseconds; expect roughly 0.5–1.5 GB a year for 90 pairs, depending on how much the market moves.
 - **Quote age:** quotes older than `market_stale_minutes` (default 30) are shown faded and skipped by **Market mid**.
 
 ## Market mode (Follow FMD)
@@ -154,7 +155,7 @@ Every publish writes the vol files in the layout of the Excel marking workbook (
 | `<CCY1><CCY2>volsurface.txt` | `frontarena_dir` | the export folder (also where pairs marked in Excel are read from, unless `excel_dir` is set) | `vol,EUR,USD,1mo,<ATM bid>,<ATM ask>`, then `vol25`/`vol10` `strangle`/`riskreversal` mids. Pure mids, never skewed. Tenors `1d 1wk 2wk 1mo … 1yr … 5yr`. |
 | `<CCY1><CCY2>volsurface.txt` | `fenics_dir` | `…\FENICSVOLS\` | `vol,atm\|s25\|rr25\|s10\|rr10,EUR,USD,1m,<bid>,<ask>`, quoted surface (skew included). RR and BF go out with bid = ask = mid, since Fenics only uses the mid. Tenors `1d 1w 2w 1m … 1y … 5y`. |
 | `<CCY1><CCY2>spreads.txt` | `dc_spread_dir` | `…\DC_SPRD\` | `1m,<ATM spread × 0.5 × DC factor>`, only for pairs with a **DC spread factor** of at least 0.01 (Setup). |
-| `<CCY1><CCY2>_yyyymmdd_hhmmss.csv` | `history_dir` | `…\History\` | A copy of the Fenics file for every manual publish, as the macro made. Not for automatic versions (FMD feed, derived and parent follow-ups); the pair's history keeps every version anyway. |
+| `<CCY1><CCY2>_yyyymmdd_hhmmss.csv` | `history_dir` | `…\History\` | A copy of the Fenics file for every manual publish, as the macro made. Not for automatic versions (FMD feed, derived and parent follow-ups); the pair's history keeps every version anyway. Set `history_dir` to `""` to switch the copies off. |
 
 Front Arena knows some currencies under another code: `frontarena_ccy` in `config.json` (default `{"CNH": "CNY"}`) renames them in everything that goes to Front Arena, i.e. the vol file's name and lines (USDCNH → `USDCNYvolsurface.txt`, `vol,USD,CNY,…`) and the FA_FX/FA_WS event files, and is used when reading those files back (pairs marked in Excel, Last export). Fenics keeps CNH.
 
@@ -184,6 +185,22 @@ with seven weekday weights per pair (e.g. Mon 1.05, Tue-Fri 1, Sat/Sun 0) and a 
 - Fenics: one `gfi_message` (`load_events` / `WEIGHT_FEED`) posted as `xml=…` to `weights_export.fenics_url` + `/xmlposter`. It carries the weekday weights, the holiday base weights (FirstCcy = ccy2, SecondCcy = ccy1) and the events. An event on a holiday of its own currency is sent as a holiday weight `h + w / (weekday x other holiday)`. User and password are asked each time; the password is passed on and never stored. A copy of the message without the password is kept in `exports/weights/fenics/`.
 - Front Arena: `FA_FX/<CCY1><CCY2>_events.txt` (ccy,date,event,weight per expiry) and `FA_WS/…` (moved to the business day before, weight (w + base) / base). Folders and date format in `config.json` → `weights_export` (default yyyy-mm-dd: the macro wrote the PC's regional format, which was yyyy-mm-dd on the desk PCs in Oct 2026 and dd.mm.yyyy on an earlier send).
 - Every send is logged in `exports/weights_sent.jsonl`; the card says when weights, defaults or the calendar changed since the last send.
+
+## Analysing the history
+
+The desk's vol history is kept as flat tables for Excel, Python or R in `analysis_dir` (default `analysis` in the data folder; `""` switches it off). Days and months are local days in `calendar_tz`.
+
+| File | Content |
+|---|---|
+| `marks/YYYY-MM.csv.gz` | Every snapshot of the month, one row per snapshot and tenor: UTC and local time, pair, tenor, the tenor's expiry on that day, ATM mid/bid/offer, spread, 25D/10D RR and BF, source, user and version |
+| `marks_eod/YYYY-MM.csv.gz` | Each pair's last snapshot of every day |
+| `atm_eod_wide/YYYY-MM.csv.gz` | The end-of-day ATM mid with one column per pair and tenor, the starting point for correlations |
+| `market/YYYY-MM/YYYY-MM-DD.csv.gz` | The day's recorded FMD quotes (tenor, mark, ATM type, brand, bid, offer, mid, quote time), changes only; `full_set` = 1 on the day's first set |
+
+- **Every morning** the leader app appends each finished day (normally yesterday; missed days are caught up) to its month's files, rebuilds the month's wide table and writes the day's market file. It only adds to the month files; their sizes are kept in `_state.json`, so a run cut off halfway is cut back and redone the next morning.
+- **Back-fill, once:** `python scripts/export_history.py --data <data folder>` writes everything up to yesterday in the same layout, including the dated Fenics copies `<PAIR>_yyyymmdd_hhmmss.csv` from the Excel years (`--legacy <folder>`, default `history_dir`). Those copies are read as mids since they had no skew, their time stamps as the PC's wall clock in `calendar_tz` (or `--tz`), and only from before the pair's first VolMarker version. Running it again rewrites the months it covers, e.g. after adding old files.
+- RRs are call − put in the pair's own terms: an inverse pair's Fenics RRs are flipped back by its current Inverse setting.
+- Only the history is read; nothing else in the data folder changes.
 
 ## Conventions and maths
 
