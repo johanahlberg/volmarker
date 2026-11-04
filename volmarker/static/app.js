@@ -6,7 +6,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type", "lock_rr10f", "lock_bf10f",
   "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "inverse", "follow_bases",
-  "deltas", "extra_tenors", "wing_locks", "tenors"];
+  "deltas", "extra_tenors", "removed_tenors", "wing_locks", "tenors"];
 // pair settings the Setup tab saves on its own (service.SETTING_KEYS)
 const SETUP_KEYS = ["mode", "bases", "key", "group", "spread_ref", "follow_parent", "follow_bases", "cut", "dc_factor",
   "atm_type", "follow_market", "excel", "alert_tol", "alerts_off", "alerts_smile_off", "inverse"];
@@ -19,14 +19,15 @@ const allDeltas = (d = app.draft) => [25, 10, ...(d?.deltas || [])].sort((a, b) 
 const wingDeltas = (d = app.draft) => allDeltas(d).filter((x) => x !== 25);
 const allMarks = (d = app.draft) => ["atm", ...allDeltas(d).map((x) => "rr" + x), ...allDeltas(d).map((x) => "bf" + x)];
 const markLabel = (m) => (m === "atm" ? "ATM" : `${m.slice(2)}D ${m.slice(0, 2).toUpperCase()}`);
-// the standard tenors and the pair's extra ones (e.g. 3W over an event), by maturity
+// the standard tenors the pair marks (removed_tenors left out) and its extra ones (e.g. 3W over an event), by maturity
 const STD_TENOR_DAYS = { ON: 1, "1W": 7, "2W": 14, "1M": 30, "2M": 61, "3M": 91, "6M": 182, "9M": 273, "1Y": 365, "2Y": 730, "3Y": 1095, "4Y": 1461, "5Y": 1826 };
 function tenorDays(t) {
   if (STD_TENOR_DAYS[t]) return STD_TENOR_DAYS[t];
   const m = /^(\d+)([WMY])$/.exec(t);
   return m ? Math.round(+m[1] * { W: 7, M: 30.4375, Y: 365 }[m[2]]) : 1e9;
 }
-const tenorList = (d = app.draft) => [...Object.keys(STD_TENOR_DAYS), ...Object.keys(d?.extra_tenors || {})].sort((a, b) => tenorDays(a) - tenorDays(b));
+const tenorList = (d = app.draft) => [...Object.keys(STD_TENOR_DAYS).filter((t) => !(d?.removed_tenors || []).includes(t)),
+  ...Object.keys(d?.extra_tenors || {})].sort((a, b) => tenorDays(a) - tenorDays(b));
 // the lock of a wing: lock_rr10f / lock_bf10f, an extra delta's in wing_locks ({rr5: true})
 function getLock(k, s = app.draft) {
   const m = /^lock_(rr|bf)(\d+)f$/.exec(k);
@@ -415,7 +416,8 @@ function fillShiftControls() {
   for (const el of [$("#sh-from"), $("#sh-to")]) {
     const v = el.value || el.dataset.v;
     el.innerHTML = app.tenors.map((t) => `<option>${t}</option>`).join("");
-    el.value = app.tenors.includes(v) ? v : el.dataset.v;
+    el.value = app.tenors.includes(v) ? v : app.tenors.includes(el.dataset.v) ? el.dataset.v
+      : app.tenors[el.id === "sh-from" ? 0 : app.tenors.length - 1];
   }
 }
 
@@ -431,19 +433,25 @@ function renderExtras() {
       `<button class="ghost x" data-xt-del="${t}" title="Remove ${t}">×</button></span>`).join("") +
     `<input id="xt-new" class="tenor-in" placeholder="3W" title="A week, month or year tenor, e.g. 3W, 4M, 18M" ${off ? "disabled" : ""}>` +
     `<button id="xt-add" class="ghost" ${off ? "disabled" : ""}>+ Tenor</button>` +
+    `<span class="lbl sep" title="Standard tenors this pair doesn't mark (e.g. beyond 2Y): left out of the grid, the checks and the exports. ↺ brings one back">Removed tenors</span>` +
+    (d.removed_tenors || []).map((t) => `<span class="chip">${t} <button class="ghost x" data-xt-back="${t}" title="Mark ${t} again">↺</button></span>`).join("") +
+    `<select id="xt-rm" title="Remove a standard tenor from this pair" ${off ? "disabled" : ""}><option value="">− Tenor</option>` +
+    app.tenors.filter((t) => STD_TENOR_DAYS[t]).map((t) => `<option>${t}</option>`).join("") + `</select>` +
     `<span class="lbl sep" title="Extra deltas of this pair, e.g. 5D or 1D for steep wings: RR and BF like the 10D, typed or as a factor of the 25D">Extra deltas</span>` +
     (d.deltas || []).map((x) => `<span class="chip">${x}D <button class="ghost x" data-xd-del="${x}" title="Remove ${x}D">×</button></span>`).join("") +
     `<input id="xd-new" class="tenor-in" placeholder="5" title="Delta 1–45, e.g. 5, 1 or 30" ${off ? "disabled" : ""}>` +
     `<button id="xd-add" class="ghost" ${off ? "disabled" : ""}>+ Delta</button>` +
     (off ? `<span class="muted">Marked in Excel: standard tenors and 25D/10D only</span>` : "");
 }
-async function addExtraTenor() {
-  const txt = $("#xt-new").value.trim().toUpperCase();
+async function addExtraTenor(txt = $("#xt-new").value.trim().toUpperCase()) {
   if (!txt) return;
   try {
     const r = await api(`/api/pairs/${app.current}/tenor-row`, { state: app.draft, tenor: txt });
     if (app.tenors.includes(r.tenor)) throw new Error(`${r.tenor} is already a tenor of ${app.current}`);
-    app.draft.extra_tenors = { ...(app.draft.extra_tenors || {}), [r.tenor]: null };     // no end date unless one is set
+    if (STD_TENOR_DAYS[r.tenor]) {              // a standard tenor the pair had removed: marked again
+      const rest = (app.draft.removed_tenors || []).filter((t) => t !== r.tenor);
+      app.draft.removed_tenors = rest.length ? rest : null;
+    } else app.draft.extra_tenors = { ...(app.draft.extra_tenors || {}), [r.tenor]: null };     // no end date unless one is set
     app.draft.tenors[r.tenor] = r.row;
     app.view.expiries = { ...app.view.expiries, [r.tenor]: r.expiry };
     hideBanner("error");
@@ -466,6 +474,10 @@ function removeExtra(kind, key) {
   const d = app.draft;
   if (kind === "tenor") {
     const { [key]: _, ...rest } = d.extra_tenors; d.extra_tenors = Object.keys(rest).length ? rest : null;
+    delete d.tenors[key];
+  } else if (kind === "std") {                  // a standard tenor the pair doesn't mark
+    if (app.tenors.length <= 2) return;
+    d.removed_tenors = [...(d.removed_tenors || []), key].sort((a, b) => tenorDays(a) - tenorDays(b));
     delete d.tenors[key];
   } else {
     const x = +key;
@@ -1908,7 +1920,7 @@ async function renderHistory() {
   $("#history").innerHTML = `<thead><tr><th>v</th><th class="tn">Time</th><th class="tn">User</th><th class="tn">Source</th><th class="tn">Comment</th><th>1M ATM</th><th>1Y ATM</th><th></th></tr></thead><tbody>` +
     h.map((r, i) => `<tr><td>${r.version}</td><td class="tn">${localTime(r.ts)}</td><td class="tn">${esc(r.user)}</td>
       <td class="tn">${esc(r.source)}</td><td class="tn">${esc(r.comment)}</td>
-      <td>${fmt(r.tenors["1M"].atm, 3)}</td><td>${fmt(r.tenors["1Y"].atm, 3)}</td>
+      <td>${fmt(r.tenors["1M"]?.atm, 3)}</td><td>${fmt(r.tenors["1Y"]?.atm, 3)}</td>
       <td>${i ? `<button class="ghost restore" data-i="${i}" title="Copy this version into the draft">Restore</button>` : ""}</td></tr>`).join("") + "</tbody>";
 }
 
@@ -2241,6 +2253,7 @@ function wire() {
     else if (b.id === "xd-add") addExtraDelta();
     else if (b.dataset.xtDel) removeExtra("tenor", b.dataset.xtDel);
     else if (b.dataset.xdDel) removeExtra("delta", b.dataset.xdDel);
+    else if (b.dataset.xtBack) addExtraTenor(b.dataset.xtBack);
   });
   ex.addEventListener("keydown", (e) => {
     if (e.key !== "Enter") return;
@@ -2248,6 +2261,7 @@ function wire() {
     if (e.target.id === "xd-new") addExtraDelta();
   });
   ex.addEventListener("change", (e) => {
+    if (e.target.id === "xt-rm") { if (e.target.value) removeExtra("std", e.target.value); return; }
     const t = e.target.dataset.xtUntil; if (!t) return;
     app.draft.extra_tenors = { ...app.draft.extra_tenors, [t]: e.target.value || null };
     changed(); renderGrid();

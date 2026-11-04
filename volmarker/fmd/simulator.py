@@ -53,7 +53,7 @@ def build_instruments(store: Store, seed: int | None = None) -> list[Instrument]
     for pair in store.list_pairs():
         rec = store.latest(pair)
         res = resolve(rec)
-        for t in TENORS:
+        for t in res:
             mid = res[t]["mid"]
             if mid["atm"] is None:
                 continue
@@ -82,7 +82,7 @@ def daily_instruments(store: Store, pair: str, rec: dict, res: dict, rnd: random
     today = date.today()
     dd = daily_dates(pair, today, list(range(1, 15)), holidays,
                      store.config().get("fmd_daily_basis", "calendar"))
-    atm = {t: res[t]["mid"]["atm"] for t in TENORS}
+    atm = {t: r["mid"]["atm"] for t, r in res.items()}
     vols = interpolate_atm(pair, atm, today, list(dd.values()), w, holidays)
     off = rnd.gauss(0, 0.1)
     out = []

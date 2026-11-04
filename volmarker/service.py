@@ -42,7 +42,7 @@ def _atms(rec: dict) -> dict[str, float | None]:
 
 STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type",
               "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "inverse", "follow_bases",
-              "deltas", "extra_tenors", "wing_locks", "tenors"]
+              "deltas", "extra_tenors", "removed_tenors", "wing_locks", "tenors"]
 LEADER_STALE = 45.0
 FEED_STALE = 15.0
 FOLLOW_STALE = 30.0
@@ -126,7 +126,7 @@ class Service:
                 "alerts": len(alerts), "alerts_new": sum(not a["acked"] for a in alerts),
                 "skew": skew_active(r),
                 "warnings": len(r.get("warnings", [])),
-                "atm_1m": r["tenors"]["1M"]["atm"],
+                "atm_1m": (r["tenors"].get("1M") or {}).get("atm"),
                 "mkt": pair_has_market,
                 "mkt_out": len(outside) if outside is not None else None,
             })
@@ -608,12 +608,20 @@ class Service:
                 "atm": _atms(r)}
 
     def new_tenor_row(self, pair: str, draft: dict, tenor: str) -> dict:
-        """Marks for an extra tenor being added to the draft: the ATM the curve already gives
-        its expiry (interpolated with the event weights, so adding it changes nothing until
-        it is marked), the rest interpolated in days between its neighbours (flat beyond)."""
-        t = norm_extra_tenor(tenor)
-        draft = dict(draft, extra_tenors={k: v for k, v in (draft.get("extra_tenors") or {}).items()
-                                          if k.strip().upper() != t})
+        """Marks for a tenor being added to the draft (an extra one, or a standard one the pair
+        had removed): the ATM the curve already gives its expiry (interpolated with the event
+        weights, so adding it changes nothing until it is marked), the rest interpolated in
+        days between its neighbours (flat beyond)."""
+        t = str(tenor or "").strip().upper()
+        removed = [x for x in (draft.get("removed_tenors") or []) if x != t]
+        if t in TENORS:
+            if t not in (draft.get("removed_tenors") or []):
+                raise ValueError(f"{t} is already a tenor of {pair}")
+        else:
+            t = norm_extra_tenor(t)
+        draft = dict(draft, removed_tenors=removed + ([t] if t in TENORS else []),
+                     extra_tenors={k: v for k, v in (draft.get("extra_tenors") or {}).items()
+                                   if k.strip().upper() != t})
         rec = self._state_for(pair, draft)
         if rec is None:
             raise ValueError(f"Unknown pair {pair}")
@@ -724,6 +732,8 @@ class Service:
     def _apply_marks(state: dict, marks: dict) -> None:
         """Put a file's marks into a state; 10D factors are calibrated to them."""
         for t in TENORS:
+            if t not in state["tenors"]:
+                continue                                 # a tenor the pair doesn't mark
             row, m = state["tenors"][t], marks[t]
             row.update(m)
             if "atm" in m:

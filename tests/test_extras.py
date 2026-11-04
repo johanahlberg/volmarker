@@ -253,6 +253,64 @@ class TestService(unittest.TestCase):
         self.assertAlmostEqual(al[0]["tol"], tol)
 
 
+class TestRemovedTenors(unittest.TestCase):
+    """Standard tenors a pair doesn't mark, e.g. beyond 2Y."""
+    def test_model_and_exports(self):
+        s = surface("EURUSD")
+        s["removed_tenors"] = ["5y", "3Y", "4Y"]
+        s = clean_state(s)
+        self.assertEqual(s["removed_tenors"], ["3Y", "4Y", "5Y"])
+        self.assertEqual(tenor_list(s)[-1], "2Y")
+        self.assertNotIn("3Y", s["tenors"])
+        res = resolve(s)
+        self.assertEqual(list(res)[-1], "2Y")
+        fen = fenics_lines("EURUSD", res)
+        self.assertEqual(len(fen), 10 * 5)
+        self.assertFalse(any(",3y," in l for l in fen))
+        self.assertFalse([w for w in check_surface(s) if "3Y" in w])
+        for bad in (["7Y"], TENORS[:-1]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                clean_state(dict(surface("EURUSD"), removed_tenors=bad))
+        with self.assertRaisesRegex(ValueError, "Excel"):
+            clean_state(dict(surface("EURUSD"), excel=True, removed_tenors=["5Y"]))
+
+    def test_derived_warns_when_a_base_removed_it(self):
+        bases = {b: clean_state(surface(b, atm)) for b, atm in (("EURUSD", 7.0), ("USDCHF", 8.0))}
+        bases["USDCHF"] = clean_state(dict(bases["USDCHF"], removed_tenors=["5Y"]))
+        s = new_state("EURCHF", "derived", ["EURUSD", "USDCHF"])
+        for t in TENORS:
+            s["tenors"][t].update(corr=0.5, atm=6.0)
+        s, warnings = apply_derivation(clean_state(s), bases)
+        self.assertEqual(s["tenors"]["5Y"]["atm"], 6.0)
+        self.assertIn("5Y: not marked on USDCHF; ATM kept as typed", warnings)
+
+    def test_service_remove_and_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            svc = Service(store, "anna")
+            svc.create_pair("EURUSD", "marked", None, True)
+            s = surface("EURUSD")
+            for i, t in enumerate(TENORS):
+                s["tenors"][t]["atm"] = 6.0 + 0.1 * i
+            svc.publish("EURUSD", s, 1)
+            d = {k: copy.deepcopy(store.latest("EURUSD").get(k)) for k in STATE_KEYS}
+            d["removed_tenors"] = ["1M", "4Y", "5Y"]
+            rec = svc.publish("EURUSD", d, 2, "no long end")
+            self.assertNotIn("5Y", rec["tenors"])
+            self.assertIsNone(svc.summaries()[0]["atm_1m"])            # the sidebar copes without 1M
+            self.assertNotIn("5Y", svc.view("EURUSD")["expiries"])
+            fa = (Path(tmp) / "exports" / "frontarena" / "EURUSDvolsurface.txt").read_text()
+            self.assertNotIn(",5yr,", fa)
+            # bring 4Y back: it starts on the curve, extrapolated beyond 3Y
+            d = {k: copy.deepcopy(rec.get(k)) for k in STATE_KEYS}
+            r = svc.new_tenor_row("EURUSD", d, "4Y")
+            self.assertEqual(r["tenor"], "4Y")
+            self.assertGreater(r["row"]["atm"], rec["tenors"]["3Y"]["atm"] - 0.5)
+            with self.assertRaises(ValueError):
+                svc.new_tenor_row("EURUSD", d, "3Y")                   # still marked
+            svc.load_export_file("EURUSD", d)                           # a file with every tenor
+
+
 class TestAnalysis(unittest.TestCase):
     def test_version_marks_and_rows(self):
         with tempfile.TemporaryDirectory() as tmp:

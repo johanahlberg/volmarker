@@ -24,6 +24,8 @@ Extra deltas (pair setting deltas, e.g. [5, 1] for steep wings, or 30) work like
 per tenor rr5, rr5f, bf5, bf5f, ..., with their locks in wing_locks ({"rr5": True, ...}).
 Extra tenors (extra_tenors: {"3W": "2026-12-04"}) are marked like the standard ones until
 their removal date, when the leader removes them (None: kept until removed by hand).
+Standard tenors a pair doesn't mark (removed_tenors, e.g. ["3Y", "4Y", "5Y"]) are left out of
+its grid, checks, exports and interpolation; old versions keep them.
 
 Other pair-level settings: group (sidebar group, e.g. "Scandies"), spread_ref
 (spread parent: the grid shows ATM minus the parent's ATM), cut (option expiry
@@ -67,6 +69,8 @@ DEFAULT_TENOR = {
 }
 
 
+MIN_TENORS = 2
+
 # starting factors of an extra delta (to 25D), interpolated in delta; the desk sets its own
 RR_FACTOR = {1: 4.0, 5: 2.6, 10: 1.9, 15: 1.5, 20: 1.2, 25: 1.0, 30: 0.8, 35: 0.6, 40: 0.4, 45: 0.2}
 BF_FACTOR = {1: 12.0, 5: 6.0, 10: 3.3, 15: 2.1, 20: 1.4, 25: 1.0, 30: 0.7, 35: 0.45, 40: 0.25, 45: 0.1}
@@ -109,8 +113,9 @@ def follow_fields(state: dict) -> list[str]:
 
 
 def tenor_list(state: dict) -> list[str]:
-    """The standard tenors and the pair's extra ones, by maturity."""
-    return sort_tenors(TENORS + list(state.get("extra_tenors") or {}))
+    """The standard tenors the pair marks and its extra ones, by maturity."""
+    removed = set(state.get("removed_tenors") or [])
+    return sort_tenors([t for t in TENORS if t not in removed] + list(state.get("extra_tenors") or {}))
 
 
 def is_locked(state: dict, w: str, d: int) -> bool:
@@ -177,9 +182,16 @@ def clean_state(state: dict) -> dict:
         extra[t] = date.fromisoformat(until).isoformat() if until else None
     if len(extra) > MAX_EXTRA_TENORS:
         raise ValueError(f"At most {MAX_EXTRA_TENORS} extra tenors")
-    if s["excel"] and (deltas or extra):
+    removed = sorted({str(t).strip().upper() for t in (s.get("removed_tenors") or [])}, key=tenor_days)
+    for t in removed:
+        if t not in TENORS:
+            raise ValueError(f"{t} is not a standard tenor")
+    if len(TENORS) - len(removed) + len(extra) < MIN_TENORS:
+        raise ValueError(f"A pair needs at least {MIN_TENORS} tenors")
+    if s["excel"] and (deltas or extra or removed):
         raise ValueError("A pair marked in Excel has the standard tenors and 25D/10D only "
-                         "(remove its extra tenors and deltas first)")
+                         "(take back its removed tenors and remove its extra tenors and deltas first)")
+    s["removed_tenors"] = removed or None
     s["deltas"] = deltas or None
     s["extra_tenors"] = dict(sorted(extra.items(), key=lambda kv: tenor_days(kv[0]))) or None
     locks = s.get("wing_locks") or {}
@@ -299,6 +311,9 @@ def apply_derivation(state: dict, base_states: dict[str, dict]) -> tuple[dict, l
     for t in tenor_list(s):
         row = s["tenors"][t]
         if t not in st1["tenors"] or t not in st2["tenors"]:
+            if t in TENORS:       # a standard tenor a base pair has removed
+                missing = [b for b, st in ((b1, st1), (b2, st2)) if t not in st["tenors"]]
+                warnings.append(f"{t}: not marked on {', '.join(missing)}; ATM kept as typed")
             continue              # an extra tenor the bases don't mark: its ATM is typed
         v1, v2 = st1["tenors"][t]["atm"], st2["tenors"][t]["atm"]
         if v1 is None or v2 is None:
@@ -332,6 +347,8 @@ def apply_parent(state: dict, parent: dict | None) -> tuple[dict, list[str]]:
     warnings = []
     for t in tenor_list(s):
         if t not in parent["tenors"]:
+            if t in TENORS:
+                warnings.append(f"{t}: not marked on {s['spread_ref']}; ATM kept as typed")
             continue              # an extra tenor the parent doesn't mark: its ATM is typed
         row, pa = s["tenors"][t], parent["tenors"][t]["atm"]
         if pa is None:
