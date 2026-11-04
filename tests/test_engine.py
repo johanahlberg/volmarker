@@ -666,10 +666,10 @@ class TestEventDefaults(unittest.TestCase):
         tok = default_events("EURUSD", cal, self.RULES, cut={"tz": "Asia/Tokyo", "time": "15:00"})
         self.assertEqual([(e["date"], e["ccy"], e["weight"]) for e in tok][:2],
                          [("2026-10-29", "USD", 0.8), ("2026-10-30", "EUR", 0.6)])
-        # a holiday on the expiry rolls it to the next good day
+        # a holiday doesn't move it: options expire on holidays too (only weekends are no expiry)
         hol = {"USD": {date(2026, 10, 29)}}
-        rolled = default_events("USDJPY", cal, self.RULES, holidays=hol)
-        self.assertEqual(rolled[0]["date"], "2026-10-30")
+        kept = default_events("USDJPY", cal, self.RULES, holidays=hol)
+        self.assertEqual(kept[0]["date"], "2026-10-29")
 
     def test_weekday_cut(self):
         from volmarker.calendar import expiry_for

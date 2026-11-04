@@ -22,7 +22,7 @@ from .tz import to_local
 from .conventions import TENORS, norm_extra_tenor, normalise_pair
 from . import bbg, weights_export
 from .calendar import (DEFAULT_CUT, calibrate_to_quotes, cumulative_weights, daily_dates, default_events, expiry_for,
-                       implied_daily_weights, interpolate_atm, is_good_day, normalise_weights,
+                       event_complete, implied_daily_weights, interpolate_atm, is_expiry_day, normalise_weights,
                        rule_weight, split_by_ccy, tenor_dates, with_defaults)
 from .conventions import split_pair
 from .derived import CORR_CONV
@@ -266,7 +266,7 @@ class Service:
         for ev in eff["events"]:
             if ev.get("source") == "default" and window[0] < ev["date"] <= window[1] and ev["date"] not in implied:
                 events.append({"date": ev["date"], "ccy": ev.get("ccy"), "desc": ev["desc"], "weight": 0.0})
-        events = split_by_ccy(events, eff["events"])        # a day with events in both currencies: half each
+        events = split_by_ccy(events, eff["events"], split_pair(pair))   # half to each currency
         return {"rows": rows, "events": events, "warnings": res["warnings"], "basis": basis,
                 "window_end": max(vols).isoformat() if vols else None, "feed": m["feed"]}
 
@@ -280,8 +280,12 @@ class Service:
                           holidays: dict | None = None, rec: dict | None = None) -> dict:
         if cal_events is None or holidays is None:
             holidays, cal_events = self.store.load_calendar()
-        return with_defaults(pair, weights, cal_events, self.store.load_event_defaults()["rows"],
-                             holidays, self.cut_of(rec or self.get(pair)))
+        rec = rec or self.get(pair)
+        w = with_defaults(pair, weights, cal_events, self.store.load_event_defaults()["rows"],
+                          holidays, self.cut_of(rec))
+        w["cut"] = (rec or {}).get("cut") or "NYC"         # its name, for the Fenics labels
+        w["cut_events_other_ccy"] = (self.store.config().get("weights_export") or {}).get("cut_events_other_ccy", True) is not False
+        return w
 
     def pair_default_events(self, pair: str, cut: str | None = None) -> list[dict]:
         """Upcoming relevant events of this pair with their default weight, on their expiry."""
@@ -474,7 +478,7 @@ class Service:
         today = date.today()
         ccys = split_pair(pair)
         targets = [d for d in (today + timedelta(days=i) for i in range(1, days + 1))
-                   if is_good_day(d, ccys, holidays)]
+                   if is_expiry_day(d)]
 
         def run(rec):
             atm = _atms(rec)
@@ -528,7 +532,7 @@ class Service:
             rows.append({
                 "date": iso, "weekday": d.strftime("%a"), "days": n,
                 "weighted_days": round(cum[n], 3), "day_weight": round(cum[n] - cum[n - 1], 3),
-                "good_day": is_good_day(d, ccys, holidays),
+                "good_day": is_expiry_day(d),
                 "atm": vol, "published": vp.get(d), "fwd": fwd,
                 "between": after[0] if after else tenors[-1],
                 "pillar": next((t for t in tenors if tdates[t] == d), None),
@@ -553,7 +557,7 @@ class Service:
         w = self.effective_weights(pair, rec.get("weights"), cal, holidays, rec)
         out = calibrate_to_quotes(pair, _atms(rec), date.today(),
                                   mids, w, holidays, floor=floor)
-        out["events"] = split_by_ccy(out["events"], w["events"])     # a day with events in both currencies: half each
+        out["events"] = split_by_ccy(out["events"], w["events"], split_pair(pair))   # half to each currency
         return out
 
     def poll_market(self, notify: bool = True) -> None:
@@ -778,6 +782,9 @@ class Service:
     def publish(self, pair: str, draft: dict, expected_version: int | None,
                 comment: str = "", source: str = "manual") -> dict:
         pair = normalise_pair(pair)
+        if source == "manual" and any(not e.get("deleted") and not event_complete(e)
+                                      for e in (draft.get("weights") or {}).get("events") or []):
+            raise ValueError("Event weights: a new event needs a date and a weight (or remove it with ✕)")
         state = self._prepare(pair, draft)
         self._check_cycle(state)
         with self.store.lock(pair, self.user):
@@ -850,8 +857,11 @@ class Service:
         if latest is None or latest["version"] <= expected:
             return state, expected
         newer = self.store.history(state["pair"], latest["version"] - expected)
-        if any(r.get("source") not in ("market", "propagation", "excel") for r in newer):
+        if any(r.get("source") not in ("market", "propagation", "excel", "event-prune") for r in newer):
             return state, expected                    # a real conflict - reported by append
+        if any(r.get("source") == "event-prune" for r in newer) and state.get("weights"):
+            today = date.today().isoformat()             # the leader removed the past events meanwhile: so does the draft
+            state["weights"]["events"] = [e for e in state["weights"].get("events") or [] if not (e.get("date") or today) < today]
         if state.get("follow_market") or state.get("excel"):
             for t in tenor_list(state):
                 if t not in latest["tenors"]:
@@ -1338,7 +1348,8 @@ class Service:
             log.exception("recording the market failed")
         if self._analysed_on != date.today():
             self._analysed_on = date.today()
-            self.export_analysis()
+            self.export_analysis()          # first: yesterday's event weights go to the history ...
+            self.prune_past_events()        # ... then they leave the pairs
         now = now_iso()
         for pair, rec in list(self.cache.items()):
             exp = rec.get("skew_expiry")
@@ -1352,6 +1363,27 @@ class Service:
                 except Exception as e:  # conflict etc. - retried next round
                     log.info("skew expiry for %s deferred: %s", pair, e)
         self.expire_tenors()
+
+    def prune_past_events(self, today: date | None = None) -> list[str]:
+        """Once a day (the leader): each pair's own events on expiries before today, deleted
+        ones included, removed with a new version. They no longer weigh on anything; the
+        versions and the analysis events table keep them. Returns the pairs changed."""
+        today = (today or date.today()).isoformat()
+        done = []
+        for pair in sorted(self.cache):
+            rec = self.get(pair)
+            evs = (rec.get("weights") or {}).get("events") or []
+            keep = [e for e in evs if not (e.get("date") or today) < today]
+            if len(keep) == len(evs):
+                continue
+            state = {k: copy.deepcopy(rec.get(k)) for k in STATE_KEYS}
+            state["weights"]["events"] = keep
+            try:
+                self.publish(pair, state, rec["version"], f"{len(evs) - len(keep)} past event(s) removed", "event-prune")
+                done.append(pair)
+            except Exception as e:          # conflict etc. - retried tomorrow
+                log.info("removing past events of %s deferred: %s", pair, e)
+        return done
 
     def expire_tenors(self, today: date | None = None) -> list[str]:
         """The leader removes extra tenors on their removal date (a new version, so the

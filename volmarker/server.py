@@ -21,7 +21,7 @@ from .store import ConflictError, DefaultsConflict, LockTimeout
 STATIC = Path(__file__).parent / "static"
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                  ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
-                 ".ttf": "font/ttf"}
+                 ".ttf": "font/ttf", ".png": "image/png"}
 
 log = logging.getLogger("volmarker")
 
@@ -65,6 +65,12 @@ def make_handler(svc: Service):
             p = url.path
             if p == "/":
                 return self._static("index.html")
+            if p in ("/guide", "/guide/"):                # the user guide (Help), screenshots beside it
+                self.send_response(HTTPStatus.FOUND)
+                self.send_header("Location", "/static/guide/index.html")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if p.startswith("/static/"):
                 return self._static(p[len("/static/"):])
             if p == "/api/me":

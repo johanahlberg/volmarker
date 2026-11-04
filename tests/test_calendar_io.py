@@ -114,10 +114,11 @@ class TestWeightsExport(unittest.TestCase):
                {"date": "2026-11-05", "ccy": "USD", "desc": "USD ISM", "weight": 0.3}]
         got = split_by_ccy([{"date": "2026-11-04", "desc": "FMD daily", "weight": 1.0},
                             {"date": "2026-11-05", "desc": "FMD daily", "weight": 0.4},
-                            {"date": "2026-11-06", "desc": "FMD daily", "weight": 0.2}], day)
+                            {"date": "2026-11-06", "desc": "FMD daily", "weight": 0.2}], day, ("EUR", "USD"))
         self.assertEqual([(e["date"], e.get("ccy"), e["desc"], e["weight"]) for e in got],
                          [("2026-11-04", "EUR", "EUR ECB", 0.5), ("2026-11-04", "USD", "USD FOMC", 0.5),
-                          ("2026-11-05", "USD", "USD ISM", 0.4), ("2026-11-06", None, "FMD daily", 0.2)])
+                          ("2026-11-05", "EUR", "FMD daily", 0.2), ("2026-11-05", "USD", "USD ISM", 0.2),
+                          ("2026-11-06", "EUR", "FMD daily", 0.1), ("2026-11-06", "USD", "FMD daily", 0.1)])
 
     def test_fenics_items(self):
         items = wx.fenics_items("EURUSD", self.W, self.HOL, self.TODAY)

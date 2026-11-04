@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VolMarker user guide</title>
+<style>
+  :root { --ink: #1b1b1a; --ink-2: #4c4b47; --muted: #7a7872; --rule: #e2e0d8; --accent: #2a78d6; --tip: #eef5fd; --warn: #fff4d6; }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: var(--ink); background: #fff; font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 48px 32px 80px; }
+  h1 { font-size: 34px; margin: 0 0 4px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); margin: 0 0 32px; }
+  h2 { font-size: 24px; margin: 56px 0 12px; padding-top: 12px; border-top: 2px solid var(--ink); }
+  h3 { font-size: 17px; margin: 30px 0 6px; }
+  p, li { color: var(--ink); }
+  ul, ol { padding-left: 22px; }
+  li { margin: 3px 0; }
+  code, kbd { font-family: ui-monospace, Consolas, "SF Mono", monospace; font-size: 13px; background: #f3f2ee; border-radius: 4px; padding: 1px 5px; }
+  kbd { border: 1px solid #d6d4cc; border-bottom-width: 2px; }
+  figure { margin: 16px 0 22px; }
+  figure img { display: block; max-width: 100%; border: 1px solid var(--rule); border-radius: 6px; }
+  figure.narrow img { max-width: 420px; }
+  figure.half img { max-width: 560px; }
+  figure.side { float: right; width: 220px; margin: 4px 0 12px 24px; }
+  h2 { clear: both; }
+  figcaption { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .tip, .warn { border-radius: 6px; padding: 10px 14px; margin: 14px 0; }
+  .tip { background: var(--tip); border-left: 4px solid var(--accent); }
+  .warn { background: var(--warn); border-left: 4px solid #e0a800; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0 18px; font-size: 14px; }
+  th, td { text-align: left; vertical-align: top; padding: 6px 10px; border-bottom: 1px solid var(--rule); }
+  th { background: #f6f5f1; font-weight: 600; }
+  td:first-child { white-space: nowrap; }
+  table.cfg td:first-child { white-space: normal; width: 34%; }
+  table.cfg td:first-child code { white-space: nowrap; line-height: 1.9; }
+  table.cfg td:nth-child(2):not(:last-child) { white-space: normal; width: 18%; }
+  .toc { columns: 2; column-gap: 40px; padding-left: 20px; margin: 0; }
+  .toc li { break-inside: avoid; }
+  a { color: var(--accent); text-decoration: none; }
+  .tag { display: inline-block; font: 600 11px/1.4 ui-monospace, Consolas, monospace; border: 1px solid currentColor; border-radius: 3px; padding: 0 4px; }
+  .k { color: #2a78d6; } .fmd { color: #0ca30c; } .red { color: #d03b3b; }
+  .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px; vertical-align: -1px; margin-right: 3px; }
+  @media print {
+    main { max-width: none; padding: 0; }
+    body { font-size: 11pt; }
+    h2 { margin-top: 28px; }
+    h2#start { break-before: page; }
+    figure, .tip, .warn, tr { break-inside: avoid; }
+    thead { display: table-header-group; }
+    table { break-before: avoid; }
+    h2, h3 { break-after: avoid; }
+    figure img { max-height: 105mm; width: auto; }
+    figure.side { width: 50mm; }
+    figure.side img { max-height: none; width: 100%; }
+    a { color: var(--ink); }
+  }
+</style>
+</head>
+<body>
+<main>
+
+<h1>VolMarker user guide</h1>
+<p class="sub">Marking, publishing and monitoring FX and precious-metal vol surfaces · November 2026</p>
+
+<p>VolMarker is the desk's shared tool for marking vol surfaces. It replaces the Excel marking sheets. Everyone works on the same set of pairs: what one trader publishes shows up on the others' screens within about a second, and is written straight to the Fenics and Front Arena files. Every version is kept, with its time, user and comment.</p>
+
+<p>This guide walks through the screen from top to bottom, then covers event weights, pair settings, market data and alerts. The last section lists the settings in <code>config.json</code>, for whoever sets VolMarker up.</p>
+
+<h3>Contents</h3>
+<ol class="toc">
+  <li><a href="#start">Starting VolMarker</a></li>
+  <li><a href="#screen">The screen at a glance</a></li>
+  <li><a href="#sidebar">The pair list</a></li>
+  <li><a href="#marking">Marking a surface</a></li>
+  <li><a href="#market">Market data in the grid</a></li>
+  <li><a href="#tools">Shifts, market levels and skew</a></li>
+  <li><a href="#publish">Publishing</a></li>
+  <li><a href="#types">Derived, spread and following pairs</a></li>
+  <li><a href="#changes">Changes, 3D and History</a></li>
+  <li><a href="#weights">Event weights</a></li>
+  <li><a href="#calendar">The event calendar</a></li>
+  <li><a href="#setup">Pair settings (Setup)</a></li>
+  <li><a href="#alerts">Market alerts</a></li>
+  <li><a href="#fenics">Fenics login and the FMD feed</a></li>
+  <li><a href="#display">Display settings</a></li>
+  <li><a href="#dates">How expiry dates are worked out</a></li>
+  <li><a href="#files">Files, history and the leader app</a></li>
+  <li><a href="#trouble">Troubleshooting</a></li>
+  <li><a href="#keys">Keyboard shortcuts</a></li>
+  <li><a href="#config">Settings for administrators</a></li>
+</ol>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="start">1. Starting VolMarker</h2>
+
+<p>Each trader runs VolMarker on their own PC. All copies point at the same shared data folder, which is how they share pairs, marks and settings.</p>
+<ol>
+  <li>Double-click <code>VolMarker.bat</code> (or run <code>python -m volmarker --data "…\vol_data"</code>).</li>
+  <li>A browser tab opens at <code>http://127.0.0.1:18765</code>. Keep the small console window open while you work; closing it stops VolMarker.</li>
+</ol>
+
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="screen">2. The screen at a glance</h2>
+
+<figure><img src="shots/overview.png" alt="VolMarker main screen"><figcaption>The main screen: pair list on the left, the selected pair's surface on the right.</figcaption></figure>
+
+<h3>Top bar</h3>
+<figure><img src="shots/topbar.png" alt="Top bar"></figure>
+<table>
+  <thead><tr><th>Item</th><th>What it does</th></tr></thead>
+  <tr><td>User · folder</td><td>Who you are logged in as and which shared data folder VolMarker uses.</td></tr>
+  <tr><td><span class="red">⚠ 45</span></td><td>Market alerts. Red while some are not acknowledged. Opens the alert panel (<a href="#alerts">section 13</a>).</td></tr>
+  <tr><td>Fenics login · every 5 min</td><td>Log in to Fenics to fetch FMD 1.0 vols, and how often (<a href="#fenics">section 14</a>).</td></tr>
+  <tr><td><span class="fmd">● FMD live</span></td><td>The market data feed is running. <i>FMD off</i> means no market levels.</td></tr>
+  <tr><td><span class="fmd">● live</span></td><td>Your connection to the shared folder. If it turns red, others' changes are not reaching you.</td></tr>
+  <tr><td>Help</td><td>Opens this guide in a new tab.</td></tr>
+  <tr><td>Aa</td><td>Text size, font and contrast for your PC only (<a href="#display">section 15</a>).</td></tr>
+  <tr><td>◐</td><td>Light or dark mode.</td></tr>
+  <tr><td>+ New pair</td><td>Adds a pair for the whole desk.</td></tr>
+</table>
+
+<h3>Pair header and tabs</h3>
+<figure><img src="shots/pairhead.png" alt="Pair header and tabs"></figure>
+<p>Under the pair's name you see its group, mode, the version on screen, who published it and when, and which pairs depend on it (<i>feeds EURCHF</i>). On the right are the comment field and the <b>Last export</b>, <b>Discard</b> and <b>Publish</b> buttons. The tabs below are:</p>
+<table>
+  <thead><tr><th>Tab</th><th>Use it for</th></tr></thead>
+  <tr><td>Surface</td><td>Marking: the grid, market levels, the ATM chart and checks.</td></tr>
+  <tr><td>Changes</td><td>Today's marks against an earlier day's end of day.</td></tr>
+  <tr><td>3D</td><td>The surface as a rotatable 3D picture.</td></tr>
+  <tr><td>Event weights</td><td>Day weights, events, test dates, dailies and the event calendar.</td></tr>
+  <tr><td>Setup</td><td>The pair's settings: mode, bases, cut, group, alerts and more.</td></tr>
+  <tr><td>History</td><td>Every published version, with a Restore button.</td></tr>
+</table>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="sidebar">3. The pair list</h2>
+
+<figure class="side"><img src="shots/sidebar.png" alt="Pair list"></figure>
+
+<p>Pairs are listed by group (EUR &amp; CHF, Scandies, Metals, …) with their 1M ATM and the time since the last publish. Click a pair to open it. Type in <b>Filter pairs…</b> (or press <kbd>/</kbd>) to find one quickly.</p>
+
+<table>
+  <thead><tr><th>Tag</th><th>Meaning</th></tr></thead>
+  <tr><td><span class="tag k">K</span></td><td>Key pair: tighter staleness limit (2 hours instead of 24).</td></tr>
+  <tr><td><span class="tag">D</span></td><td>Derived from two base pairs through the correlation triangle.</td></tr>
+  <tr><td><span class="tag">P</span></td><td>Moves with a spread parent.</td></tr>
+  <tr><td><span class="tag fmd">FMD</span></td><td>Follows the market: green ok, amber a move is being held, red not updating.</td></tr>
+  <tr><td><span class="tag">XL</span></td><td>Marked in Excel. Red: the last file couldn't be read. <span class="tag">XL?</span>: its file was changed outside VolMarker.</td></tr>
+  <tr><td><span class="tag">skew</span></td><td>A skew is active on the Fenics file.</td></tr>
+  <tr><td><span class="tag red">stale</span></td><td>Not marked within its limit.</td></tr>
+  <tr><td><span class="tag">!3</span></td><td>Number of failed checks (e.g. calendar arbitrage).</td></tr>
+  <tr><td><span class="tag red">⚠4</span></td><td>Open market alerts (grey once acknowledged).</td></tr>
+</table>
+
+<p>The order is yours: drag groups, or pairs within a group, to rearrange them, and click a group header to fold it. A folded group still shows its stale and ⚠ counts. Your layout follows you to any PC. <b>Reset</b> at the bottom goes back to A–Z.</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="marking">4. Marking a surface</h2>
+
+<p>The grid has one row per tenor (ON to 5Y, less any the pair doesn't mark, plus its extra tenors). For each tenor you mark the ATM, the 25D and 10D risk reversal and the 25D and 10D butterfly (broker strangles). The spread sets the Fenics ATM bid/offer around the mid. The grey <b>Bid</b> and <b>Offer</b> columns are what Fenics gets, including any skew.</p>
+
+<figure><img src="shots/grid-edit.png" alt="Grid with edits"><figcaption>A draft with edits: 1M and 2M ATM lowered (red), 3M RR and 6M BF raised (green). The Δ columns show each change against the published value.</figcaption></figure>
+
+<h3>Editing</h3>
+<ul>
+  <li>Click a cell and type. Nothing is sent until you <b>Publish</b>; until then you are editing your own <i>draft</i>.</li>
+  <li><kbd>Enter</kbd>, <kbd>↓</kbd> and <kbd>↑</kbd> move between tenors; <kbd>Tab</kbd> moves across.</li>
+  <li><kbd>Esc</kbd> restores the value the cell had when you entered it. A second <kbd>Esc</kbd> goes back to the published value.</li>
+  <li>Linked cells update as you type: the 10D quote or factor, the correlation on a derived pair, the spread to a parent.</li>
+</ul>
+
+<h3>Colours and the Δ columns</h3>
+<ul>
+  <li><span class="swatch" style="background:#d9f2d9"></span><b>Green</b>: an ATM, RR or BF above the published value. <span class="swatch" style="background:#fbdcdc"></span><b>Red</b>: below it. <span class="swatch" style="background:#fff1c9"></span><b>Yellow</b>: any other changed cell (spread, factor, skew).</li>
+  <li>The <b>Δ</b> column next to ATM, 25D/10D RR and 25D/10D BF shows the change from the published value, e.g. <code>-0.450</code>. It stays empty for unchanged tenors. Untick <b>Δ</b> above the grid to hide these columns.</li>
+  <li><span style="color:#2a78d6"><b>Blue</b></span> ATMs are calculated (derived or moving with a parent). <span style="color:#e87ba4"><b>Pink</b></span> values come from the FMD feed. Grey cells are read-only.</li>
+</ul>
+
+<div class="tip"><b>Expiry dates.</b> Hover over a tenor (ON, 1W, 1M, …) to see its expiry date and the days to expiry, e.g. <i>Expiry Thu, 3 Dec 2026 (29 days)</i>. The dates follow the market convention for the pair (<a href="#dates">section 16</a>).</div>
+
+<h3>10D: factor or quote</h3>
+<p>Each 10D has a <b>lock</b> box above its factor column, separately for RR and BF.</p>
+<ul>
+  <li><b>Ticked</b>: you type the factor; 10D = 25D × factor and the 10D is read-only.</li>
+  <li><b>Unticked</b>: you type the 10D quote; the factor is worked out as 10D / 25D. Moving the 25D then keeps the 10D and recalibrates the factor.</li>
+</ul>
+
+<h3 id="grid-extras">Extra tenors, removed tenors and extra deltas</h3>
+<p>A pair can carry more than the standard tenors and 25D/10D, or fewer tenors. This is a pair setting: on the <b>Setup</b> tab, under <b>Tenors and deltas</b>, and it takes effect when you press Setup's <b>Save</b> (<a href="#setup">section 12</a>). Marks you are editing stay in your draft. After saving, mark the new tenor or delta on the Surface tab and publish as usual.</p>
+<figure class="half"><img src="shots/extras-setup.png" alt="Tenors and deltas on the Setup tab"><figcaption>Setup tab: an extra 3W tenor with no end date, 5Y removed and an extra 5D delta, not yet saved.</figcaption></figure>
+<figure><img src="shots/extras.png" alt="Extra tenor 3W and extra delta 5D in the grid"><figcaption>The same in the grid: the 3W row (tinted, between 2W and 1M) and the 5D RR and BF columns with a factor and a lock.</figcaption></figure>
+<ul>
+  <li><b>Extra tenor</b>: for example <b>3W</b> when an event falls between 2W and 1M, or 4M or 5M. Type it and press <b>+ Tenor</b> (weeks, months or years: <code>3W</code>, <code>4M</code>, <code>18M</code>). The new row starts at the ATM the curve already gives its expiry with the event weights, so adding it changes nothing until you mark it. RR, BF and spread are interpolated from the neighbouring tenors.</li>
+  <li>An extra tenor is marked, checked and exported like any other (Fenics <code>3w</code>, Front Arena <code>3wk</code>), and the event-weight interpolation uses it as a pillar. Hover over it for its expiry date.</li>
+  <li>It stays until you remove it with <b>×</b>. To have it go by itself, give it an end date in its box: on that day VolMarker removes it and publishes a new version.</li>
+  <li><b>Removed tenor</b>: a standard tenor that isn't relevant for the pair, e.g. everything beyond 2Y. Pick it in <b>− Tenor</b>. It leaves the grid, the checks and the Fenics and Front Arena files, and the curve between the event weights no longer uses it. Its history is kept. <b>↺</b> brings it back, starting on the curve, like a new tenor. A derived pair that still marks a tenor one of its base pairs has removed keeps its own ATM there, and Checks says so.</li>
+  <li><b>Extra delta</b>: for steep wings, for example <b>5D</b> or <b>1D</b> (or 30D, inside the 25D). Type the delta and press <b>+ Delta</b>. It gets RR and BF columns with a factor and a lock, exactly like the 10D. The starting factors are generic (5D: RR 2.6, BF 6; 1D: RR 4, BF 12), so check them on the Surface tab after saving.</li>
+  <li>Extra deltas go to Fenics and Front Arena after the 25D and 10D, and appear in Changes, 3D, the market levels and the alerts (with the 10D's tolerance).</li>
+  <li>On a derived pair, an extra tenor is derived only if both base pairs carry it too; otherwise you type its ATM. The same goes for a pair moving with a parent. Pairs marked in Excel keep the standard tenors and 25D/10D.</li>
+</ul>
+
+<h3>Favour puts</h3>
+<p>For pairs whose skew favours puts (USDJPY, for example), tick <b>favour puts</b> next to the Risk reversal heading. The grid, the market levels, the alerts and the shift toolbar then show RRs as put − call, so you type <code>1.25</code> instead of <code>-1.25</code>. Only the display flips: the stored marks and the Fenics and Front Arena files stay call − put. It is a pair setting, so publish to share it with the desk.</p>
+<figure><img src="shots/favourputs.png" alt="USDJPY with favour puts"><figcaption>USDJPY with favour puts: the heading reads <i>Risk reversal (put − call)</i> and the RRs are positive.</figcaption></figure>
+
+<h3>Below the grid</h3>
+<figure><img src="shots/below.png" alt="ATM chart and checks"></figure>
+<p>The <b>ATM term structure</b> chart shows your draft (blue) against the published curve (dashed) and the market mids with their bid/offer (pink). Hover for the values. <b>Checks</b> lists problems: a missing ATM, a non-positive bid, calendar arbitrage (total variance falling between tenors) or a correlation outside −1 to 1.</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="market">5. Market data in the grid</h2>
+
+<p>When the FMD feed is running, the broker bid/offer appears in small type under each ATM, RR and BF mark.</p>
+<ul>
+  <li>A <span class="red"><b>red bar</b></span> on the left of a cell: your mark is outside the broker range.</li>
+  <li>A <span class="red"><b>red frame</b></span>: an active market alert on that mark.</li>
+  <li>Faded levels are older than 30 minutes; <b>Market mid</b> skips them.</li>
+  <li>A <code>*</code> means the broker only quoted the other ATM convention (DNS vs ATMF).</li>
+  <li>Click a broker level to put its mid in your draft.</li>
+</ul>
+<p>The <b>Market</b> box above the grid hides or shows the levels. Next to it you choose the source: <b>Auto (FMD first)</b> uses the FMD composite, then FMD 1.0 from Fenics, then the individual brokers; <b>Best of brands</b> takes the highest bid and lowest offer; or pick a single broker.</p>
+<div class="tip">FMD is not raw quotes: it is a calibrated, arbitrage-free surface built from several broker desks and real requests on multi-dealer venues, which is why it is the default reference.</div>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="tools">6. Shifts, market levels and skew</h2>
+
+<figure><img src="shots/toolbar.png" alt="Toolbar"></figure>
+<table>
+  <thead><tr><th>Control</th><th>What it does</th></tr></thead>
+  <tr><td>Shift · amount · from · to</td><td>Pick a field (ATM, RR, BF, …), an amount and a tenor range, then <b>Apply to draft</b> for a parallel shift.</td></tr>
+  <tr><td>Market mid</td><td>Sets the chosen field to the broker mid over the tenor range.</td></tr>
+  <tr><td>Market surface</td><td>Takes ATM, RR and BF (every delta the pair marks) from the market over the range.</td></tr>
+  <tr><td>Skew expiry · EOD · Clear</td><td>When the skew expires. <b>EOD</b> sets 17:00 today; <b>Clear</b> zeroes all skews.</td></tr>
+</table>
+<p>Taking market levels only changes your draft; nothing is published until you press Publish. On a derived pair or a pair moving with a parent, taking the market ATM recalibrates the correlation or the spread to it.</p>
+
+<h3>Skew</h3>
+<p>The three <b>Skew → Fenics only</b> columns shift ATM, RR and BF in the Fenics file only; Front Arena always gets the pure mids. Set an expiry (or press <b>EOD</b>). When it passes, VolMarker publishes a clean version by itself.</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="publish">7. Publishing</h2>
+
+<figure><img src="shots/publishbar.png" alt="Publish bar"></figure>
+<ol>
+  <li>Optionally type a comment, e.g. <i>1M–2M lower after payrolls</i>. It shows in the History tab.</li>
+  <li>Press <b>Publish</b> or <kbd>Ctrl</kbd>+<kbd>S</kbd>.</li>
+</ol>
+<p>Publishing saves a new version, writes the Fenics and Front Arena files, and moves every pair that depends on this one (derived crosses, pairs moving with it as a parent) a moment later. <b>Discard</b> throws your draft away.</p>
+<ul>
+  <li><b>Someone else published first?</b> VolMarker stops and tells you, and never overwrites their version silently. Versions the feed or a base pair made in the meantime are not a conflict: your edits are kept on top of them.</li>
+  <li><b>Last export</b> loads the pair's current Front Arena file into your draft, e.g. after someone marked it in Excel. Check it and publish.</li>
+  <li>Every manual publish also stores the market mids at that moment, for the audit trail.</li>
+</ul>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="types">8. Derived, spread and following pairs</h2>
+
+<h3>Derived pairs (correlation triangle)</h3>
+<figure><img src="shots/derived.png" alt="EURCHF derived pair"><figcaption>EURCHF derived from EURUSD and USDCHF: a <b>Corr</b> column and blue ATMs.</figcaption></figure>
+<p>A derived pair's ATM comes from its two base pairs and a correlation per tenor: σ² = σ₁² + σ₂² + 2·s₁·s₂·ρ·σ₁·σ₂. The correlation is between the two bases <i>as quoted</i>, so EURUSD against USDCHF is strongly negative.</p>
+<ul>
+  <li>When a base is published, the derived pair follows by itself.</li>
+  <li>Type an ATM to calibrate that tenor's correlation to it; the pair then keeps running off its bases.</li>
+  <li>Untick <b>Move with bases</b> (Setup) to hold the ATMs where they are while the bases move. The correlation (grey) then shows what they imply.</li>
+  <li>RR and BF are marked by hand, as in Excel.</li>
+</ul>
+
+<h3>Spread to a parent</h3>
+<figure><img src="shots/spread.png" alt="GBPUSD with spread to EURUSD"><figcaption>GBPUSD with EURUSD as spread parent: the <b>vs EURUSD</b> column.</figcaption></figure>
+<p>Set a <b>Spread parent</b> in Setup to get a column with this pair's ATM minus the parent's published ATM. Type either one: an ATM updates the spread, a spread sets ATM = parent + spread. Tick <b>Move with parent</b> to keep the spreads instead: every publish of the parent then moves this pair's ATMs, which show in blue.</p>
+
+<h3>Follow FMD (market mode)</h3>
+<figure><img src="shots/follow.png" alt="EURSEK following FMD"><figcaption>EURSEK follows FMD: the market fields are pink and read-only; the bar on top shows the last FMD publish.</figcaption></figure>
+<p>Tick <b>Follow FMD</b> in Setup and the feed publishes the FMD mids for ATM, 25D/10D RR and BF by itself, through the normal publish. You keep the spread, skew and event weights.</p>
+<ul>
+  <li>It publishes when any mark has moved at least 0.05 vol, at most every 15 seconds.</li>
+  <li><b>Jump guard</b>: a very large move is held for a minute and taken only if it is still there. Meanwhile the pair is amber and an alert explains.</li>
+  <li><b>Feed down</b>: nothing is published, Fenics keeps the last levels, the pair turns red and everyone gets an alert.</li>
+  <li>Untick Follow FMD and save to take the pair back; the current levels become your marks.</li>
+</ul>
+
+<h3>Marked in Excel</h3>
+<p>For pairs still marked in the Excel workbook, tick <b>Marked in Excel</b> in Setup. VolMarker then reads the pair's Front Arena file whenever Excel writes a newer one and publishes it as a new version. Its marks are read-only in VolMarker and VolMarker never writes its files. If a pair <i>not</i> marked in Excel has its file changed by someone else, everyone gets an alert, because the two would overwrite each other.</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="changes">9. Changes, 3D and History</h2>
+
+<h3>Changes</h3>
+<figure><img src="shots/changes.png" alt="Changes tab"></figure>
+<p>Today's marks next to an earlier day's end of day, per tenor: <i>Now</i>, <i>EOD</i> and <i>Δ</i> (green up, red down). The EOD of a day is the last version published before midnight. By default you compare with the previous business day (on a Monday, Friday's); pick <i>one week ago</i> or any date instead. <i>Now</i> is your draft, so the Δ follows your edits before you publish.</p>
+
+<h3>3D</h3>
+<figure><img src="shots/3d.png" alt="3D surface"></figure>
+<p>The surface over delta (10D put to 10D call, or the pair's widest extra delta) and tenor. Drag to rotate, hover for values. Show the mid, the Fenics surface with skew, or <i>Draft − published</i> to see your unpublished changes. The wings are an approximation (ATM + BF ± RR/2), for display only.</p>
+
+<h3>History</h3>
+<figure><img src="shots/history.png" alt="History tab"></figure>
+<p>Every version with its time, user, source (manual, market, propagation, Excel…) and comment. <b>Restore</b> copies an old version into your draft; check it and publish. Nothing is ever deleted: old months are archived and still show here (<a href="#files">section 17</a>).</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="weights">10. Event weights</h2>
+
+<p>Event weights decide how the ATM is interpolated between the marked tenors, so that event days carry more variance than quiet days and weekends carry little. The method is the one in the desk's Excel weight workbook and in Fenics:</p>
+<p style="text-align:center"><b>day weight = weekday weight × holiday factor(ccy1) × holiday factor(ccy2) + events</b></p>
+<p>Total variance is interpolated linearly in weighted time between the marked tenors.</p>
+
+<h3>Day weights</h3>
+<figure><img src="shots/wt-day.png" alt="Day weights"></figure>
+<p>Seven weekday weights (e.g. Monday 1.05, Tuesday to Friday 1, weekend 0) and a holiday factor per currency (e.g. 0.4) that applies on that currency's holidays. A holiday in both currencies gives 0.4 × 0.4.</p>
+
+<h3>Events</h3>
+<figure><img src="shots/wt-events.png" alt="Events table"></figure>
+<p>The pair's events, each on the option expiry it weighs on, with its release time, currency, the desk default and the weight used. Events from the desk's list (<a href="#calendar">section 11</a>) come in by themselves.</p>
+<ul>
+  <li>Type a weight to override the default for this pair; <b>↺</b> goes back to the default; <code>0</code> switches the event off but still sends it to Fenics and Front Arena.</li>
+  <li><b>✕</b> deletes an event for this pair (a desk default for this pair only): it leaves the curve and isn't sent to Fenics or Front Arena. It is kept with its weight, including one you had typed, in case it was a mistake: <b>Show deleted</b> under the table lists the deleted events, struck through, and <b>↺</b> brings one back as it was. Publish to apply either.</li>
+  <li><b>+ Event</b> adds a one-off (an election, say). The new row is empty and at the top: type the date, currency, description and weight yourself. Nothing is filled in for you, so there is no default to forget to change. Publish stops until the row is complete or removed. It moves to its place once everything is filled in.</li>
+  <li>Past events are removed from the pair every morning (the leader app does it, after saving the day's weights in the analysis history). <b>Remove past</b> does it straight away.</li>
+  <li>Hover over a release time to see how it maps to the expiry: the release in the cut's time zone (24-hour clock), before or after the cut, and any weekend it rolls over.</li>
+  <li>Several events of one currency on one expiry add up; hover over the <b>Σ</b> for the breakdown.</li>
+  <li>Untick <b>Desk defaults</b> to ignore the desk's list for this pair.</li>
+</ul>
+<div class="tip"><b>Which expiry does an event weigh on?</b> The first weekday whose expiry cut comes after the release. Options expire on holidays too; only Saturdays and Sundays are no expiry. With the New York 10:00 cut, FOMC at 14:00 New York on Wednesday weighs on Thursday, while the ECB at 14:15 Frankfurt (08:15 New York) weighs on the same day. A holiday doesn't move it: a EUR event at 08:00 on 11 Nov 2026 (a USD holiday) weighs on the 11th, for EURUSD too.</div>
+
+<h3>Test dates and external quotes</h3>
+<figure><img src="shots/wt-test.png" alt="Test dates"></figure>
+<p>Type your own expiry dates to see the interpolated ATM, calendar and weighted days and the forward vol, live as you edit weights or marks. <b>+ Event dates</b> adds each upcoming event's expiry and the weekday before and after it; <b>Add range</b> adds every weekday between two dates. Pillar expiries are tagged (<span class="tag">ON</span>, <span class="tag">1M</span>, …).</p>
+<p><b>Ext bid / Ext offer</b> take ATM quotes from an outside platform, for example a bank's single-dealer tool for events months ahead. Type bid, <kbd>Tab</kbd>, offer, <kbd>Enter</kbd> to jump to the next date's bid. <i>vs mid</i> shows our level against theirs and <i>Ext fwd</i> their forward vol.</p>
+<p><b>Calibrate to quotes</b> makes our ATM follow the external quotes at a shift: on quoted pillars the shift is your mark minus their mid, and in between the event weights are set so that our ATM lands on their mid plus the shift. With <b>No negative weights</b> ticked (the default) it is a best fit that ignores rounding in the quotes; untick it for an exact fit. Each day's weight is split half to each of the pair's two currencies, so the Events table keeps a row per currency. Review the weights, then publish.</p>
+
+<h3>Market dailies</h3>
+<figure><img src="shots/wt-dailies.png" alt="Market dailies"></figure>
+<p>The FMD dailies (1D–14D) against your weights: market forward vol (pink) and yours (blue) per daily expiry. <i>Implied event</i> is the event weight the market prices on that day. <b>Calibrate event weights to dailies</b> writes those implied weights into your draft, half to each currency, keeping the weekend and holiday factors.</p>
+
+<h3>The next six months</h3>
+<figure><img src="shots/wt-curve.png" alt="Interpolated ATM curve"></figure>
+<p>The interpolated ATM for every expiry over the next six months, draft against published, so you can see the bumps your events make.</p>
+
+<h3>Sending the weights</h3>
+<figure><img src="shots/wt-send.png" alt="Send weights"></figure>
+<p><b>Send to Fenics &amp; Front Arena</b> sends the <i>published</i> version's weights to Fenics (XML poster) and writes the Front Arena event files (FA_FX and FA_WS). Leave the password empty if you are logged in to Fenics. The card says when weights, defaults or the calendar have changed since the last send. <b>Show what is sent</b> lists every line.</p>
+<div class="tip"><b>Pairs on another cut.</b> Fenics shows events in a calendar per currency, not per pair. On a pair whose expiry cut is not NYC, e.g. USDCNH on TOK, US data released on Friday at 08:30 New York weighs on Monday's TOK expiry, while the NYC pairs have it on Friday. So that the USD calendar doesn't list it twice, VolMarker files the moved event under the pair's other currency, e.g. <i>USD Change in Nonfarm Payrolls (TOK)</i> under CNH on Monday. The weights are the same; Front Arena gets the events unchanged.</div>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="calendar">11. The event calendar</h2>
+
+<figure><img src="shots/wt-calendar.png" alt="Event calendar"></figure>
+<p>At the bottom of the Event weights tab. It is shared by all pairs.</p>
+<ul>
+  <li><b>Import Bloomberg calendar…</b> takes an ECO export saved as .xlsx (one file per currency or region). Tick the relevant events, set their default weight and import. A new import replaces the previous one for that currency.</li>
+  <li><b>Relevant events</b> is the desk's list. Only events on it get a weight. An event matches on its Bloomberg ticker or its name. The list shows the selected pair's currencies; tick <b>All currencies</b> to see everything. Sorted by weight.</li>
+  <li><b>+ Event</b> adds an event to the list: an empty row at the top. Type the currency (<code>*</code> for any), the name and the weight; <b>Save list</b> stops until they are filled in. The row stays at the top until then. <b>Save list</b> applies it to every pair straight away.</li>
+</ul>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="setup">12. Pair settings (Setup)</h2>
+
+<figure class="half"><img src="shots/setup.png" alt="Setup tab"></figure>
+<p>Settings are shared by the whole desk. Change them and press the tab's own <b>Save</b>: this publishes a version with the new settings on the latest marks. Marks you are editing stay in your draft, and the pair's staleness clock is not reset. If someone changed the settings meanwhile, Save stops and says so.</p>
+<table>
+  <thead><tr><th>Setting</th><th>Meaning</th></tr></thead>
+  <tr><td>Mode</td><td><i>Marked</i> or <i>Derived</i> (then choose the two bases and <b>Move with bases</b>).</td></tr>
+  <tr><td>DC spread factor</td><td>Pairs with a factor of at least 0.01 get a DC spread file (ATM spread × 0.5 × factor).</td></tr>
+  <tr><td>Expiry cut</td><td>NYC 10:00 New York, TOK 15:00 Tokyo, and others. Decides which expiry an event weighs on.</td></tr>
+  <tr><td>Spread parent</td><td>Adds the spread column; <b>Move with parent</b> keeps the spreads (<a href="#types">section 8</a>).</td></tr>
+  <tr><td>Tenors and deltas</td><td>Extra tenors (with an optional end date), removed standard tenors and extra deltas (<a href="#grid-extras">section 4</a>).</td></tr>
+  <tr><td>Group</td><td>Where the pair is listed in the sidebar, for everyone.</td></tr>
+  <tr><td>Key pair</td><td>Auto-quoted, with the tighter staleness limit.</td></tr>
+  <tr><td>ATM convention</td><td>DNS or ATMF, used to match broker ATM quotes.</td></tr>
+  <tr><td>Inverse</td><td>Fenics and FMD quote the pair's RRs in the inverted pair's terms (e.g. NOKCHF as CHFNOK), so their sign is flipped going to Fenics and coming from FMD.</td></tr>
+  <tr><td>Follow FMD</td><td>Market mode (<a href="#types">section 8</a>).</td></tr>
+  <tr><td>Marked in Excel</td><td>Read the marks from Excel's export file (<a href="#types">section 8</a>).</td></tr>
+  <tr><td>Alert tolerance</td><td>Per-pair tolerances in vol points; empty uses the desk default. Mute all alerts, or only the RR and BF ones.</td></tr>
+</table>
+
+<h3>New pairs</h3>
+<figure class="narrow"><img src="shots/dlg-new.png" alt="New pair dialog"></figure>
+<p><b>+ New pair</b> in the top bar. Type the pair, choose Marked or Derived (with its two bases), an optional group and whether it is a key pair. If a Front Arena file for the pair already exists, the new pair starts from its marks, so the first publish doesn't blank the file.</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="alerts">13. Market alerts</h2>
+
+<figure class="narrow"><img src="shots/alerts.png" alt="Alert panel"></figure>
+<p>VolMarker compares every pair's <i>published</i> mids (without skew) with FMD and raises an alert when they drift apart by more than the tolerance (by default ATM 0.25, 25D RR 0.20, 10D RR 0.40, 25D BF 0.10, 10D BF 0.25, wider at the short end).</p>
+<ul>
+  <li>A gap must last 20 seconds before it alerts, and clears once it is below 80 % of the tolerance, so alerts don't flicker.</li>
+  <li>Alerts show in the ⚠ button, the browser tab's title, the sidebar and as red frames in the grid. Tick <b>Desktop notifications</b> to get a pop-up; clicking it opens the pair.</li>
+  <li><b>Ack</b> mutes an alert for you until it clears or the gap grows by another full tolerance. <b>Ack AUDCHF</b> and <b>Ack all</b> do several at once.</li>
+  <li>Derived crosses are checked against the FMD cross quote too, so a stale correlation shows up.</li>
+  <li>Pairs following FMD get "not updating" and "move held" alerts instead.</li>
+  <li>An alert also warns when a pair's export file was changed outside VolMarker (e.g. by Excel).</li>
+</ul>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="fenics">14. Fenics login and the FMD feed</h2>
+
+<figure class="narrow"><img src="shots/dlg-fenics.png" alt="Fenics login"></figure>
+<p>One feed serves the whole desk and writes the market levels to the shared folder; every VolMarker reads them from there. With FMD 1.0, the usual way is <b>Fenics login</b> in the top bar: type your Fenics user and password. That VolMarker then fetches every pair's surface from Fenics until you log out or close it.</p>
+<ul>
+  <li><b>every … s / min</b> next to the button sets how often (default 5 minutes, at least 10 seconds). Shorten it around an event; it applies at once.</li>
+  <li>The password is kept in memory only, never saved. It is also used by <b>Send weights</b> when you leave its password empty.</li>
+  <li>Only one feed runs per data folder, so a login is refused while someone else's feed is alive.</li>
+  <li>FMD 1.0 gives a bid/offer for the ATM only; RRs and strangles come as mids and show as <code>mid</code> in the grid.</li>
+</ul>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="display">15. Display settings</h2>
+
+<figure class="narrow"><img src="shots/dlg-display.png" alt="Display settings"></figure>
+<p><b>Aa</b> in the top bar. These settings apply to your PC only; nobody else's screen changes.</p>
+<ul>
+  <li><b>Text size</b>: 100 %, 110 %, 125 % or 140 %. The whole page grows. At 140 % the grid is wider than most screens and scrolls sideways.</li>
+  <li><b>Font</b>: Standard; Atkinson Hyperlegible (designed for low vision; falls back to Verdana if its font files are missing); Verdana or Tahoma with Consolas, both standard on Windows.</li>
+  <li><b>Stronger contrast</b>: darker grey text and grid lines, in light and dark mode.</li>
+</ul>
+<div class="tip">For easier reading, try <b>Verdana / Consolas at 125 %</b> with <b>Stronger contrast</b> ticked.</div>
+<figure><img src="shots/dark.png" alt="Dark mode"><figcaption>Dark mode (◐ in the top bar).</figcaption></figure>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="dates">16. How expiry dates are worked out</h2>
+
+<p>Tenor expiries follow the FX market convention, the same as the Excel workbook's <code>fx_option_expiry</code>:</p>
+<table>
+  <thead><tr><th>Tenor</th><th>Rule</th></tr></thead>
+  <tr><td>ON / 1D</td><td>The next weekday. Friday's ON expires on Monday. Holidays don't move it.</td></tr>
+  <tr><td>1W, 2W</td><td>Exactly 7 or 14 calendar days. Holidays don't move them.</td></tr>
+  <tr><td>Months and years</td><td>Delivery = spot + the period, as for an FX forward (modified following, end-of-month rule). The expiry is the delivery stepped back by the spot days; it may fall on a holiday.</td></tr>
+</table>
+<ul>
+  <li><b>Spot</b> is 2 business days (1 for USDCAD, USDTRY and USDRUB). Holidays of the pair's currencies push it back, except USD and ILS holidays, which only matter if they fall on the value date itself. The value date must be good for both currencies and for USD, crosses included.</li>
+  <li><b>Metals</b> settle on the calendar of their loco: gold and silver (loco London) on GBP holidays, platinum and palladium (loco Zurich) on CHF holidays.</li>
+  <li>VolMarker only knows the holidays in <code>calendar/holidays.csv</code>. A missing holiday moves expiries too, so keep that file up to date for every currency you trade.</li>
+</ul>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="files">17. Files, history and the leader app</h2>
+
+<h3>What each publish writes</h3>
+<table>
+  <thead><tr><th>File</th><th>Content</th></tr></thead>
+  <tr><td><code>&lt;PAIR&gt;volsurface.txt</code> (Front Arena)</td><td>Pure mids, never skewed. CNH pairs are written as CNY, which is what Front Arena expects.</td></tr>
+  <tr><td><code>&lt;PAIR&gt;volsurface.txt</code> (Fenics)</td><td>The quoted surface, skew included.</td></tr>
+  <tr><td><code>&lt;PAIR&gt;spreads.txt</code></td><td>The DC spread file, for pairs with a DC spread factor.</td></tr>
+  <tr><td><code>&lt;PAIR&gt;_date_time.csv</code></td><td>A copy of the Fenics file for every manual publish, as the Excel macro made.</td></tr>
+</table>
+<p>Files are written under a temporary name and then renamed, so Fenics and Front Arena never read a half-written file.</p>
+
+<h3>History and archive</h3>
+<p>Every version of every pair is kept. Once a day, whole months older than 90 days move into compressed monthly archive files next to the pair's history. Nothing is deleted: the History and Changes tabs read the archive when they need to.</p>
+
+<h3>Market history</h3>
+<p>Every 5 minutes, the leader app also records the FMD quotes of every pair, so the desk can later study how the market moved around events. Only quotes that changed are stored, so quiet periods cost almost nothing. Recording runs in the background and doesn't slow VolMarker down.</p>
+
+<h3>Analysing the history</h3>
+<p>The <code>analysis</code> folder in the data folder holds the desk's vol history as tables you can open in Excel or load into Python or R, one file per month:</p>
+<table>
+  <tr><th>Folder</th><th>Content</th></tr>
+  <tr><td><code>marks/</code></td><td>Every published surface, with its time, pair, tenor, expiry date, ATM mid/bid/offer, spread, RR and BF, and who published it. Extra tenors are rows like the others; extra deltas are in the last column, <code>wings</code> (e.g. <code>rr5=-1.2;bf5=0.9</code>). Includes the dated copies from the Excel years.</td></tr>
+  <tr><td><code>marks_eod/</code></td><td>Each pair's end-of-day surface.</td></tr>
+  <tr><td><code>atm_eod_wide/</code></td><td>The end-of-day ATMs of all pairs side by side, one column per pair and tenor.</td></tr>
+  <tr><td><code>market/</code></td><td>The recorded FMD quotes, one file per day.</td></tr>
+  <tr><td><code>events/</code></td><td>The event weights in force at the end of each day, one file per day: every pair's upcoming events with the desk default, the weight used and whether it was a default, changed, the pair's own or deleted. Starts on the first morning after the update.</td></tr>
+</table>
+<p>Every morning VolMarker adds the previous day by itself. The files are compressed (<code>.csv.gz</code>): 7-Zip unpacks them for Excel, and Python and R read them directly.</p>
+
+<h3>The leader</h3>
+<p>One running VolMarker at a time does the desk's shared housekeeping: the daily archive, recording the market, adding the previous day to the analysis tables, then removing past events from the pairs (they stay in the history), expiring skews, removing extra tenors on their end date, reading Excel's files for pairs marked in Excel, and the alert log. It is normally the first one started in the morning. If it closes, another running app takes over within about 45 seconds. Nobody has to do anything about it.</p>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="trouble">18. Troubleshooting</h2>
+<table>
+  <thead><tr><th>Symptom</th><th>What to do</th></tr></thead>
+  <tr><td>"… was changed to vN by …" on Publish</td><td>Someone else published first. Your draft is kept: look at their change (History), adjust and publish again.</td></tr>
+  <tr><td>No market levels in the grid</td><td>The top bar shows <i>FMD off</i>: nobody's feed is running. Log in to Fenics, or ask whoever runs the feed.</td></tr>
+  <tr><td><span class="tag">XL?</span> or an alert that a file was changed outside VolMarker</td><td>Excel still exports that pair. Either tick <b>Marked in Excel</b> in Setup, or stop exporting it from Excel.</td></tr>
+  <tr><td><i>config.json problem</i> in the header</td><td>The settings file couldn't be read, often a Windows path with single backslashes. Hover for details, and see section 20.</td></tr>
+  <tr><td>A pair turns <span class="tag red">stale</span></td><td>Not published within its limit (2 hours for key pairs, 24 for others). Check the marks and publish.</td></tr>
+  <tr><td>Expiry dates look wrong</td><td>Check that <code>calendar/holidays.csv</code> has the holidays of both currencies (and GBP or CHF for metals).</td></tr>
+</table>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="keys" class="keep">19. Keyboard shortcuts</h2>
+<table>
+  <thead><tr><th>Key</th><th>Action</th></tr></thead>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>Publish</td></tr>
+  <tr><td><kbd>/</kbd></td><td>Filter pairs</td></tr>
+  <tr><td><kbd>Enter</kbd> · <kbd>↓</kbd> · <kbd>↑</kbd></td><td>Next or previous tenor in the grid</td></tr>
+  <tr><td><kbd>Tab</kbd></td><td>Next column</td></tr>
+  <tr><td><kbd>Esc</kbd></td><td>Undo the cell's edit; a second <kbd>Esc</kbd> restores the published value</td></tr>
+  <tr><td><kbd>Tab</kbd> / <kbd>Enter</kbd> in Ext bid/offer</td><td>Bid → offer → next date's bid</td></tr>
+</table>
+
+<!-- ------------------------------------------------------------------ -->
+<h2 id="config">20. Settings for administrators (config.json)</h2>
+
+<p>All shared settings live in <code>config.json</code> in the data folder. VolMarker writes it with every default on first start; change only what you need, since a setting left out takes its default. Changes apply without a restart. Folder paths can be absolute or relative to the data folder. In Windows paths, write double backslashes (<code>"…\\vol_data\\exports"</code>) or forward slashes (<code>"…/vol_data/exports"</code>). If the file can't be read, every setting falls back to its default and the header shows <i>config.json problem</i>; hover over it for the reason.</p>
+<p>Passwords and secrets are never stored in <code>config.json</code>: they come from environment variables or a local file on the PC that runs the feed.</p>
+
+<h3>Export folders and files</h3>
+<table class="cfg">
+  <tr><th>Setting</th><th>Default</th><th>Meaning</th></tr>
+  <tr><td><code>fenics_dir</code></td><td><code>exports/fenics</code></td><td>Where the Fenics vol files go (quoted surface, skew included).</td></tr>
+  <tr><td><code>frontarena_dir</code></td><td><code>exports/frontarena</code></td><td>Where the Front Arena vol files go (pure mids).</td></tr>
+  <tr><td><code>dc_spread_dir</code></td><td><code>exports/dc_spread</code></td><td>DC spread files, for pairs with a DC spread factor.</td></tr>
+  <tr><td><code>history_dir</code></td><td><code>exports/history</code></td><td>A dated copy of the Fenics file for every manual publish. Empty (<code>""</code>): no copies.</td></tr>
+  <tr><td><code>excel_dir</code></td><td>empty</td><td>Where Excel writes the files of pairs marked in Excel. Empty: <code>frontarena_dir</code>.</td></tr>
+  <tr><td><code>frontarena_ccy</code></td><td><code>{"CNH": "CNY"}</code></td><td>Currencies Front Arena knows under another code. Used in Front Arena file names and lines only; Fenics keeps the original code.</td></tr>
+</table>
+
+<h3>Staleness, history and market data</h3>
+<table class="cfg">
+  <tr><th>Setting</th><th>Default</th><th>Meaning</th></tr>
+  <tr><td><code>stale_minutes_key</code></td><td>120</td><td>A key pair not published for this long is flagged stale.</td></tr>
+  <tr><td><code>stale_minutes_other</code></td><td>1440</td><td>The same for all other pairs.</td></tr>
+  <tr><td><code>archive_keep_days</code></td><td>90</td><td>Versions older than this (whole months) move to the monthly archive. 0 switches archiving off.</td></tr>
+  <tr><td><code>market_stale_minutes</code></td><td>30</td><td>Broker quotes older than this are shown faded, skipped by Market mid and not followed.</td></tr>
+  <tr><td><code>fmd_brand</code></td><td><code>auto</code></td><td>Default market source: <code>auto</code> (FMD first), <code>best</code> (best of brands) or one brand.</td></tr>
+  <tr><td><code>fmd_daily_basis</code></td><td><code>calendar</code></td><td>Dailies: "ND" = today + N calendar days, rolled off the weekend (holidays are expiries too).</td></tr>
+  <tr><td><code>calendar_tz</code></td><td><code>Europe/Zurich</code></td><td>Time zone of the Bloomberg terminal the calendar is exported from.</td></tr>
+  <tr><td><code>market_record.interval_min</code></td><td>5</td><td>How often the leader app records the FMD quotes for analysis. 0 switches recording off.</td></tr>
+  <tr><td><code>market_record.brands</code></td><td><code>["FMD", "FMD1"]</code></td><td>Which brands to record. Empty: all.</td></tr>
+  <tr><td><code>market_record.dir</code></td><td><code>market_history</code></td><td>Where the recordings go, one compressed file per month.</td></tr>
+  <tr><td><code>analysis_dir</code></td><td><code>analysis</code></td><td>Where the tables for analysis go. Each morning the leader adds the previous day. Empty (<code>""</code>): off. To fill in the past once, including the dated copies from the Excel years, run <code>python scripts/export_history.py --data …\vol_data</code>; see the README.</td></tr>
+</table>
+
+<h3>Market data feed (<code>fmd</code>)</h3>
+<table class="cfg">
+  <tr><th>Setting</th><th>Meaning</th></tr>
+  <tr><td><code>transport</code></td><td><code>fix</code> (FMD over FIX), <code>webapi</code> (FMD over HTTPS) or <code>xml</code> (FMD 1.0 polled from the Fenics XML poster, as with the Fenics login button).</td></tr>
+  <tr><td><code>host</code>, <code>port</code>, <code>tls</code></td><td>The FIX server (the vendor's UAT by default).</td></tr>
+  <tr><td><code>sender_comp_id</code>, <code>target_comp_id</code>, <code>session_qualifier</code>, <code>heartbeat</code></td><td>FIX session details from the vendor.</td></tr>
+  <tr><td><code>product</code>, <code>filters</code></td><td>What to subscribe to; <code>filters</code> narrows it, e.g. <code>[[16999, "EUR"]]</code>.</td></tr>
+  <tr><td><code>password_env</code>, <code>password_file</code></td><td>Where the FIX password comes from (environment variable <code>FMD_PASSWORD</code> by default).</td></tr>
+  <tr><td><code>webapi.*</code></td><td>For <code>webapi</code>: <code>base_url</code>, <code>token_url</code>, <code>client_id</code>, the secret's variable or file, <code>ca_file</code> for a proxy that inspects TLS, plus stream tuning (<code>conflation</code>, <code>snapshot_age</code>, <code>idle_timeout</code>).</td></tr>
+  <tr><td><code>xml.url</code></td><td>For <code>xml</code>: the Fenics pricing server. Empty uses <code>weights_export.fenics_url</code>.</td></tr>
+  <tr><td><code>xml.username</code>, <code>xml.password_env</code>, <code>xml.password_file</code></td><td>Login for the command-line feed (the Fenics login button asks instead).</td></tr>
+  <tr><td><code>xml.interval</code></td><td>Seconds between rounds over all pairs (300) for the command-line feed; the button has its own field.</td></tr>
+  <tr><td><code>xml.pairs</code></td><td>Pairs to fetch; empty = every pair in VolMarker.</td></tr>
+  <tr><td><code>xml.atm_type</code>, <code>xml.scale</code>, <code>xml.brand</code></td><td>Fenics' ATM convention (DNS), the factor from its decimals to vol points (100), and the brand name its quotes show under (FMD1).</td></tr>
+  <tr><td><code>xml.retry_missing</code>, <code>xml.timeout</code>, <code>xml.raw_dir</code></td><td>How long before asking again for a pair Fenics has no vols for (3600 s), the request timeout, and an optional folder for the raw answers, for debugging.</td></tr>
+</table>
+
+<h3>Event weights (<code>weights_export</code>, <code>cuts</code>)</h3>
+<table class="cfg">
+  <tr><th>Setting</th><th>Meaning</th></tr>
+  <tr><td><code>weights_export.fenics_url</code></td><td>The Fenics pricing server that <b>Send weights</b> posts to (<code>/xmlposter</code> is added).</td></tr>
+  <tr><td><code>weights_export.fenics_dir</code>, <code>fa_fx_dir</code>, <code>fa_ws_dir</code></td><td>Where the copy of the Fenics message and the Front Arena FA_FX and FA_WS event files go.</td></tr>
+  <tr><td><code>weights_export.date_format</code></td><td>Date format in the Front Arena event files (<code>%Y-%m-%d</code>).</td></tr>
+  <tr><td><code>weights_export.cut_events_other_ccy</code></td><td><code>true</code>: on a pair whose cut is not NYC, an event the cut moves to another expiry goes to Fenics under the pair's other currency (see Send weights). <code>false</code> sends it under its own currency, as before.</td></tr>
+  <tr><td><code>cuts</code></td><td>The expiry cuts offered in Setup, each a time zone and time, e.g. <code>"WAR": {"tz": "Europe/Warsaw", "time": "11:00"}</code>. <code>times</code> sets another time on some weekdays, e.g. <code>{"Fri": "12:00"}</code>.</td></tr>
+</table>
+
+<h3>Derived pairs, Follow FMD and alerts</h3>
+<table class="cfg">
+  <tr><th>Setting</th><th>Default</th><th>Meaning</th></tr>
+  <tr><td><code>propagation.min_change</code></td><td>0.005</td><td>After a market-driven move, a derived or parent-following pair is republished only if an ATM moves at least this much…</td></tr>
+  <tr><td><code>propagation.min_corr_change</code></td><td>0.005</td><td>…or, on a cross whose ATMs stay put, the implied correlation moves at least this much…</td></tr>
+  <tr><td><code>propagation.min_interval_s</code></td><td>5</td><td>…and at most this often. Manual publishes always go through.</td></tr>
+  <tr><td><code>follow.min_change</code></td><td>0.05</td><td>Follow FMD publishes when any mark has moved at least this much (vol points).</td></tr>
+  <tr><td><code>follow.min_publish_interval_s</code></td><td>15</td><td>At most one automatic publish per pair this often.</td></tr>
+  <tr><td><code>follow.max_jump</code></td><td>ATM 1.0, 25D RR 0.75, 10D RR 1.5, 25D BF 0.5, 10D BF 1.0</td><td>Bigger moves are held…</td></tr>
+  <tr><td><code>follow.jump_confirm_s</code></td><td>60</td><td>…until they have lasted this long.</td></tr>
+  <tr><td><code>follow.interval_s</code></td><td>2</td><td>How often the follower looks at the market.</td></tr>
+  <tr><td><code>alerts.enabled</code></td><td>true</td><td>Market alerts on or off for the desk.</td></tr>
+  <tr><td><code>alerts.basis</code></td><td><code>mid</code></td><td><code>mid</code>: distance to the market mid; <code>range</code>: distance outside the bid/offer.</td></tr>
+  <tr><td><code>alerts.tolerance</code></td><td>ATM 0.25, 25D RR 0.20, 10D RR 0.40, 25D BF 0.10, 10D BF 0.25</td><td>Default tolerances; each pair can override them in Setup.</td></tr>
+  <tr><td><code>alerts.tenor_scale</code></td><td>ON ×2, 1W ×1.5, 2W ×1.25</td><td>Wider tolerances at the short end.</td></tr>
+  <tr><td><code>alerts.confirm_s</code></td><td>20</td><td>A gap must last this long before it alerts.</td></tr>
+  <tr><td><code>alerts.clear_ratio</code></td><td>0.8</td><td>An alert clears once the gap is below this share of the tolerance.</td></tr>
+</table>
+
+<h3>Other files in the data folder</h3>
+<table class="cfg">
+  <tr><th>File</th><th>Content</th></tr>
+  <tr><td><code>calendar/holidays.csv</code></td><td>Holidays, one per line: <code>ccy,date</code>. Drives expiry dates and holiday weights.</td></tr>
+  <tr><td><code>calendar/events.csv</code></td><td>Manual dated events (e.g. elections): <code>ccy,date,description</code>.</td></tr>
+  <tr><td><code>calendar/event_defaults.csv</code></td><td>The desk's relevant events and default weights (edited in the app).</td></tr>
+  <tr><td><code>calendar/bloomberg/</code></td><td>The last Bloomberg calendar import per currency.</td></tr>
+  <tr><td><code>pairs/&lt;PAIR&gt;/</code></td><td>Every version of the pair, plus its monthly archive.</td></tr>
+  <tr><td><code>market_history/</code></td><td>The recorded FMD quotes, one compressed file per month: only quotes that changed since the last round, and a full set at the start of each day.</td></tr>
+  <tr><td><code>analysis/</code></td><td>The tables for analysis (section 17), one file per month, and <code>_state.json</code>, which records the last day added.</td></tr>
+  <tr><td><code>users/</code></td><td>Each trader's own sidebar order, folded groups and test dates.</td></tr>
+  <tr><td><code>market/</code>, <code>alerts/</code>, <code>locks/</code></td><td>Market levels from the feed, the alert log, and short-lived lock files.</td></tr>
+</table>
+
+</main>
+</body>
+</html>

@@ -7,6 +7,8 @@ Layout under the analysis folder (config analysis_dir, default "analysis" in the
     atm_eod_wide/YYYY-MM.csv.gz   the end-of-day ATM mid, one column per pair and tenor
     market/YYYY-MM/YYYY-MM-DD.csv.gz   the recorded FMD quotes of the day (changes only;
                                   the day starts with a full set)
+    events/YYYY-MM/YYYY-MM-DD.csv.gz   the event weights in force at the end of the day: every
+                                  pair's upcoming events, desk defaults and its own, deleted ones too
     _state.json                   the last day exported, and the month files' sizes
 
 Days and months are local days in calendar_tz. Sources, which are only read:
@@ -15,13 +17,16 @@ Days and months are local days in calendar_tz. Sources, which are only read:
   * the dated copies of the Fenics file from before VolMarker (<PAIR>_yyyymmdd_hhmmss.csv in
     history_dir, as the Excel macro wrote them), used only from before the pair's first
     VolMarker version. Their time is the PC's wall clock, read in calendar_tz;
-  * the FMD quotes the leader records (Service.record_market).
+  * the FMD quotes the leader records (Service.record_market);
+  * for the events: each pair's last version of the day, the relevant events list as it was
+    then (calendar/event_defaults.log.jsonl) and the Bloomberg calendar as it is now (its
+    imports aren't dated). Not back-filled: the defaults of past days can't be told for sure.
 
 backfill() writes everything up to a day, whole months at a time, and is what
 scripts/export_history.py runs once. After that, the leader runs daily() each morning:
 it appends each finished day to its month's files (a new gzip member, so nothing
 written is read or rewritten), rebuilds the month's small wide table, and writes the
-day's market file. The month files' sizes are recorded before each append, so a run
+day's market and events files. The month files' sizes are recorded before each append, so a run
 cut off halfway is cut back and redone by the next one.
 
 Marks are mids: ATM bid/offer = mid -/+ spread / 2, without skew (the Excel-era files had
@@ -43,7 +48,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from .calendar import tenor_dates
+from .calendar import DEFAULT_CUT, default_events, effective_events, normalise_weights, tenor_dates
 from .conventions import TENORS, sort_tenors
 from .exports import FEN_TENORS
 from .store import Store, _read_gz_lines, _reverse_lines, atomic_write
@@ -58,6 +63,7 @@ MARKET_COLS = ["time_utc", "time_local", "date", "pair", "tenor", "mark", "ptype
 FILE_RE = re.compile(r"^([A-Z]{6})_(\d{8})_(\d{6})\.csv$", re.I)
 FEN_TENOR = {v: k for k, v in FEN_TENORS.items()}
 FEN_MARK = {"s25": "bf25", "rr25": "rr25", "s10": "bf10", "rr10": "rr10"}
+EVENT_COLS = ["date", "pair", "expiry", "ccy", "event", "release", "default_weight", "weight", "status", "version"]
 BACKFILL_HOURS = 12          # a back-fill younger than this holds off the daily run
 
 
@@ -153,7 +159,7 @@ class Exporter:
         if legacy is None and cfg.get("history_dir"):
             legacy = store.path_from_config("history_dir")
         self.legacy = legacy
-        self.holidays, _ = store.load_calendar()
+        self.holidays, self.calendar = store.load_calendar()
         self._exp: dict[tuple[str, date], dict] = {}
         self._first: dict[str, datetime | None] = {}
         self._legacy_idx: dict[str, list[tuple[datetime, Path]]] | None = None
@@ -209,6 +215,71 @@ class Exporter:
                     seen.add(rec["version"])
                     out.append(rec)
         return sorted(out, key=lambda r: r["version"])
+
+    def version_at(self, pair: str, b: datetime) -> dict | None:
+        """The pair's last version before b, archive included (None: none yet)."""
+        sources = [_reverse_lines(self.store._history(pair))] if self.store._history(pair).exists() else []
+        sources += [reversed(_read_gz_lines(f)) for _, f in reversed(self.store._archive_months(pair))]
+        for lines in sources:
+            for line in lines:
+                rec = json.loads(line)
+                if datetime.fromisoformat(rec["ts"]) < b:
+                    return rec
+        return None
+
+    def defaults_at(self, b: datetime) -> list[dict]:
+        """The desk's relevant events list as saved last before b (its log), else as it is now."""
+        rows = None
+        try:
+            with open(self.store.root / "calendar" / "event_defaults.log.jsonl", encoding="utf-8") as f:
+                for line in f:
+                    e = json.loads(line)
+                    if datetime.fromisoformat(e["ts"]) < b:
+                        rows = e["rows"]
+        except (OSError, ValueError, KeyError):
+            pass
+        return rows if rows is not None else self.store.load_event_defaults()["rows"]
+
+    def event_rows(self, d: date) -> list[list]:
+        """Every pair's event weights at the end of day d, for expiries from d on: the
+        weight used, the desk default, and status default / override / own / deleted
+        (a deleted one with the weight it had)."""
+        b, iso = self.day_start(d + timedelta(days=1)), d.isoformat()
+        rules, cuts = self.defaults_at(b), self.store.config().get("cuts") or {}
+        out = []
+        for pair in self.store.list_pairs():
+            rec = self.version_at(pair, b)
+            if rec is None:
+                continue
+            w = normalise_weights(rec.get("weights"), keep_deleted=True)
+            cut = cuts.get(rec.get("cut") or "NYC") or DEFAULT_CUT
+            defs = default_events(pair, self.calendar, rules, start=iso, holidays=self.holidays, cut=cut,
+                                  display_tz=self.zone) if w.get("use_defaults", True) else []
+            dflt = {(e["date"], e["ccy"]): e for e in defs}
+            own = [e for e in w["events"] if e["date"] >= iso]
+            rel = lambda e: ((e or {}).get("parts") or [{}])[0].get("release", "")
+            rows = []
+            for e in effective_events(own, defs):
+                if e["date"] < iso:
+                    continue
+                de = dflt.get((e["date"], e.get("ccy")))
+                status = "default" if e["source"] == "default" else "override" if de else "own"
+                rows.append([iso, pair, e["date"], e.get("ccy") or "", e.get("desc") or "", rel(de),
+                             _r(de["weight"]) if de else "", _r(float(e["weight"])), status, rec["version"]])
+            for e in own:
+                if e.get("deleted"):
+                    de = dflt.get((e["date"], e.get("ccy")))
+                    rows.append([iso, pair, e["date"], e.get("ccy") or "", e.get("desc") or (de or {}).get("desc", ""),
+                                 rel(de), _r(de["weight"]) if de else "",
+                                 _r(float(e["weight"])) if e.get("weight") not in (None, "") else "", "deleted", rec["version"]])
+            out += sorted(rows, key=lambda r: (r[2], r[3], r[8] == "deleted"))
+        return out
+
+    def events_day(self, d: date) -> int:
+        """Write day d's event weights to events/YYYY-MM/YYYY-MM-DD.csv.gz."""
+        rows = self.event_rows(d)
+        _atomic_bytes(self.out / "events" / f"{d:%Y-%m}" / f"{d}.csv.gz", gzip.compress(_csv(rows, EVENT_COLS)))
+        return len(rows)
 
     def snapshots(self, pair: str, a: datetime | None, b: datetime):
         """(utc, marks, source, user, version) of the pair with a <= time < b, by time."""
@@ -435,6 +506,10 @@ class Exporter:
                     os.fsync(f.fileno())
         self.write_wide(month)
         self.market_days([d])
+        try:
+            self.events_day(d)
+        except Exception:                   # the marks are written; the events are missed for that day
+            log.exception("event weights of %s not exported", d)
         st.update(through=d.isoformat(), month=month, sizes=self._sizes(month))
         st.pop("backfill_running", None)
         self.save_state(st)

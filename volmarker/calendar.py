@@ -57,7 +57,7 @@ def cut_time(cut: dict, day: date) -> str:
     return (cut.get("times") or {}).get(CUT_DAYS[day.weekday()]) or cut["time"]
 
 
-def normalise_weights(weights: dict | None) -> dict:
+def normalise_weights(weights: dict | None, keep_deleted: bool = False) -> dict:
     """Fill defaults; convert the old weekend1/weekend2 factors to weekday weights."""
     w = dict(DEFAULT_WEIGHTS)
     w.update(weights or {})
@@ -69,7 +69,19 @@ def normalise_weights(weights: dict | None) -> dict:
         raise ValueError("weekday weights: 7 values, Monday to Sunday")
     for k in ("weekend1", "weekend2"):
         w.pop(k, None)
+    # a new event still being typed (no date or weight yet) doesn't count; a deleted event is
+    # kept, with its weight, as {"date", "ccy", "desc", "weight", "deleted": true, "of": "default"|"own"}
+    w["events"] = [e for e in (w.get("events") or []) if event_complete(e) and not e.get("deleted")
+                   or keep_deleted and e.get("deleted")]
     return w
+
+
+def event_complete(e: dict) -> bool:
+    try:
+        date.fromisoformat(str(e.get("date") or ""))
+        return e.get("weight") not in (None, "") and float(e["weight"]) == float(e["weight"])
+    except (TypeError, ValueError):
+        return False
 
 WEEKEND = {5, 6}  # Saturday, Sunday
 
@@ -82,6 +94,12 @@ def _add_months(d: date, months: int) -> date:
 
 def is_good_day(d: date, ccys: tuple[str, str], holidays: dict[str, set]) -> bool:
     return d.weekday() not in WEEKEND and not any(d in holidays.get(c, ()) for c in ccys)
+
+
+def is_expiry_day(d: date) -> bool:
+    """Options expire on any weekday, holidays included (the spot market is open; only
+    the settlement date must avoid holidays): just Saturdays and Sundays are not."""
+    return d.weekday() not in WEEKEND
 
 
 # ---- FX value and expiry dates (market convention) -------------------------
@@ -200,18 +218,34 @@ def day_weight(d: date, ccys: tuple[str, str], weights: dict, holidays: dict[str
     return base + events_by_date.get(d, 0.0)
 
 
-def expiry_for(ev: dict, ccys: tuple[str, str], holidays: dict[str, set], cut: dict | None) -> date:
-    """The option expiry an event weighs on: the first good day whose cut is
-    after the release (events without a time: their own date, rolled forward)."""
+def expiry_for(ev: dict, ccys: tuple[str, str], holidays: dict[str, set], cut: dict | None,
+               why: list[str] | None = None) -> date:
+    """The option expiry an event weighs on: the first weekday whose cut is after
+    the release (events without a time: their own date, off a weekend). Holidays
+    don't move it: options expire on them too.
+    why, if given, gets the steps in words (24-hour times, in the cut's zone)."""
     cut = cut or DEFAULT_CUT
+    day = lambda d: d.strftime("%a %d %b")
     if ev.get("ts"):
         local = to_local(datetime.fromisoformat(ev["ts"]), cut["tz"])
-        h, m = (int(x) for x in cut_time(cut, local.date()).split(":"))
-        d = local.date() + timedelta(days=1 if local.time() >= time(h, m) else 0)
+        ct = cut_time(cut, local.date())
+        h, m = (int(x) for x in ct.split(":"))
+        after = local.time() >= time(h, m)
+        d = local.date() + timedelta(days=1 if after else 0)
+        if why is not None:
+            zone = cut["tz"].split("/")[-1].replace("_", " ")
+            why.append(f"{day(local)} {local:%H:%M} {zone} time, {'after' if after else 'before'} the {ct} cut"
+                       + (f": next day {day(d)}" if after else ""))
     else:
         d = date.fromisoformat(ev["date"])
-    while not is_good_day(d, ccys, holidays):
+        if why is not None:
+            why.append(f"No release time: its own date {day(d)}")
+    while not is_expiry_day(d):
+        if why is not None:
+            why.append(f"{day(d)}: weekend, no expiry")
         d += timedelta(days=1)
+    if why is not None:
+        why.append(f"expiry {day(d)}")
     return d
 
 
@@ -246,7 +280,11 @@ def default_events(pair: str, cal_events: list[dict], defaults: list[dict],
         w = rule_weight(ev, defaults)
         if w is None:
             continue
-        d = expiry_for(ev, ccys, holidays, cut).isoformat()
+        why: list[str] = []
+        exp = expiry_for(ev, ccys, holidays, cut, why)
+        d = exp.isoformat()
+        # the desk's standard cut (NYC) puts it elsewhere: Fenics files it under the other currency
+        moved = exp != expiry_for(ev, ccys, holidays, DEFAULT_CUT)
         if start and d < start:
             continue
         release = ev["date"]
@@ -255,7 +293,8 @@ def default_events(pair: str, cal_events: list[dict], defaults: list[dict],
         elif ev.get("time"):
             release = f"{ev['date']} {ev['time']}"
         # an event listed twice in the calendar counts once
-        by_key.setdefault((d, ev["ccy"]), {})[f"{ev['ccy']} {ev['desc']}"] = {"weight": w, "ccy": ev["ccy"], "release": release}
+        by_key.setdefault((d, ev["ccy"]), {})[f"{ev['ccy']} {ev['desc']}"] = {"weight": w, "ccy": ev["ccy"], "release": release, "why": " → ".join(why),
+                                                                    **({"moved": True} if moved else {})}
     out = []
     for (d, ccy), evs in sorted(by_key.items(), key=lambda kv: (kv[0][0], ccys.index(kv[0][1]))):
         parts = sorted(evs.items(), key=lambda kv: -kv[1]["weight"])
@@ -271,9 +310,14 @@ def effective_events(pair_events: list[dict], defaults: list[dict]) -> list[dict
     without (older events, calibrated weights) replaces every default on it."""
     own: dict[tuple[str, str | None], list] = {}
     for e in pair_events:
-        own.setdefault((e["date"], e.get("ccy") or None), []).append(e)
+        if not e.get("deleted"):
+            own.setdefault((e["date"], e.get("ccy") or None), []).append(e)
+    # deleted, kept with its weight so it can be brought back: a desk default ("of": "default")
+    # leaves nothing on its place; one of the pair's own events ("of": "own") is just gone
+    gone = {(e["date"], e.get("ccy")) for e in pair_events if e.get("deleted") and e.get("of") != "own"}
     whole = {d for d, c in own if c is None}
-    out = [dict(e, source="default") for e in defaults if e["date"] not in whole and (e["date"], e["ccy"]) not in own]
+    out = [dict(e, source="default") for e in defaults
+           if e["date"] not in whole and (e["date"], e["ccy"]) not in own and (e["date"], e["ccy"]) not in gone]
     for (d, ccy), es in own.items():
         dflt = max((x for x in defaults if x["date"] == d and ccy in (None, x["ccy"])),
                    key=lambda x: x["weight"], default={})
@@ -283,10 +327,11 @@ def effective_events(pair_events: list[dict], defaults: list[dict]) -> list[dict
     return sorted(out, key=lambda e: e["date"])
 
 
-def split_by_ccy(events: list[dict], day_events: list[dict]) -> list[dict]:
-    """Calibrated weights (one per day) onto the day's currencies: with events
-    of both currencies on a day each gets half, with one it gets it all; named
-    after that currency's event. day_events: the pair's effective events."""
+def split_by_ccy(events: list[dict], day_events: list[dict], ccys: tuple[str, str]) -> list[dict]:
+    """Calibrated weights (one per day) onto the pair's two currencies, half each,
+    so the Events table keeps a row per currency. Each half is named after that
+    currency's event on the day, or the calibrated event's name when it has none.
+    day_events: the pair's effective events."""
     by_day: dict[str, dict[str, dict]] = {}
     for e in day_events:
         if e.get("ccy"):
@@ -295,23 +340,25 @@ def split_by_ccy(events: list[dict], day_events: list[dict]) -> list[dict]:
                 by_day[e["date"]][e["ccy"]] = e
     out = []
     for ev in events:
-        on_day = by_day.get(ev["date"], {})
-        if ev.get("ccy") or not on_day:
+        if ev.get("ccy"):
             out.append(ev)
             continue
-        for ccy, d in on_day.items():
-            out.append(dict(ev, ccy=ccy, desc=d.get("desc") or ev.get("desc"),
-                            weight=round(float(ev["weight"]) / len(on_day), 4)))
+        on_day = by_day.get(ev["date"], {})
+        for ccy in ccys:
+            out.append(dict(ev, ccy=ccy, desc=(on_day.get(ccy) or {}).get("desc") or ev.get("desc"),
+                            weight=round(float(ev["weight"]) / 2, 4)))
     return out
 
 
 def with_defaults(pair: str, weights: dict | None, cal_events: list[dict], defaults: list[dict],
                   holidays: dict[str, set] | None = None, cut: dict | None = None) -> dict:
     """Pair weights (normalised) with the desk defaults merged into the events."""
-    w = normalise_weights(weights)
+    w = normalise_weights(weights, keep_deleted=True)
     if w.get("use_defaults", True):
         w["events"] = effective_events(w.get("events") or [],
                                        default_events(pair, cal_events, defaults, holidays=holidays, cut=cut))
+    else:
+        w["events"] = [e for e in w["events"] if not e.get("deleted")]
     return w
 
 
@@ -373,15 +420,15 @@ def interpolate_atm(pair: str, atm_by_tenor: dict[str, float], today: date,
 def daily_dates(pair: str, today: date, days: list[int], holidays: dict[str, set],
                 basis: str = "calendar") -> dict[int, date]:
     """Expiry date of an 'ND' daily. 'calendar' (FXO convention): today + N
-    calendar days, rolled forward to a good day for both currencies - so
-    e.g. 1D-3D from a Friday can share Monday's expiry. 'business': the N-th
-    good day."""
+    calendar days, rolled off a weekend - so e.g. 1D-3D from a Friday share
+    Monday's expiry. 'business': the N-th weekday. Holidays don't move an
+    expiry (see is_expiry_day)."""
     ccys = split_pair(pair)
     out = {}
     if basis == "calendar":
         for n in days:
             d = today + timedelta(days=n)
-            while not is_good_day(d, ccys, holidays):
+            while not is_expiry_day(d):
                 d += timedelta(days=1)
             out[n] = d
         return out
@@ -389,7 +436,7 @@ def daily_dates(pair: str, today: date, days: list[int], holidays: dict[str, set
     for n in sorted(days):
         while k < n:
             d += timedelta(days=1)
-            if is_good_day(d, ccys, holidays):
+            if is_expiry_day(d):
                 k += 1
         out[n] = d
     return out

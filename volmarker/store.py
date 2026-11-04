@@ -119,6 +119,9 @@ DEFAULT_CONFIG = {
         "fa_ws_dir": "exports/weights/FA_WS",
         # the macro wrote the PC's regional date format: yyyy-mm-dd on the desk PCs in Oct 2026, dd.mm.yyyy before
         "date_format": "%Y-%m-%d",
+        # Fenics' event calendar is per currency: on a pair whose cut is not NYC, an event the cut
+        # moves to another expiry is filed under the pair's other currency (false: as it is)
+        "cut_events_other_ccy": True,
     },
     # derived pairs and pairs moving with their parent, after an FMD-driven (or catch-up) move:
     # republish only when an ATM moves at least min_change (or, on a cross whose ATMs stay put,
@@ -473,7 +476,10 @@ class Store:
             ccy = str(r.get("ccy") or "").strip().upper()
             if ccy not in ("", "*") and (len(ccy) != 3 or not ccy.isalpha()):
                 raise ValueError(f"Bad currency {ccy!r} for {event}")
-            w = float(r.get("weight"))
+            try:
+                w = float(r.get("weight"))
+            except (TypeError, ValueError):
+                raise ValueError(f"{event or ticker}: type a weight") from None
             if not -1 < w <= 10:
                 raise ValueError(f"Weight for {event} must be between -1 and 10")
             clean.append({"ccy": ccy, "event": event, "weight": w, "ticker": ticker})

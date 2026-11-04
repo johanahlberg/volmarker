@@ -177,10 +177,10 @@ class TestDailies(unittest.TestCase):
         cal = daily_dates("EURUSD", today, [1, 4, 5, 6, 7], hol)    # FXO convention: calendar days
         self.assertEqual(cal[1], date(2026, 10, 20))
         self.assertEqual(cal[4], date(2026, 10, 23))                 # Fri
-        self.assertEqual((cal[5], cal[6], cal[7]),                   # Sat, Sun, Mon(USD holiday) -> Tue
-                         (date(2026, 10, 27),) * 3)
+        self.assertEqual((cal[5], cal[6], cal[7]),                   # Sat, Sun -> Mon (a USD holiday: still an expiry)
+                         (date(2026, 10, 26),) * 3)
         dd = daily_dates("EURUSD", today, list(range(1, 15)), hol, "business")
-        self.assertEqual(dd[5], date(2026, 10, 27))     # 5th good day: weekend and holiday skipped
+        self.assertEqual(dd[5], date(2026, 10, 26))     # 5th weekday: the weekend skipped, not the holiday
         cum = cumulative_weights("EURUSD", today, max(dd.values()), truth, hol)
         ref = 0.07 ** 2 / 252                              # variance of a normal day
         vols = {d: (ref * cum[(d - today).days] * 365 / (d - today).days) ** 0.5 for d in dd.values()}

@@ -107,7 +107,7 @@ function age(min) {
 }
 function localTime(iso) {
   const d = new Date(iso);
-  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
 }
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
@@ -308,6 +308,10 @@ function pick(rec) {
   const s = {};
   for (const k of STATE_KEYS) s[k] = clone(rec[k] ?? null);
   s.weights = normaliseWeights(s.weights);
+  // an event without a currency (calibrated before the split): half to each currency, a row each
+  const cc = rec.pair ? [rec.pair.slice(0, 3), rec.pair.slice(3)] : null;
+  if (cc && s.weights.events) s.weights.events = s.weights.events.flatMap((e) => e.ccy ? [e]
+    : cc.map((c) => ({ ...e, ccy: c, weight: Math.round((Number(e.weight) || 0) / 2 * 1e4) / 1e4 })));
   for (const k of ["lock_rr10f", "lock_bf10f"]) s[k] = s[k] === null ? true : !!s[k];
   s.atm_type = s.atm_type || "DNS";
   s.follow_market = !!s.follow_market; s.alerts_off = !!s.alerts_off; s.alerts_smile_off = !!s.alerts_smile_off; s.rr_put = !!s.rr_put; s.inverse = !!s.inverse;
@@ -672,6 +676,11 @@ function updateButtons() {
 
 async function publish() {
   if (!app.dirty || $("#publish").disabled) return;      // settings alone are saved in Setup
+  const open = (app.draft.weights?.events || []).filter((e) => !e.deleted && (!/^\d{4}-\d{2}-\d{2}$/.test(e.date || "") || !e.ccy || e.weight == null || e.weight === ""));
+  if (open.length) {
+    showBanner("A new event needs a date, a currency and a weight (Weights tab). Fill them in or remove the row with ✕.", [["OK", () => hideBanner()]], "error");
+    return;
+  }
   clearTimeout(previewTimer);
   $("#publish").disabled = true;
   app.publishing = true;          // our own version's live event may come before the reply: not someone else's
@@ -1240,63 +1249,82 @@ function releaseOnLeave(table, pinned, render) {
   });
 }
 function eventRows() {
-  const w = app.draft.weights, own = new Map(), defs = useDefaults() ? app.defEvents || [] : [];
+  const w = app.draft.weights, groups = new Map(), defs = useDefaults() ? app.defEvents || [] : [];
+  // deleted events, kept with their weight for ↺: desk defaults (by date and currency) and the pair's own
+  const dels = new Map(), ownDel = [];
   (w.events || []).forEach((e, i) => {
-    const k = `${e.date}|${e.ccy || ""}`;
-    own.set(k, [...(own.get(k) || []), { ...e, i }]);
+    if (e.deleted) { if (e.of === "own") ownDel.push({ ...e, i }); else dels.set(`${e.date}|${e.ccy}`, { ...e, i }); return; }
+    const pending = evPending.has(e), k = pending ? `new|${i}` : `${e.date}|${e.ccy || ""}`;   // a new event is a row of its own
+    if (!groups.has(k)) groups.set(k, { date: e.date, ccy: e.ccy || "", pending, es: [] });
+    groups.get(k).es.push({ ...e, i });
   });
-  const whole = new Set([...own.keys()].filter((k) => k.endsWith("|")).map((k) => k.slice(0, -1)));
+  const own = new Set([...groups.values()].map((g) => `${g.date}|${g.ccy}`));
+  const whole = new Set([...groups.values()].filter((g) => !g.ccy && !g.pending).map((g) => g.date));
   const rows = defs.filter((d) => !whole.has(d.date) && !own.has(`${d.date}|${d.ccy}`))
-    .map((d) => ({ date: d.date, desc: d.desc, def: d.weight, weight: d.weight, kind: "default", parts: d.parts, ccy: d.ccy }));
+    .map((d) => {
+      const m = dels.get(`${d.date}|${d.ccy}`);
+      return { date: d.date, desc: d.desc, def: d.weight, weight: m ? m.weight ?? d.weight : d.weight, parts: d.parts, ccy: d.ccy,
+        kind: m ? "deleted" : "default", mi: m?.i };
+    });
+  for (const m of ownDel) rows.push({ date: m.date, ccy: m.ccy || "", desc: m.desc || "", def: null, weight: m.weight, kind: "deleted", mi: m.i, own: true });
   const ccyOrder = [app.current.slice(0, 3), app.current.slice(3)];
-  for (const [k, es] of own) {
-    const [date, ccy] = k.split("|");
-    const ds = defs.filter((x) => x.date === date && (!ccy || x.ccy === ccy));
+  for (const g of groups.values()) {
+    const ds = g.date ? defs.filter((x) => x.date === g.date && (!g.ccy || x.ccy === g.ccy)) : [];
     const d = ds.length ? { weight: ds.reduce((s, x) => s + x.weight, 0), desc: ds.map((x) => x.desc).join(", "), parts: ds.flatMap((x) => x.parts || []), ccy: ds[0].ccy } : null;
-    rows.push({ date, desc: es.map((e) => e.desc).filter(Boolean).join(", "), def: d ? d.weight : null, defDesc: d?.desc, parts: d?.parts,
-      weight: es.reduce((s, e) => s + (Number(e.weight) || 0), 0), kind: d ? "override" : "pair", idx: es.map((e) => e.i),
-      ccy: ccy || d?.ccy || ccyOrder[0], pending: es.some((e) => evPending.has(w.events[e.i])) });
+    rows.push({ date: g.date, desc: g.es.map((e) => e.desc).filter(Boolean).join(", "), def: d ? d.weight : null, defDesc: d?.desc, parts: d?.parts,
+      weight: g.es.some((e) => e.weight != null && e.weight !== "") ? g.es.reduce((s, e) => s + (Number(e.weight) || 0), 0) : null,
+      kind: d ? "override" : "pair", idx: g.es.map((e) => e.i), ccy: g.ccy || d?.ccy || "", pending: g.pending });
   }
-  return rows.sort((a, b) => !!b.pending - !!a.pending || a.date.localeCompare(b.date) || ccyOrder.indexOf(a.ccy) - ccyOrder.indexOf(b.ccy));
+  // new rows first, then by expiry; on a day the live rows before the deleted ones (they share the day total)
+  return rows.sort((a, b) => !!b.pending - !!a.pending || a.date.localeCompare(b.date) ||
+    (a.kind === "deleted") - (b.kind === "deleted") || ccyOrder.indexOf(a.ccy) - ccyOrder.indexOf(b.ccy));
 }
 function renderEvents() {
-  const today = isoToday(), all = eventRows(), rows = all.filter((r) => r.pending || r.date >= today);
-  const past = all.filter((r) => r.date < today && r.kind !== "default").length;
-  const wd = (d) => new Date(d + "T12:00:00").toLocaleDateString(undefined, { weekday: "short" });
+  const today = isoToday(), all = eventRows();
+  const rows = all.filter((r) => r.pending || (r.date >= today && (r.kind !== "deleted" || app.evShowDeleted)));
+  const past = all.filter((r) => r.date < today && r.kind !== "default" && r.kind !== "deleted").length;
+  const nDel = all.filter((r) => r.kind === "deleted" && r.date >= today).length;
+  const wd = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d || "") ? new Date(d + "T12:00:00").toLocaleDateString(undefined, { weekday: "short" }) : "";
   const ccys = [app.current.slice(0, 3), app.current.slice(3)];
   // the day's total over both currencies, in one cell spanning the expiry's rows
   const day = {};
-  for (const r of rows) if (!r.pending) (day[r.date] ||= []).push(r);
+  for (const r of rows) if (!r.pending && r.kind !== "deleted") (day[r.date] ||= []).push(r);
   $("#events").innerHTML = `<thead><tr><th class="tn" title="Option expiry the event weighs on">Expiry</th><th class="tn">Day</th><th class="tn" title="Release time (${esc(app.me.calendar_tz || "")})">Release</th><th class="tn">Ccy</th><th class="tn">Description</th><th title="Desk default">Default</th><th>Weight</th><th title="All events on this expiry, both currencies: what the day weighs on top of its weekday weight">Day total</th><th></th></tr></thead><tbody>` +
     (rows.length ? rows.map((r, k) => {
       const i = r.idx ? r.idx[0] : "", extra = r.idx ? r.idx.slice(1).join(",") : "";
-      const attrs = r.kind === "default" ? `data-date="${r.date}" data-ccy="${r.ccy}" data-desc="${esc(r.desc)}"` : `data-i="${i}" data-extra="${extra}"`;
+      const attrs = r.kind === "default" || r.kind === "deleted" ? `data-date="${r.date}" data-ccy="${r.ccy}" data-desc="${esc(r.desc)}"` : `data-i="${i}" data-extra="${extra}"`;
       // plain text in the same yyyy-mm-dd as the other rows (a date picker would show the PC's regional format)
       const date = r.kind === "pair" ? `<input class="ev evdate" ${attrs} data-k="date" value="${r.date}" placeholder="yyyy-mm-dd" maxlength="10" size="10" title="Expiry date, yyyy-mm-dd">` : r.date;
       const breakdown = (r.parts || []).length > 1 ? r.parts.map((x) => `${x.desc}  ${fmt(x.weight, 2)}`).join("\n") + `\n= ${fmt(r.def, 2)}` : "";
       const shown = r.ccy && (r.desc || "").startsWith(r.ccy + " ") ? r.desc.slice(4) : r.desc;
-      const desc = r.kind === "default" ? `<span class="muted" title="${esc(breakdown || "Desk default")}">${esc(shown)}</span>`
+      const desc = r.kind === "default" || r.kind === "deleted" ? `<span class="muted" title="${esc(r.kind === "deleted" ? `Deleted for this pair: not in the curve, Fenics or Front Arena. ↺ brings it back with weight ${fmt(r.weight, 2)}` : breakdown || "Desk default")}">${esc(shown)}</span>`
         : `<input class="ev" ${attrs} data-k="desc" value="${esc(r.desc)}" placeholder="${esc(r.defDesc || "")}">`;
-      const act = r.kind === "pair" ? `<button class="ghost ev-del" tabindex="-1" data-idx="${r.idx.join(",")}" title="Remove">✕</button>`
-        : r.kind === "override" ? `<button class="ghost ev-del" tabindex="-1" data-idx="${r.idx.join(",")}" title="Back to the desk default (${fmt(r.def, 2)})">↺</button>` : "";
+      const delDef = `<button class="ghost ev-deldef" tabindex="-1" data-date="${r.date}" data-ccy="${r.ccy}" data-idx="${(r.idx || []).join(",")}" data-w="${r.weight}" data-desc="${esc(r.desc)}" title="Delete this desk default for ${app.current}, keeping its weight (Show deleted, ↺ brings it back)">✕</button>`;
+      const act = r.kind === "pair" ? `<button class="ghost ev-del" tabindex="-1" data-idx="${r.idx.join(",")}"${r.pending ? "" : ' data-own="1"'} title="${r.pending ? "Remove" : "Delete, keeping its weight (Show deleted, ↺ brings it back)"}">✕</button>`
+        : r.kind === "override" ? `<button class="ghost ev-del" tabindex="-1" data-idx="${r.idx.join(",")}" title="Back to the desk default (${fmt(r.def, 2)})">↺</button>${delDef}`
+        : r.kind === "deleted" ? `<button class="ghost ev-undel" tabindex="-1" data-mi="${r.mi}" title="Bring it back, weight ${fmt(r.weight, 2)}">↺</button>`
+        : delDef;
       const rel = (r.parts || [])[0]?.release || "";
       const relTxt = rel.slice(0, 10) === r.date ? rel.slice(11) : rel ? `${wd(rel.slice(0, 10))} ${rel.slice(8, 10)}. ${rel.slice(11)}` : "";
-      const relTitle = (r.parts || []).map((x) => `${x.desc}: ${x.release}`).join("\n");
-      const ccy = r.kind === "pair" ? `<select class="ev" ${attrs} data-k="ccy">${ccys.map((c) => `<option${c === r.ccy ? " selected" : ""}>${c}</option>`).join("")}</select>` : esc(r.ccy || "");
-      return `<tr class="ev-${r.kind}${r.pending ? " newrow" : ""}"${r.pending ? ' title="New: sorted into place once it has a description and you leave the row"' : ""}><td class="tn">${date}</td><td class="tn">${wd(r.date)}</td><td class="tn small${rel && rel.slice(0, 10) !== r.date ? " moved" : ""}" title="${esc(relTitle)}">${esc(relTxt)}</td><td class="tn">${ccy}</td><td class="tn">${desc}</td>
+      const relTitle = (r.parts || []).map((x) => `${x.desc}: released ${x.release}${x.why ? `\n  ${x.why}` : ""}`).join("\n");
+      const ccy = r.kind === "pair" ? `<select class="ev" ${attrs} data-k="ccy">${r.ccy ? "" : `<option value="" selected>–</option>`}${ccys.map((c) => `<option${c === r.ccy ? " selected" : ""}>${c}</option>`).join("")}</select>` : esc(r.ccy || "");
+      const weight = r.kind === "deleted" ? `<td class="muted">${fmt(r.weight, 2)}</td>`
+        : `<td><input class="ev num${r.kind === "override" ? " ovr" : ""}" ${attrs} data-k="weight" value="${fmt(r.weight, 2)}"${r.pending ? ' placeholder="weight"' : ""} title="${r.kind === "default" ? "Desk default; type to override for this pair" : r.kind === "override" ? "Overrides the desk default for this pair" : "This pair's own event"}"></td>`;
+      return `<tr class="ev-${r.kind}${r.pending ? " newrow" : ""}"${r.pending ? ' title="New: type the date, currency, description and weight. Sorted into place once all are filled in and you leave the row"' : ""}><td class="tn">${date}</td><td class="tn">${wd(r.date)}</td><td class="tn small${rel && rel.slice(0, 10) !== r.date ? " moved" : ""}" title="${esc(relTitle)}">${esc(relTxt)}</td><td class="tn">${ccy}</td><td class="tn">${desc}</td>
         <td class="muted"${breakdown ? ` title="${esc(breakdown)}"` : ""}>${r.def == null ? "" : fmt(r.def, 2) + (breakdown ? " Σ" : "")}</td>
-        <td><input class="ev num${r.kind === "override" ? " ovr" : ""}" ${attrs} data-k="weight" value="${fmt(r.weight, 2)}" title="${r.kind === "default" ? "Desk default; type to override for this pair" : r.kind === "override" ? "Overrides the desk default for this pair" : "This pair's own event"}"></td>
+        ${weight}
         ${dayTotal(r, k)}<td>${act}</td></tr>`;
     }).join("") : `<tr><td colspan="9" class="muted tn">No upcoming events</td></tr>`) + "</tbody>";
   function dayTotal(r, k) {
-    if (r.pending) return `<td class="daytot"></td>`;
+    if (r.pending || r.kind === "deleted") return `<td class="daytot"></td>`;
     if (k > 0 && !rows[k - 1].pending && rows[k - 1].date === r.date) return "";
     const rs = day[r.date], tot = rs.reduce((s, x) => s + (Number(x.weight) || 0), 0);
     const title = rs.map((x) => `${x.ccy || ""} ${fmt(Number(x.weight) || 0, 2)}`).join(" + ") + ` = ${fmt(tot, 2)}`;
     return `<td class="daytot${rs.length > 1 ? " multi" : ""}" rowspan="${rs.length}" title="${esc(title)}">${fmt(tot, 2)}</td>`;
   }
   const nDef = rows.filter((r) => r.kind === "default").length, nOvr = rows.filter((r) => r.kind === "override").length;
-  $("#ev-note").innerHTML = (useDefaults() ? `${nDef} from desk defaults, ${nOvr} overridden. ` : "Desk defaults off for this pair. ") +
+  $("#ev-note").innerHTML = (useDefaults() ? `${nDef} from desk defaults, ${nOvr} overridden. ` +
+    (nDel ? `${nDel} deleted <button class="ghost" id="ev-showdel">${app.evShowDeleted ? "Hide deleted" : "Show deleted"}</button> ` : "") : "Desk defaults off for this pair. ") +
     (past ? `${past} past event(s) hidden <button class="ghost" id="ev-prune">Remove past</button>` : "");
 }
 async function loadDefEvents() {
@@ -1383,7 +1411,7 @@ function renderTestDates(err) {
         `<td${ef != null && r.fwd != null && Math.abs(ef - r.fwd) >= 0.05 ? ' class="chg"' : ""}>${Number.isNaN(ef) ? '<span class="warn" title="The quotes imply negative forward variance">neg.</span>' : fmt(ef, 3)}</td>`;
       let d = r.atm != null && r.published != null ? r.atm - r.published : null;
       if (d != null && Math.abs(d) < 0.0005) d = 0;
-      return `<tr${r.good_day ? "" : ' class="muted" title="Not a good business day for both currencies"'}><td class="tn">${r.date}${r.pillar ? ` <span class="tag" title="Expiry of the ${r.pillar} mark: quote it to set the shift to the external quotes from your mark">${r.pillar}</span>` : ""}</td><td class="tn">${r.weekday}</td><td>${r.days}</td>
+      return `<tr${r.good_day ? "" : ' class="muted" title="Weekend: no expiry"'}><td class="tn">${r.date}${r.pillar ? ` <span class="tag" title="Expiry of the ${r.pillar} mark: quote it to set the shift to the external quotes from your mark">${r.pillar}</span>` : ""}</td><td class="tn">${r.weekday}</td><td>${r.days}</td>
         <td>${fmt(r.weighted_days, 2)}</td><td>${fmt(r.day_weight, 2)}</td><td><b>${fmt(r.atm, 3)}</b></td>
         ${dirty ? `<td>${fmt(r.published, 3)}</td><td class="${d && Math.abs(d) >= 0.0005 ? "chg" : "muted"}">${d == null ? "" : (d > 0 ? "+" : "") + fmt(d, 3)}</td>` : ""}
         <td>${fmt(r.fwd, 3)}</td>${ext}<td class="tn small">${esc(r.events.join(", "))}</td>
@@ -1426,7 +1454,7 @@ async function calibrateTestQuotes() {
 function addEventTestDates() {
   const today = isoToday(), lim = new Date(); lim.setMonth(lim.getMonth() + 3);
   const end = lim.toISOString().slice(0, 10);
-  const evs = [...new Set(eventRows().filter((r) => r.date > today && r.date <= end && r.weight > 0).map((r) => r.date))];
+  const evs = [...new Set(eventRows().filter((r) => r.kind !== "deleted" && r.date > today && r.date <= end && r.weight > 0).map((r) => r.date))];
   if (!evs.length) return;
   const p = (n) => String(n).padStart(2, "0");
   const weekday = (iso, step) => {
@@ -1460,13 +1488,13 @@ function renderDefaults() {
   // new rows on top whatever the filter; the rest by weight, biggest first
   const rows = (app.dfRows || []).map((r, i) => ({ ...r, i, pending: dfPending.has(r) }))
     .filter((r) => r.pending || (mine(r) && (!q || `${r.ccy} ${r.event} ${r.ticker || ""}`.toLowerCase().includes(q))))
-    .sort((a, b) => b.pending - a.pending || (b.weight - a.weight) || (a.ccy || "").localeCompare(b.ccy || "") ||
+    .sort((a, b) => b.pending - a.pending || ((b.weight ?? 0) - (a.weight ?? 0)) || (a.ccy || "").localeCompare(b.ccy || "") ||
       (a.event || "").localeCompare(b.event || "") || a.i - b.i);
   $("#df-table").innerHTML = `<thead><tr><th class="tn">Ccy</th><th class="tn">Event</th><th class="tn">Ticker</th><th title="Sorted by weight, biggest first">Weight ▾</th><th title="Upcoming calendar events this one matches">Upcoming</th><th class="tn">Next release</th><th></th></tr></thead><tbody>` +
-    (rows.length ? rows.map((r) => `<tr${r.pending ? ' class="newrow" title="New: sorted into place once it has an event name and you leave the row"' : ""}><td class="tn"><input class="df" data-i="${r.i}" data-k="ccy" value="${esc(r.ccy)}" maxlength="3" size="4" placeholder="any"></td>
+    (rows.length ? rows.map((r) => `<tr${r.pending ? ' class="newrow" title="New: type the currency (* for any), event and weight. Sorted into place once they are filled in and you leave the row"' : ""}><td class="tn"><input class="df" data-i="${r.i}" data-k="ccy" value="${esc(r.ccy)}" maxlength="3" size="4" placeholder="${r.pending ? "ccy" : "any"}"></td>
       <td class="tn"><input class="df" data-i="${r.i}" data-k="event" value="${esc(r.event)}" placeholder="e.g. FOMC Rate Decision (Upper Bound)" size="34"></td>
       <td class="tn"><input class="df" data-i="${r.i}" data-k="ticker" value="${esc(r.ticker || "")}" placeholder="optional" size="14"></td>
-      <td><input class="df num" data-i="${r.i}" data-k="weight" value="${fmt(r.weight, 2)}"></td>
+      <td><input class="df num" data-i="${r.i}" data-k="weight" value="${fmt(r.weight, 2)}"${r.pending ? ' placeholder="weight"' : ""}></td>
       <td${r.matches === 0 ? ' class="warn" title="Not in the calendar: check the name, or import the Bloomberg file"' : ""}>${r.matches ?? ""}</td><td class="tn muted small">${esc(r.next || "")}</td>
       <td><button class="ghost df-del" tabindex="-1" data-i="${r.i}" title="Remove">✕</button></td></tr>`).join("")
       : `<tr><td colspan="7" class="muted tn">${q ? "No match" : all ? "No relevant events yet" : `No relevant events for ${ccys.join(" or ")} yet`}</td></tr>`) + "</tbody>";
@@ -1558,7 +1586,13 @@ async function sendWeights() {
   loadWeightsExport();
 }
 
+const dfComplete = (r) => !!(r.event || "").trim() && !!(r.ccy || "").trim() && r.weight != null;
 async function saveDefaults() {
+  const open = (app.dfRows || []).filter((r) => dfPending.has(r) && !dfComplete(r));
+  if (open.length) {
+    showBanner("A new relevant event needs a currency (* for any), an event name and a weight. Fill them in or remove the row.", [["OK", () => hideBanner()]], "error");
+    return;
+  }
   try {
     app.defaults = await api("/api/event-defaults", { rows: app.dfRows, expected_version: app.defaults?.version ?? null });
     app.dfRows = clone(app.defaults.rows); app.dfDirty = false;
@@ -1581,7 +1615,12 @@ function wireWeights() {
   $("#events").addEventListener("change", (e) => {
     const el = e.target; if (!el.matches(".ev")) return;
     const evs = (app.draft.weights.events ||= []), k = el.dataset.k;
-    let val = k === "weight" ? Number(el.value) || 0 : el.value;
+    let val = el.value;
+    if (k === "weight") {
+      const t = el.value.trim(); val = t === "" ? null : Number(t);
+      if (val !== null && !Number.isFinite(val)) { el.classList.add("bad"); el.title = "Not a number"; return; }
+      if (val === null && el.dataset.date) return;          // a desk default left empty: unchanged
+    }
     if (k === "date") {
       val = val.trim();
       const d = new Date(val + "T12:00:00");
@@ -1600,27 +1639,40 @@ function wireWeights() {
     changed(); rerenderKeepFocus($("#events"), renderEvents);
   });
   $("#events").addEventListener("click", (e) => {
-    if (!e.target.matches(".ev-del")) return;
-    e.target.dataset.idx.split(",").map(Number).sort((a, b) => b - a).forEach((j) => app.draft.weights.events.splice(j, 1));
+    const b = e.target, evs = (app.draft.weights.events ||= []);
+    if (!b.matches(".ev-del, .ev-deldef, .ev-undel")) return;
+    if (b.matches(".ev-undel")) {          // back with the weight it had: the pair's own event, or a desk default (overridden if it was)
+      const m = evs.splice(+b.dataset.mi, 1)[0];
+      const def = (app.defEvents || []).find((x) => x.date === m.date && x.ccy === m.ccy);
+      if (m.of === "own" || (m.weight != null && (!def || Math.abs(m.weight - def.weight) > 1e-9)))
+        evs.push({ date: m.date, ccy: m.ccy, desc: m.desc || "", weight: m.weight });
+    } else {
+      const idx = (b.dataset.idx || "").split(",").filter(Boolean).map(Number), gone = idx.map((j) => evs[j]);
+      idx.sort((a, c) => c - a).forEach((j) => evs.splice(j, 1));
+      if (b.matches(".ev-deldef")) evs.push({ date: b.dataset.date, ccy: b.dataset.ccy, desc: b.dataset.desc, weight: Number(b.dataset.w), deleted: true, of: "default" });
+      else if (b.dataset.own) evs.push({ date: gone[0].date, ccy: gone[0].ccy, desc: gone.map((e) => e.desc).filter(Boolean).join(", "),
+        weight: gone.reduce((t, e) => t + (Number(e.weight) || 0), 0), deleted: true, of: "own" });
+    }
     changed(); renderEvents();
   });
   $("#ev-note").addEventListener("click", (e) => {
+    if (e.target.id === "ev-showdel") { app.evShowDeleted = !app.evShowDeleted; renderEvents(); return; }
     if (e.target.id !== "ev-prune") return;
     const today = isoToday();
     app.draft.weights.events = (app.draft.weights.events || []).filter((x) => x.date >= today);
     changed(); renderEvents();
   });
+  // a new event starts empty, on top: date, currency, description and weight all typed (nothing to forget to change)
   $("#ev-add").onclick = () => {
-    const used = new Set(eventRows().map((r) => r.date)), d = new Date();
-    let iso; do { d.setDate(d.getDate() + 1); iso = d.toISOString().slice(0, 10); } while (used.has(iso));
-    const ev = { date: iso, desc: "", weight: 0.5, ccy: app.current.slice(0, 3) };
+    const ev = { date: "", desc: "", weight: null, ccy: "" };
     (app.draft.weights.events ||= []).push(ev); evPending.add(ev);
     changed(); renderEvents();
-    $("#events tbody tr.newrow input[data-k=date]")?.select();     // ready to type over
+    $("#events tbody tr.newrow input[data-k=date]")?.focus();
   };
   releaseOnLeave($("#events"), (i) => {
     const ev = app.draft.weights.events?.[i];
-    return ev && evPending.has(ev) && { release: () => !!(ev.desc || "").trim() && evPending.delete(ev) };
+    const done = () => !!(ev.desc || "").trim() && /^\d{4}-\d{2}-\d{2}$/.test(ev.date || "") && !!ev.ccy && ev.weight != null && ev.weight !== "";
+    return ev && evPending.has(ev) && { release: () => done() && evPending.delete(ev) };
   }, renderEvents);
   // test dates
   $("#td-add").onclick = () => { const v = $("#td-date").value; if (v && v > isoToday()) setTestDates([...testDates(), v]); };
@@ -1646,7 +1698,11 @@ function wireWeights() {
   $("#df-table").addEventListener("change", (e) => {
     const el = e.target; if (!el.matches(".df")) return;
     const r = app.dfRows[+el.dataset.i], k = el.dataset.k;
-    r[k] = k === "weight" ? Number(el.value) || 0 : k === "ccy" ? el.value.trim().toUpperCase() : el.value.trim();
+    if (k === "weight") {
+      const t = el.value.trim(), v = t === "" ? null : Number(t);
+      if (v !== null && !Number.isFinite(v)) { el.classList.add("bad"); el.title = "Not a number"; return; }
+      r[k] = v;
+    } else r[k] = k === "ccy" ? el.value.trim().toUpperCase() : el.value.trim();
     delete r.matches; delete r.next;
     app.dfDirty = true; rerenderKeepFocus($("#df-table"), renderDefaults);
   });
@@ -1654,17 +1710,15 @@ function wireWeights() {
     if (!e.target.matches(".df-del")) return;
     app.dfRows.splice(+e.target.dataset.i, 1); app.dfDirty = true; renderDefaults();
   });
+  // a new desk default starts empty, on top: currency, event and weight all typed
   $("#df-add").onclick = () => {
-    // the filter stays; a currency typed there (one shown) is the new event's currency
-    const f = $("#df-filter").value.trim().toUpperCase(), all = app.prefs?.df_all === true || !app.current;
-    const shown = all ? new Set(app.pairs.flatMap((p) => [p.pair.slice(0, 3), p.pair.slice(3)])) : new Set([app.current.slice(0, 3), app.current.slice(3)]);
-    const r = { ccy: shown.has(f) ? f : app.current?.slice(0, 3) || "", event: "", ticker: "", weight: 0.5 };
+    const r = { ccy: "", event: "", ticker: "", weight: null };
     (app.dfRows ||= []).push(r); dfPending.add(r); app.dfDirty = true; renderDefaults();
-    $("#df-table tbody tr.newrow input[data-k=event]")?.select();
+    $("#df-table tbody tr.newrow input[data-k=ccy]")?.focus();
   };
   releaseOnLeave($("#df-table"), (i) => {
     const r = app.dfRows?.[i];
-    return r && dfPending.has(r) && { release: () => !!(r.event || "").trim() && dfPending.delete(r) };
+    return r && dfPending.has(r) && { release: () => dfComplete(r) && dfPending.delete(r) };
   }, renderDefaults);
   $("#df-filter").addEventListener("input", renderDefaults);
   $("#df-all").addEventListener("change", (e) => { app.prefs.df_all = e.target.checked; savePrefs(); renderDefaults(); });

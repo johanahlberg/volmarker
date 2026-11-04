@@ -17,6 +17,15 @@ Event weights come from the pair's effective weights (desk defaults plus the
 pair's own events). Events with weight 0 are sent to Fenics and FA_FX too
 (Fenics doubles as the desk's overview of what is coming), not to FA_WS.
 Each is named after the biggest default event of its currency that day.
+
+Fenics shows the events in a calendar per currency, not per pair. A pair on another
+cut than the desk's standard NYC (e.g. USDCNH on TOK) has some events on a later
+expiry than the NYC pairs, so the same USD event would be listed on two days. In the
+Fenics message, the share of the weight that the pair's cut moves is therefore filed
+under the pair's other currency, named "<CCY> <event> (<cut>)", e.g. "USD Change in
+Nonfarm Payrolls (TOK)" under CNH. The weights are unchanged; Front Arena is per pair
+and gets the events as they are. Config weights_export.cut_events_other_ccy = false
+switches this off (should Fenics handle cuts itself one day).
 """
 
 from __future__ import annotations
@@ -47,7 +56,8 @@ def _events(pair: str, weights: dict, today: date) -> list[dict]:
     for e in weights["events"]:
         d = date.fromisoformat(e["date"])
         if d > today:
-            out.append({"date": d, "ccy": e.get("ccy") or c1, "name": _name(e), "weight": float(e["weight"])})
+            out.append({"date": d, "ccy": e.get("ccy") or c1, "name": _name(e), "weight": float(e["weight"]),
+                        "parts": e.get("parts") or []})
     return sorted(out, key=lambda e: e["date"])
 
 
@@ -57,7 +67,10 @@ def fenics_items(pair: str, weights: dict, holidays: dict[str, set], today: date
     c1, c2 = split_pair(pair)
     hol = {c1: weights["holiday1"], c2: weights["holiday2"]}
     out = []
-    for e in _events(pair, weights, today):
+    evs = _events(pair, weights, today)
+    if weights.get("cut_events_other_ccy", True):      # config weights_export.cut_events_other_ccy
+        evs = _currency_calendar(pair, evs, weights.get("cut") or "NYC")
+    for e in evs:
         c, other = e["ccy"], (c2 if e["ccy"] == c1 else c1)
         wd = weights["weekdays"][e["date"].weekday()]
         h_other = hol[other] if e["date"] in holidays.get(other, ()) else 1.0
@@ -66,6 +79,40 @@ def fenics_items(pair: str, weights: dict, holidays: dict[str, set], today: date
         else:
             out.append(dict(e, type="Event", value=e["weight"]))
     return out
+
+
+def _currency_calendar(pair: str, events: list[dict], cut: str) -> list[dict]:
+    """The events as Fenics' per-currency calendar should list them: the share of an
+    event's weight that the pair's cut moves off the NYC expiry goes under the pair's
+    other currency (in proportion to the default weights of the moved releases), merged
+    with what that currency already has on the day."""
+    c1, c2 = split_pair(pair)
+    strip = lambda s: re.sub(r" \+\d+$", "", s or "")
+    by: dict[tuple, dict] = {}
+    def add(d, ccy, name, w):
+        x = by.get((d, ccy))
+        if x is None:
+            by[(d, ccy)] = {"date": d, "ccy": ccy, "name": name, "weight": w}
+        else:
+            x["name"], x["weight"] = f'{x["name"]} + {name}', x["weight"] + w
+    size = lambda ps: sum(abs(p["weight"]) for p in ps)
+    later = []                     # the moved shares, after the day's own events (named first)
+    for e in events:
+        moved = [p for p in e["parts"] if p.get("moved")]
+        if not moved:
+            add(e["date"], e["ccy"], e["name"], e["weight"])
+            continue
+        kept = [p for p in e["parts"] if not p.get("moved")]
+        share = size(moved) / size(e["parts"]) if size(e["parts"]) else len(moved) / len(e["parts"])
+        if kept:
+            top = max(kept, key=lambda p: p["weight"])
+            add(e["date"], e["ccy"], _name({"desc": top["desc"], "ccy": e["ccy"]}), e["weight"] * (1 - share))
+        top = max(moved, key=lambda p: p["weight"])
+        later.append((e["date"], c2 if e["ccy"] == c1 else c1, f'{strip(top["desc"])} ({cut})', e["weight"] * share))
+    for x in later:
+        add(*x)
+    order = {c1: 0, c2: 1}
+    return sorted(by.values(), key=lambda x: (x["date"], order.get(x["ccy"], 2)))
 
 
 def fenics_xml(pair: str, weights: dict, holidays: dict[str, set], today: date,
