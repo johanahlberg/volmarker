@@ -108,6 +108,12 @@ def dc_spread_lines(spreads: dict[str, float], dc_factor: float) -> list[str]:
     return [f"{fen_tenor(t)},{_n(v * 0.5 * dc_factor)}" for t, v in spreads.items()]
 
 
+def frontarena_text(rec: dict, resolved: dict, fa_ccy: dict | None = None) -> str:
+    """The Front Arena file VolMarker writes for this version."""
+    spreads = {t: rec["tenors"][t]["spread"] for t in resolved}
+    return _lines(frontarena_lines(rec["pair"], resolved, spreads, fa_ccy))
+
+
 def write_exports(rec: dict, resolved: dict, dirs: dict[str, Path], history: bool = True,
                   now: datetime | None = None, fa_ccy: dict | None = None) -> None:
     """dirs: fenics, frontarena, dc_spread, history. fa_ccy: Front Arena's own currency codes."""
@@ -117,7 +123,7 @@ def write_exports(rec: dict, resolved: dict, dirs: dict[str, Path], history: boo
     spreads = {t: rec["tenors"][t]["spread"] for t in resolved}
     fen = _lines(fenics_lines(pair, resolved, bool(rec.get("inverse"))))
     # no flush to disk: the rename keeps readers safe, and the next publish rewrites them anyway
-    atomic_write(Path(dirs["frontarena"]) / f"{f1}{f2}volsurface.txt", _lines(frontarena_lines(pair, resolved, spreads, fa_ccy)), fsync=False)
+    atomic_write(Path(dirs["frontarena"]) / f"{f1}{f2}volsurface.txt", frontarena_text(rec, resolved, fa_ccy), fsync=False)
     atomic_write(Path(dirs["fenics"]) / f"{c1}{c2}volsurface.txt", fen, fsync=False)
     dc = rec.get("dc_factor") or 0
     if dc >= 0.01:

@@ -2,6 +2,7 @@ import json
 import tempfile
 import time
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 
 from volmarker.conventions import TENORS
@@ -64,6 +65,41 @@ class TestFollower(unittest.TestCase):
             self.assertEqual(fol.step(NOW + 5), [])             # throttled
             self.assertTrue(fol.status["EURUSD"]["waiting"])
             self.assertEqual(fol.step(NOW + 20), ["EURUSD"])
+
+    def test_blocked_export_file_does_not_stall_the_follower(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, trader, fol = setup(tmp)
+            fen = store.root / "exports" / "fenics" / "EURUSDvolsurface.txt"
+            write_market(store, "EURUSD", 7.3)
+            with mock.patch("volmarker.service.exports.write_exports",
+                            side_effect=PermissionError(13, "Access is denied", str(fen))):
+                self.assertEqual(fol.step(NOW), ["EURUSD"])         # saved although the files are blocked
+                v = store.latest("EURUSD")["version"]
+                self.assertEqual(fol.svc.get("EURUSD")["version"], v)
+                self.assertIn("EURUSD", fol.svc.export_errors)
+                trader.poll_journal()                               # the other apps hear of it
+                self.assertEqual(trader.get("EURUSD")["version"], v)
+                self.assertNotIn("1m,7.05,7.55", fen.read_text())
+                write_market(store, "EURUSD", 7.6)
+                self.assertEqual(fol.step(NOW + 20), ["EURUSD"])    # no endless "changed to v.. by FMD"
+                self.assertEqual(store.latest("EURUSD")["version"], v + 1)
+            fol.step(NOW + 21)                                      # unblocked: the retry writes the files
+            self.assertEqual(fol.svc.export_errors, {})
+            self.assertIn("vol,atm,EUR,USD,1m,7.35,7.85", fen.read_text())
+
+    def test_conflict_reloads_the_latest_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, trader, fol = setup(tmp)
+            fol.svc.poll_journal()
+            old = fol.svc.get("EURUSD")
+            write_market(store, "EURUSD", 7.3)
+            self.assertEqual(fol.step(NOW), ["EURUSD"])
+            with fol.svc._lock:
+                fol.svc.cache["EURUSD"] = old                      # as if the app had missed its own version
+            with mock.patch.object(fol.svc, "poll_journal"):
+                write_market(store, "EURUSD", 7.6)
+                self.assertEqual(fol.step(NOW + 20), [])            # conflict: deferred once ...
+                self.assertEqual(fol.step(NOW + 21), ["EURUSD"])    # ... then publishes on the latest
 
     def test_10d_with_other_sign_than_25d(self):
         with tempfile.TemporaryDirectory() as tmp:

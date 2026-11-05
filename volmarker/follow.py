@@ -52,6 +52,7 @@ class Follower:
         if self._other_active(now):
             return []
         svc.poll_journal()
+        svc.retry_exports()
         svc.poll_market(notify=False)
         cfg = svc.store.config()
         with svc._lock:
@@ -135,6 +136,10 @@ class Follower:
             new = svc.publish(pair, state, rec["version"], comment, source="market")
         except (ConflictError, LockTimeout) as e:      # a trader just published - next round
             log.info("follow %s deferred: %s", pair, e)
+            if isinstance(e, ConflictError):           # next round starts from the version on disk
+                with svc._lock:
+                    if svc.cache.get(pair, {}).get("version", 0) < e.latest["version"]:
+                        svc.cache[pair] = e.latest
             return st
         self.last_pub[pair] = now
         return dict(st, version=new["version"], last_publish=iso(now), published=True)

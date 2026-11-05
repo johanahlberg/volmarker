@@ -89,6 +89,8 @@ class Service:
         self._rec_last: dict[str, dict] = {}          # ... pair -> {(tenor, mark, ptype, brand): (bid, offer, mid)}
         self.excel_foreign: dict[str, float] = {}     # pair -> mtime of a file changed outside VolMarker
         self.excel_errors: dict[str, str] = {}
+        self.export_errors: dict[str, str] = {}
+        self._own_checked: dict[tuple, bool] = {}     # (export file, mtime) -> it is VolMarker's own        # pair -> why its export files could not be written
         self._prop_cv = threading.Condition()
         self._prop_pending: dict[tuple, str] = {}               # (kind, pair) -> source, coalesced
         self._prop_deferred: dict[str, tuple[float, str]] = {}  # dependent -> (due, source)
@@ -1112,7 +1114,7 @@ class Service:
         if state.get("follow_parent"):
             record["parent_version"] = (self.store.latest(state["spread_ref"]) or {}).get("version")
         rec = self.store.append(record, expected_version)
-        self._export(rec)
+        # the version is saved: everything below must happen even if an export file is blocked
         with self._lock:
             self.cache[rec["pair"]] = rec
         self.store.journal({"ts": rec["ts"], "pair": rec["pair"], "version": rec["version"],
@@ -1120,7 +1122,33 @@ class Service:
                             "instance": self.instance})
         self._notify({"type": "update", "pair": rec["pair"], "version": rec["version"],
                       "user": rec["user"], "source": source})
+        self._try_export(rec)
         return rec
+
+    def _try_export(self, rec: dict) -> bool:
+        """Write the pair's export files; if one is blocked (Windows: another program
+        has it open), log it once and leave the pair for retry_exports."""
+        pair = rec["pair"]
+        try:
+            self._export(rec)
+        except OSError as e:
+            if self.export_errors.get(pair) != str(e):
+                log.warning("%s v%s saved, but its export files could not be written (retrying): %s",
+                            pair, rec["version"], e)
+            self.export_errors[pair] = str(e)
+            return False
+        if self.export_errors.pop(pair, None) is not None:
+            log.info("%s v%s export files written", pair, rec["version"])
+        return True
+
+    def retry_exports(self) -> None:
+        """Export again the pairs whose files were blocked, at their latest version."""
+        for pair in list(self.export_errors):
+            rec = self.get(pair)
+            if rec is None:
+                self.export_errors.pop(pair, None)
+            else:
+                self._try_export(rec)
 
     def _export(self, rec: dict) -> None:
         if rec.get("excel"):            # Excel writes this pair's files; never overwrite them
@@ -1160,11 +1188,28 @@ class Service:
             if rec.get("excel"):
                 if mt > (rec.get("excel_mtime") or 0) + 1e-6 and now - mt >= 2 and self._leader:
                     self._import_excel(rec["pair"], path, mt)        # 2 s: Excel may still be writing it
-            elif mt > datetime.fromisoformat(rec["ts"]).timestamp() + 30:
+            elif mt > datetime.fromisoformat(rec["ts"]).timestamp() + 30 and not self._own_export(rec["pair"], path, mt):
                 foreign[rec["pair"]] = mt
         if foreign.keys() != self.excel_foreign.keys():
             self._notify({"type": "alerts", "new": [], "cleared": [], "count": len(self.alerts.active)})
         self.excel_foreign = foreign
+
+    def _own_export(self, pair: str, path: Path, mtime: float) -> bool:
+        """The file is newer than the version, but is it what VolMarker writes for the
+        pair's latest version? (written late after being blocked, by a propagation this
+        app hasn't heard of yet, or the share's clock differs from the PCs'.) Checked
+        once per file change."""
+        key = (path, mtime)
+        if key not in self._own_checked:
+            try:
+                rec = self.store.latest(pair)
+                own = rec is not None and path.read_bytes() == \
+                    exports.frontarena_text(rec, resolve(rec), self._fa_ccy()).encode("utf-8")
+            except (OSError, ValueError, KeyError):
+                return False                     # unreadable just now: ask again next time
+            self._own_checked = {k: v for k, v in self._own_checked.items() if k[0] != path}
+            self._own_checked[key] = own
+        return self._own_checked[key]
 
     def _import_excel(self, pair: str, path: Path, mtime: float) -> dict | None:
         try:
@@ -1593,6 +1638,7 @@ class Service:
                 self.poll_journal()
                 n += 1
                 if n % 10 == 0:
+                    self.retry_exports()
                     try:
                         self.poll_excel()
                     except Exception:

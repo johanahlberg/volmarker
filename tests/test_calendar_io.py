@@ -396,7 +396,13 @@ class TestExcelPairs(unittest.TestCase):
         self.svc.publish("USDCHF", st, 1)
         self.svc.poll_excel()
         self.assertEqual(self.svc.excel_foreign, {})                           # our own export
-        self._excel_file(7.8, _t.time() + 120)                                 # Excel writes it later
+        import os
+        fa = self.svc._excel_dir() / "USDCHFvolsurface.txt"
+        later = _t.time() + 120                                                # VolMarker's own file, written late
+        os.utime(fa, (later, later))                                           # (a blocked export retried, clock skew)
+        self.svc.poll_excel()
+        self.assertEqual(self.svc.excel_foreign, {})
+        self._excel_file(7.8, _t.time() + 180)                                 # Excel writes it later
         self.svc.poll_excel()
         self.assertIn("USDCHF", self.svc.excel_foreign)
         self.svc.evaluate_alerts()
