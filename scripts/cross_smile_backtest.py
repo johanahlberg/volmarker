@@ -135,7 +135,9 @@ def main() -> None:
     by_day = defaultdict(lambda: defaultdict(dict))
     for (d, pair, tenor), v in marks.items():
         by_day[d][pair][tenor] = v
-    jobs = max(1, a.jobs or os.cpu_count() or 1)
+    jobs = max(1, min(a.jobs or os.cpu_count() or 1, len(days)))
+    if sys.platform == "win32" and jobs > 61:
+        jobs = 61  # ProcessPoolExecutor's hard limit on Windows
     print(f"Running on {jobs} processes")
     rows, failed, t0 = [], 0, time.time()
     with _pool(jobs) as pool:
