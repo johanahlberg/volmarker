@@ -207,6 +207,7 @@ The desk's vol history is kept as flat tables for Excel, Python or R in `analysi
 - **Back-fill, once:** `python scripts/export_history.py --data <data folder>` writes everything up to yesterday in the same layout, including the dated Fenics copies `<PAIR>_yyyymmdd_hhmmss.csv` from the Excel years (`--legacy <folder>`, default `history_dir`). Those copies are read as mids since they had no skew, their time stamps as the PC's wall clock in `calendar_tz` (or `--tz`), and only from before the pair's first VolMarker version. Running it again rewrites the months it covers, e.g. after adding old files.
 - RRs are call − put in the pair's own terms: an inverse pair's Fenics RRs are flipped back by its current Inverse setting.
 - Only the history is read; nothing else in the data folder changes.
+- **Cross smiles from the legs (research):** `python scripts/cross_smile_backtest.py --data <data folder>` rebuilds every cross whose two legs are marked (EURCHF from EURUSD and USDCHF; `--via USD,EUR` adds e.g. NOKSEK from EURNOK and EURSEK) from the legs' smiles, every day and tenor in `marks_eod`, and compares the RRs and BFs with the desk's marks. Three variants: one flat correlation (the baseline), a shared-stress model fitted to the cross, and the shared-stress model with its parameters taken from the other crosses, which is what a cross with no market (CHFZAR) would get. It writes a CSV and prints the errors and how stable the fitted parameters are. The model is in `volmarker/crosssmile.py`; the app doesn't use it. Takes roughly 0.1 s per cross, tenor and day on each CPU core; `--step 5` or `--from` keep a first run short.
 
 ## Conventions and maths
 
@@ -224,5 +225,5 @@ The desk's vol history is kept as flat tables for Excel, Python or R in `analysi
 - Tuning the defaults with the desk: alert tolerances, the follower's thresholds and jump limits, `propagation.min_corr_change`, and the cost of a weight change in *No negative weights*
 - ATM spread on Follow FMD pairs: from FMD's bid/offer, or the trader's own spread (today)
 - Wing vols in the 3D view: a proper conversion of broker strangles to smile vols (needs forwards and per-pair delta conventions)
-- Derived RR/BF for crosses (marked by hand for now, as in Excel)
+- Derived RR/BF for crosses (marked by hand for now, as in Excel; `scripts/cross_smile_backtest.py` tests a model for them on the history)
 - Inventory-driven skew (needs positions from Front Arena)

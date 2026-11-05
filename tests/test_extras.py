@@ -19,6 +19,7 @@ from volmarker.market import compare, market_view
 from volmarker.service import STATE_KEYS, Service
 from volmarker.store import Store
 from volmarker.surface import all_marks, apply_derivation, check_surface, clean_state, new_state, resolve, tenor_list
+from volmarker.tz import to_local
 
 
 def surface(pair, atm=7.0, **kw):
@@ -204,7 +205,7 @@ class TestService(unittest.TestCase):
         w = self.svc.effective_weights("EURUSD", rec.get("weights"), cal, holidays, rec)
         want = interpolate_atm("EURUSD", {t: rec["tenors"][t]["atm"] for t in TENORS}, date.today(), [d], w, holidays)[d]
         self.assertAlmostEqual(r["row"]["atm"], round(want, 4))
-        self.assertTrue(6.2 <= r["row"]["atm"] <= 6.3)                  # between 2W and 1M
+        self.assertTrue(6.1 <= r["row"]["atm"] <= 6.5)   # near 2W-1M; event weights can push it a little past 1M
         self.assertAlmostEqual(r["row"]["rr25"], -0.5)
         with self.assertRaises(ValueError):
             self.svc.new_tenor_row("EURUSD", self.draft(), "1M")
@@ -367,7 +368,7 @@ class TestAnalysis(unittest.TestCase):
             csv.writer(buf, lineterminator="\n").writerow(old)
             month.write_bytes(gzip.compress(buf.getvalue().encode()))
             st = {"through": "2026-11-02", "month": "2026-11", "sizes": {"marks": month.stat().st_size}}
-            today = datetime.fromisoformat(store.latest("EURUSD")["ts"]).date()
+            today = to_local(datetime.fromisoformat(store.latest("EURUSD")["ts"]), ex.zone).date()
             ex.export_day(today, st)
             got = list(csv.reader(io.StringIO(gzip.decompress(month.read_bytes()).decode())))
             self.assertEqual(got[0], old)
