@@ -26,6 +26,7 @@ from .calendar import (DEFAULT_CUT, calibrate_to_quotes, cumulative_weights, dai
                        rule_weight, split_by_ccy, tenor_dates, with_defaults)
 from .conventions import split_pair
 from .derived import CORR_CONV
+from .liveness import Liveness, wall_alive
 from .bbgfeed import STATUS_FILE as BBG_STATUS, BloombergFeed, quiet
 from .fenics import FenicsLogin
 from .fmd.book import daily_n
@@ -45,6 +46,7 @@ STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_typ
               "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "inverse", "market_source", "follow_bases",
               "deltas", "extra_tenors", "removed_tenors", "wing_locks", "tenors"]
 LEADER_STALE = 45.0
+LEADER_FIRST_SIGHT_S = 300.0   # a leader heartbeat this old by the clocks is gone at once
 FEED_STALE = 15.0
 FOLLOW_STALE = 30.0
 MAX_TEST_DATES = 120
@@ -90,6 +92,7 @@ class Service:
         self.excel_foreign: dict[str, float] = {}     # pair -> mtime of a file changed outside VolMarker
         self.excel_errors: dict[str, str] = {}
         self.export_errors: dict[str, str] = {}
+        self.live = Liveness()                          # the feeds', follower's and leader's heartbeats
         self._own_checked: dict[tuple, bool] = {}     # (export file, mtime) -> it is VolMarker's own        # pair -> why its export files could not be written
         self._prop_cv = threading.Condition()
         self._prop_pending: dict[tuple, str] = {}               # (kind, pair) -> source, coalesced
@@ -167,14 +170,16 @@ class Service:
         with self._lock:
             return list(self.cache.values())
 
+    def _beat(self, key: str, st: dict, stale: float = FEED_STALE) -> bool:
+        """The heartbeat in st still moves (judged by this PC's clock, see liveness)."""
+        return self.live.alive(key, st.get("heartbeat"), stale, time.time())
+
     def feed_alive(self) -> bool:
         """The FMD feed."""
-        return bool(self.market_status.get("connected")) and \
-            time.time() - self.market_status.get("heartbeat", 0) < FEED_STALE
+        return bool(self.market_status.get("connected")) and self._beat("fmd", self.market_status)
 
     def bbg_alive(self) -> bool:
-        return bool(self.bbg_status.get("connected")) and \
-            time.time() - self.bbg_status.get("heartbeat", 0) < FEED_STALE
+        return bool(self.bbg_status.get("connected")) and self._beat("bbg", self.bbg_status)
 
     @staticmethod
     def source_of(rec: dict | None) -> str:
@@ -208,9 +213,9 @@ class Service:
         st = dict(self.bbg_status)
         if not st:
             return {"state": "off"}
-        age = time.time() - st.get("heartbeat", 0)
+        age = self.live.age("bbg", st.get("heartbeat"), time.time())
         st["state"] = ("live" if self.bbg_alive() else "stopped" if st.get("stopped")
-                       else "down" if age < FEED_STALE else "off")
+                       else "down" if self._beat("bbg", st) else "off")
         st["heartbeat_age"] = round(age, 1)
         return st
 
@@ -218,8 +223,8 @@ class Service:
         st = dict(self.market_status)
         if not st:
             return {"state": "off"}
-        age = time.time() - st.get("heartbeat", 0)
-        st["state"] = "live" if self.feed_alive() else ("down" if age < FEED_STALE else "off")
+        age = self.live.age("fmd", st.get("heartbeat"), time.time())
+        st["state"] = "live" if self.feed_alive() else ("down" if self._beat("fmd", st) else "off")
         st["heartbeat_age"] = round(age, 1)
         return st
 
@@ -228,7 +233,7 @@ class Service:
         fs, rec = self.follow_status, self.get(pair)
         if self.source_of(rec) == BBG and not self.bbg_alive() and self.bbg_quiet():
             return "stopped"              # Bloomberg's quiet hours: the pair keeps its levels, no alert
-        if not self.source_alive(rec) or time.time() - fs.get("heartbeat", 0) > FOLLOW_STALE:
+        if not self.source_alive(rec) or not self._beat("follow", fs, FOLLOW_STALE):
             return "down"
         st = (fs.get("pairs") or {}).get(pair)
         if st is None:
@@ -1464,13 +1469,20 @@ class Service:
                 except (OSError, ValueError):
                     cur = None
                 if cur is None or cur["instance"] == self.instance or \
-                        time.time() - cur["heartbeat"] > LEADER_STALE:
+                        not self._leader_beating(cur):
                     # read only under this lock, so writing it in place when the share refuses a replace is safe
                     write_shared(path, json.dumps({"instance": self.instance, "heartbeat": time.time()}))
                     return True
                 return False
         except LockTimeout:
             return False
+
+    def _leader_beating(self, cur: dict) -> bool:
+        """The leader's heartbeat moves. No hurry to take over: until it has been seen
+        to move or stand still, only a clearly old heartbeat (any PC's clock) counts as gone."""
+        hb = cur.get("heartbeat")
+        b = self.live.beating("leader", hb, LEADER_STALE, value=(cur.get("instance"), hb))
+        return b if b is not None else wall_alive(hb, LEADER_FIRST_SIGHT_S, time.time())
 
     def housekeeping(self) -> None:
         self._leader = self.is_leader()
@@ -1629,26 +1641,33 @@ class Service:
                 f.write(("\n".join(lines) + "\n").encode("utf-8"))      # one gzip member per round
         return n
 
+    def _journal_round(self, n: int) -> None:
+        self.poll_journal()
+        n += 1
+        if n % 10 == 0:
+            self.retry_exports()
+            try:
+                self.poll_excel()
+            except Exception:
+                log.exception("Excel file check failed")
+        if n % 2 == 0:
+            self.poll_market()
+            try:
+                self.evaluate_alerts()
+            except Exception:
+                log.exception("alert evaluation failed")
+
     def start_background(self) -> None:
         self.start_propagation()
 
         def journal_loop():
             n = 0
             while not self._stop.wait(0.5):
-                self.poll_journal()
+                try:
+                    self._journal_round(n)
+                except Exception:        # never let one bad round end the loop: the app would go deaf
+                    log.exception("background poll failed")
                 n += 1
-                if n % 10 == 0:
-                    self.retry_exports()
-                    try:
-                        self.poll_excel()
-                    except Exception:
-                        log.exception("Excel file check failed")
-                if n % 2 == 0:
-                    self.poll_market()
-                    try:
-                        self.evaluate_alerts()
-                    except Exception:
-                        log.exception("alert evaluation failed")
 
         def housekeeping_loop():
             while not self._stop.wait(15):

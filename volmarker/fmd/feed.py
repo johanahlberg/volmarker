@@ -24,6 +24,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..liveness import Liveness
 from ..store import Store, write_shared
 from .book import QuoteBook
 from .fix import FixSession
@@ -87,6 +88,7 @@ class Feed:
                        "connected": False, "since": None, "last_msg": None, "msgs": 0,
                        "entries": 0, "last_error": None, "started": now_iso()}
         if not force:
+            self.store.clock_offset()        # logs a warning if this PC's clock is off the file server's
             self._check_single_instance()
         if transport == "xml":
             x = cfg["xml"]
@@ -120,7 +122,12 @@ class Feed:
             cur = json.loads((self.dir / "_status.json").read_text())
         except (OSError, ValueError):
             return
-        if time.time() - cur.get("heartbeat", 0) < FEED_STALE:
+        def hb():
+            try:
+                return json.loads((self.dir / "_status.json").read_text()).get("heartbeat")
+            except (OSError, ValueError):
+                return None
+        if Liveness().confirm("fmd", hb, FEED_STALE):
             raise SystemExit(f"Another FMD feed is running ({cur.get('instance')}). "
                              "Only one feed per data folder; use --force to override.")
 

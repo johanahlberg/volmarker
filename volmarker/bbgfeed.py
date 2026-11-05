@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Callable
 
 from .conventions import split_pair
+from .liveness import Liveness
 from .market import BBG
 from .store import Store, write_shared
 from .surface import all_marks, tenor_list
@@ -213,6 +214,7 @@ class BloombergFeed:
         self.instance: str | None = None
         self.status: dict = {}
         self._last: dict[str, list] = {}        # pair -> quotes last written (values only)
+        self.live = Liveness()
 
     # ---- control ------------------------------------------------------
     def cfg(self) -> dict:
@@ -224,14 +226,23 @@ class BloombergFeed:
     def running(self) -> bool:
         return self.stop_ev is not None and not self.stop_ev.is_set()
 
-    def other(self) -> dict | None:
-        """The status of a Bloomberg feed running elsewhere, if any."""
+    def _read_status(self) -> dict:
         try:
-            cur = json.loads(self.status_path.read_text())
+            return json.loads(self.status_path.read_text())
         except (OSError, ValueError):
+            return {}
+
+    def other(self, confirm: bool = False) -> dict | None:
+        """The status of a Bloomberg feed running elsewhere, if any. confirm: watch its
+        heartbeat for a few seconds if it can't be told yet (before starting)."""
+        cur = self._read_status()
+        if not cur.get("connected") or cur.get("instance") == self.instance:
             return None
-        alive = cur.get("connected") and self.clock() - cur.get("heartbeat", 0) < FEED_STALE
-        return cur if alive and cur.get("instance") != self.instance else None
+        if confirm:
+            alive = self.live.confirm("bbg", lambda: self._read_status().get("heartbeat"), FEED_STALE, self.clock)
+        else:
+            alive = self.live.alive("bbg", cur.get("heartbeat"), FEED_STALE, self.clock())
+        return cur if alive else None
 
     @staticmethod
     def _check_seconds(seconds) -> float:
@@ -253,7 +264,7 @@ class BloombergFeed:
         with self.lock:
             if self.running():
                 return self.state()
-            other = self.other()
+            other = self.other(confirm=True)
             if other:
                 raise ValueError(f"Bloomberg is already running for the desk ({other.get('user')} on "
                                  f"{other.get('host')})")
@@ -311,7 +322,14 @@ class BloombergFeed:
         from .service import Service
         fsvc = Service(self.store, "BBG")
         fsvc.start_propagation()
-        threading.Thread(target=Follower(fsvc).run_forever, args=(stop,), name="bbg-follow", daemon=True).start()
+
+        def run():
+            try:
+                Follower(fsvc).run_forever(stop)
+            finally:                     # Bloomberg stopped: its propagation thread ends too
+                fsvc.propagation_idle(30)
+                fsvc._stop.set()
+        threading.Thread(target=run, name="bbg-follow", daemon=True).start()
 
     def _write_status(self) -> None:
         try:

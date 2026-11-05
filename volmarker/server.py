@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .conventions import TENORS
 from .service import Service
-from .store import ConflictError, DefaultsConflict, LockTimeout
+from .store import CLOCK_WARN_S, ConflictError, DefaultsConflict, LockTimeout
 
 STATIC = Path(__file__).parent / "static"
 CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -78,6 +78,7 @@ def make_handler(svc: Service):
                 return self._json({"user": svc.user, "data": str(svc.store.root), "tenors": TENORS,
                                    "cuts": cfg.get("cuts") or {}, "calendar_tz": cfg.get("calendar_tz"),
                                    "config_error": svc.store.config_error, "fa_ccy": svc._fa_ccy(),
+                                   "clock_offset": svc.store.clock_offset(), "clock_warn": CLOCK_WARN_S,
                                    "exports": {k: str(svc.store.path_from_config(f"{k}_dir"))
                                                for k in ("frontarena", "fenics", "dc_spread", "history")}})
             if p == "/api/pairs":

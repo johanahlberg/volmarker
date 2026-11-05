@@ -24,6 +24,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     svc = Service(Store(args.data), args.user)
+    svc.store.clock_offset()             # logs a warning if this PC's clock is off the file server's
     svc.start_background()
     httpd = serve(svc, args.port)
     url = f"http://127.0.0.1:{httpd.server_address[1]}/"

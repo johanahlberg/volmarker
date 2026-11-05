@@ -29,6 +29,7 @@ import threading
 import time
 
 from .alerts import iso
+from .liveness import Liveness
 from .market import BBG
 from .service import FOLLOW_STALE, STATE_KEYS, Service
 from .store import ConflictError, LockTimeout, write_shared
@@ -44,6 +45,7 @@ class Follower:
         self.last_pub: dict[str, float] = {}
         self.status: dict[str, dict] = {}
         self.path = svc.store.root / "market" / "_follow.json"
+        self.live = Liveness()
 
     def step(self, now: float | None = None) -> list[str]:
         """One round; returns the pairs published."""
@@ -81,7 +83,8 @@ class Follower:
             cur = json.loads(self.path.read_text())
         except (OSError, ValueError):
             return False
-        return cur.get("instance") != self.svc.instance and now - cur.get("heartbeat", 0) < FOLLOW_STALE
+        return cur.get("instance") != self.svc.instance and \
+            self.live.alive("follow", cur.get("heartbeat"), FOLLOW_STALE, now, value=(cur.get("instance"), cur.get("heartbeat")))
 
     def _pair(self, pair: str, cfg: dict, now: float) -> dict:
         svc, fc = self.svc, cfg["follow"]

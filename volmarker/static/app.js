@@ -2538,6 +2538,15 @@ async function init() {
     w.className = "warn"; w.textContent = " · config.json problem (hover)"; w.title = app.me.config_error;
     $("#datadir").after(w);
   }
+  const off = app.me.clock_offset;
+  if (off != null && Math.abs(off) > app.me.clock_warn) {
+    const w = document.createElement("span");
+    w.className = "warn";
+    w.textContent = ` · PC clock ${Math.round(Math.abs(off))} s ${off > 0 ? "behind" : "ahead of"} the file server (hover)`;
+    w.title = "This PC's clock differs from the shared drive's. VolMarker copes with it, but the times it shows " +
+      "(quote ages, version times) may be off by that much. Ask IT to sync the PC's time.";
+    $("#datadir").after(w);
+  }
   $("#sh-from").dataset.v = "1M"; $("#sh-to").dataset.v = "1Y";
   try { app.prefs = await api("/api/prefs"); } catch { app.prefs = {}; }
   wire();

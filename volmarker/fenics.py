@@ -18,6 +18,7 @@ import time
 
 from .fmd.feed import FEED_STALE, Feed, xml_url
 from .fmd.xmlposter import NoVols
+from .liveness import Liveness
 from .store import Store
 
 log = logging.getLogger("volmarker.fenics")
@@ -35,6 +36,7 @@ class FenicsLogin:
         self.seconds: float = DEFAULT_SECONDS
         self.feed: Feed | None = None
         self.instance: str | None = None          # our last feed, so logging in again needn't wait for it to go stale
+        self.live = Liveness()
 
     def credentials(self) -> tuple[str, str] | None:
         return (self.user, self.password) if self.feed and self.password else None
@@ -54,8 +56,14 @@ class FenicsLogin:
             cur = json.loads((self.store.root / "market" / "_status.json").read_text())
         except (OSError, ValueError):
             return None
-        alive = cur.get("connected") and time.time() - cur.get("heartbeat", 0) < FEED_STALE
-        return cur.get("instance") if alive and cur.get("instance") != self.instance else None
+        if not cur.get("connected") or cur.get("instance") == self.instance:
+            return None
+        def hb():
+            try:
+                return json.loads((self.store.root / "market" / "_status.json").read_text()).get("heartbeat")
+            except (OSError, ValueError):
+                return None
+        return cur.get("instance") if self.live.confirm("fmd", hb, FEED_STALE) else None
 
     def login(self, user: str, password: str, seconds: float | None = None) -> dict:
         user = (user or "").strip()

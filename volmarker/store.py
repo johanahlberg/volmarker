@@ -34,6 +34,7 @@ import os
 import socket
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -41,7 +42,10 @@ from pathlib import Path
 from .derived import upgrade_corr
 
 LOCK_TIMEOUT = 15.0     # seconds to wait for a lock
-LOCK_STALE = 30.0       # a lock older than this is considered abandoned
+LOCK_STALE = 30.0       # a lock seen unchanged this long is considered abandoned
+CLOCK_WARN_S = 5.0      # warn when this PC's clock is further than this off the file server's
+LOCK_STALE_MTIME = 300.0  # ... or whose file is this old by the share's clock (another PC's
+                          # clock may be off from the file server's by more than LOCK_STALE)
 
 
 class ConflictError(Exception):
@@ -192,6 +196,7 @@ class Store:
         self.config_error: str | None = None     # why config.json was not (fully) used, shown in the app
         for sub in ("pairs", "locks", "calendar"):
             (self.root / sub).mkdir(parents=True, exist_ok=True)
+        self._lock_seen: dict[Path, tuple[str, float]] = {}   # lock file -> (content, first seen)
         self.journal_path = self.root / "journal.jsonl"
         self.journal_path.touch(exist_ok=True)
         cfg_path = self.root / "config.json"
@@ -240,19 +245,20 @@ class Store:
     @contextmanager
     def lock(self, name: str, owner: str = ""):
         path = self.root / "locks" / f"{name}.lock"
+        mine = f"{owner}@{socket.gethostname()} {time.time()} {uuid.uuid4().hex}"
         deadline = time.monotonic() + LOCK_TIMEOUT
         while True:
             try:
                 fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 with os.fdopen(fd, "w") as f:
-                    f.write(f"{owner}@{socket.gethostname()} {time.time()}")
+                    f.write(mine)
                 break
             except FileExistsError:
-                try:
-                    if time.time() - path.stat().st_mtime > LOCK_STALE:
+                if self._lock_stale(path):
+                    try:
                         path.unlink()
-                        continue
-                except FileNotFoundError:
+                    except FileNotFoundError:
+                        pass
                     continue
                 if time.monotonic() > deadline:
                     raise LockTimeout(f"Could not lock {name}")
@@ -260,10 +266,56 @@ class Store:
         try:
             yield
         finally:
-            try:
-                path.unlink()
-            except FileNotFoundError:
+            try:                         # only our own: a lock taken over as stale is someone else's now
+                if path.read_text() == mine:
+                    path.unlink()
+            except OSError:
                 pass
+
+    def clock_offset(self, max_age: float = 300.0) -> float | None:
+        """Seconds this PC's clock is behind the file server's (negative: ahead), from
+        the time the server gives a file just written; None if it can't be told.
+        Measured at most every max_age seconds; logs a warning when it is large."""
+        cached = getattr(self, "_clock", None)
+        if cached and time.monotonic() - cached[0] < max_age:
+            return cached[1]
+        probe = self.root / "locks" / f".clock-{socket.gethostname()}-{os.getpid()}.tmp"
+        try:
+            probe.parent.mkdir(parents=True, exist_ok=True)
+            before = time.time()
+            probe.write_text("clock")
+            off = probe.stat().st_mtime - (before + time.time()) / 2
+            probe.unlink()
+        except OSError:
+            return cached[1] if cached else None
+        off = round(off, 1)
+        if abs(off) > CLOCK_WARN_S and (not cached or abs(cached[1]) <= CLOCK_WARN_S):
+            log.warning("This PC's clock is %.0f s %s the file server's: set the PC's time "
+                        "(VolMarker copes, but times shown may be off)", abs(off), "behind" if off > 0 else "ahead of")
+        self._clock = (time.monotonic(), off)
+        return off
+
+    def _lock_stale(self, path: Path) -> bool:
+        """Abandoned (its holder crashed): unchanged for LOCK_STALE seconds by this
+        PC's own clock, or very old by the share's. Not judged from the file time
+        alone, which comes from the file server's clock, not this PC's."""
+        try:
+            content, mtime = path.read_text(), path.stat().st_mtime
+        except OSError:
+            return False                 # gone, or being written: try again
+        if time.time() - mtime > LOCK_STALE_MTIME:
+            return True
+        now = time.monotonic()
+        seen = self._lock_seen.get(path)
+        if seen is None or seen[0] != content:
+            self._lock_seen[path] = (content, now)
+            if len(self._lock_seen) > 1000:
+                self._lock_seen.clear()
+            return False
+        if now - seen[1] > LOCK_STALE:
+            self._lock_seen.pop(path, None)
+            return True
+        return False
 
     # ---- pairs --------------------------------------------------------
     def _history(self, pair: str) -> Path:
@@ -394,7 +446,13 @@ class Store:
             data = f.read()
         # only consume complete lines
         end = data.rfind(b"\n") + 1
-        entries = [json.loads(l) for l in data[:end].splitlines() if l.strip()]
+        entries = []
+        for l in data[:end].splitlines():
+            if l.strip():
+                try:
+                    entries.append(json.loads(l))
+                except ValueError:       # a damaged line must not stall the journal for good
+                    log.warning("journal: skipped an unreadable line at offset %d", offset)
         return entries, offset + end
 
     # ---- calendar -----------------------------------------------------
@@ -539,21 +597,35 @@ def _append_line(path: Path, line: str) -> None:
 
 
 def _last_line(path: Path) -> str:
+    """The last complete line. A last piece without its newline is normally a line
+    another PC is still appending (on a share it can show up in parts): skipped
+    unless it is whole JSON (a file written without a final newline)."""
     with open(path, "rb") as f:
         f.seek(0, os.SEEK_END)
-        size = f.tell()
-        chunk = 8192
+        pos = f.tell()
         buf = b""
-        pos = size
         while pos > 0:
-            step = min(chunk, pos)
+            step = min(8192, pos)
             pos -= step
             f.seek(pos)
             buf = f.read(step) + buf
-            lines = buf.rstrip(b"\n").split(b"\n")
-            if len(lines) > 1 or pos == 0:
-                return lines[-1].decode("utf-8")
+            lines = buf.split(b"\n")
+            tail = lines[-1]
+            if tail.strip() and _parses(tail):
+                return tail.decode("utf-8")
+            done = lines[:-1] if pos == 0 else lines[1:-1]    # lines[0] may be cut off
+            for l in reversed(done):
+                if l.strip():
+                    return l.decode("utf-8")
     return ""
+
+
+def _parses(line: bytes) -> bool:
+    try:
+        json.loads(line)
+        return True
+    except ValueError:
+        return False
 
 
 def _tail_lines(path: Path, n: int) -> list[str]:
