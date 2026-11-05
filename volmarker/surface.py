@@ -200,6 +200,8 @@ def clean_state(state: dict) -> dict:
     s["alerts_smile_off"] = bool(s.get("alerts_smile_off"))
     s["rr_put"] = bool(s.get("rr_put"))
     s["inverse"] = bool(s.get("inverse"))
+    # where the pair's market levels come from first: "BBG" (Bloomberg), or None for FMD
+    s["market_source"] = "BBG" if str(s.get("market_source") or "").upper() == "BBG" else None
     s["follow_bases"] = s.get("follow_bases") is not False
     s["group"] = " ".join(str(s.get("group") or "").split())[:40] or None
     s["follow_parent"] = bool(s.get("follow_parent"))

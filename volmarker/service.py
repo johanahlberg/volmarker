@@ -26,9 +26,10 @@ from .calendar import (DEFAULT_CUT, calibrate_to_quotes, cumulative_weights, dai
                        rule_weight, split_by_ccy, tenor_dates, with_defaults)
 from .conventions import split_pair
 from .derived import CORR_CONV
+from .bbgfeed import STATUS_FILE as BBG_STATUS, BloombergFeed, quiet
 from .fenics import FenicsLogin
 from .fmd.book import daily_n
-from .market import compare, market_view, parse_fix_time
+from .market import BBG, compare, market_view, parse_fix_time
 from .store import ConflictError, LockTimeout, Store, _reverse_lines, atomic_write, write_shared
 from .surface import (all_marks, apply_derivation, apply_parent, check_surface, clean_state, follow_fields,
                       new_state, now_iso, resolve, skew_active, tenor_list, tol_mark)
@@ -41,7 +42,7 @@ def _atms(rec: dict) -> dict[str, float | None]:
     return {t: rec["tenors"][t]["atm"] for t in tenor_list(rec) if t in rec["tenors"]}
 
 STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type",
-              "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "inverse", "follow_bases",
+              "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "inverse", "market_source", "follow_bases",
               "deltas", "extra_tenors", "removed_tenors", "wing_locks", "tenors"]
 LEADER_STALE = 45.0
 FEED_STALE = 15.0
@@ -50,7 +51,7 @@ MAX_TEST_DATES = 120
 # pair settings saved by the Setup tab's Save (the rest of a version comes from the latest one)
 SETTING_KEYS = ["mode", "bases", "key", "group", "spread_ref", "follow_parent", "follow_bases", "cut", "dc_factor",
                 "atm_type", "follow_market", "excel", "alert_tol", "alerts_off", "alerts_smile_off", "inverse",
-                "deltas", "extra_tenors", "removed_tenors"]
+                "market_source", "deltas", "extra_tenors", "removed_tenors"]
 
 
 def _labels(own: list, cal: list) -> list[str]:
@@ -72,11 +73,14 @@ class Service:
             self.cache[p] = store.latest(p)
         self._stop = threading.Event()
         self.market: dict[str, list[dict]] = {}
+        self.market_bbg: dict[str, list[dict]] = {}   # Bloomberg quotes of the pairs that prefer it (market/bbg/)
         self.market_status: dict = {}
+        self.bbg_status: dict = {}
         self.follow_status: dict = {}
         self._market_mtimes: dict[str, float] = {}
         self.alerts = AlertEngine()
         self.fenics = FenicsLogin(store)          # FMD 1.0 feed while a trader is logged in to Fenics
+        self.bbg = BloombergFeed(store, user, self._recs)   # Bloomberg while a trader runs it from this app
         self._leader = False
         self._archived_on: date | None = None         # the day this app last ran the history archive
         self._analysed_on: date | None = None         # ... and the daily export for analysis
@@ -106,9 +110,10 @@ class Service:
         brand = cfg.get("fmd_brand", "auto")
         active = self.alerts.list()
         for r in recs:
-            quotes = self.market.get(r["pair"])
-            pair_has_market = bool(quotes) and self.feed_alive()
-            outside = (compare(resolve(r), market_view(quotes, r.get("atm_type") or "DNS", brand, bool(r.get("inverse"))))
+            quotes = self.quotes_for(r)
+            pair_has_market = bool(quotes) and self.market_alive(r)
+            outside = (compare(resolve(r), market_view(quotes, r.get("atm_type") or "DNS", brand, bool(r.get("inverse")),
+                                                       prefer=self.source_of(r)))
                        if pair_has_market else None)
             age_min = (now - datetime.fromisoformat(r["marked_ts"])).total_seconds() / 60
             limit = cfg["stale_minutes_key"] if r.get("key") else cfg["stale_minutes_other"]
@@ -123,7 +128,7 @@ class Service:
                 "ts": r["ts"], "user": r["user"], "source": r.get("source"),
                 "marked_ts": r["marked_ts"], "age_minutes": round(age_min, 1),
                 "stale": follow == "down" if follow else (r["mode"] == "marked" or r.get("excel")) and age_min > limit,
-                "follow": follow,
+                "follow": follow, "market_source": self.source_of(r),
                 "alerts": len(alerts), "alerts_new": sum(not a["acked"] for a in alerts),
                 "skew": skew_active(r),
                 "warnings": len(r.get("warnings", [])),
@@ -155,10 +160,57 @@ class Service:
         rec = self.store.as_of(pair, before)
         return {"record": rec, "resolved": resolve(rec)} if rec else None
 
-    # ---- market data (written by the FMD feed process) -----------------
+    # ---- market data (written by the FMD feed process and the Bloomberg feed) ---------
+    def _recs(self) -> list[dict]:
+        with self._lock:
+            return list(self.cache.values())
+
     def feed_alive(self) -> bool:
+        """The FMD feed."""
         return bool(self.market_status.get("connected")) and \
             time.time() - self.market_status.get("heartbeat", 0) < FEED_STALE
+
+    def bbg_alive(self) -> bool:
+        return bool(self.bbg_status.get("connected")) and \
+            time.time() - self.bbg_status.get("heartbeat", 0) < FEED_STALE
+
+    @staticmethod
+    def source_of(rec: dict | None) -> str:
+        """The pair's preferred market source: BBG or FMD."""
+        return BBG if (rec or {}).get("market_source") == BBG else "FMD"
+
+    def source_alive(self, rec: dict | None) -> bool:
+        """The pair's preferred source is live (what Follow market needs)."""
+        return self.bbg_alive() if self.source_of(rec) == BBG else self.feed_alive()
+
+    def market_alive(self, rec: dict | None) -> bool:
+        """Some live market for the pair: FMD, or Bloomberg on a pair that prefers it."""
+        return self.feed_alive() or (self.source_of(rec) == BBG and self.bbg_alive())
+
+    def quotes_for(self, rec: dict | None) -> list[dict]:
+        """The pair's quotes: FMD's, and Bloomberg's while it runs if the pair prefers it
+        (the market view takes Bloomberg first and FMD where Bloomberg has nothing)."""
+        pair = (rec or {}).get("pair")
+        with self._lock:
+            q = list(self.market.get(pair) or [])
+            if self.source_of(rec) == BBG and self.bbg_alive():
+                q += self.market_bbg.get(pair) or []
+        return q
+
+    def bbg_quiet(self, now: float | None = None) -> bool:
+        """In Bloomberg's quiet hours (18:00-07:00): Bloomberg pairs standing still is expected."""
+        cfg = self.store.config()
+        return quiet(cfg["bbg"], cfg.get("calendar_tz") or "Europe/Zurich", time.time() if now is None else now)
+
+    def bbg_feed_status(self) -> dict:
+        st = dict(self.bbg_status)
+        if not st:
+            return {"state": "off"}
+        age = time.time() - st.get("heartbeat", 0)
+        st["state"] = ("live" if self.bbg_alive() else "stopped" if st.get("stopped")
+                       else "down" if age < FEED_STALE else "off")
+        st["heartbeat_age"] = round(age, 1)
+        return st
 
     def feed_status(self) -> dict:
         st = dict(self.market_status)
@@ -171,18 +223,26 @@ class Service:
 
     def follow_state(self, pair: str) -> str:
         """Market-mode health of one pair: ok, held (big move waiting), down."""
-        fs = self.follow_status
-        if not self.feed_alive() or time.time() - fs.get("heartbeat", 0) > FOLLOW_STALE:
+        fs, rec = self.follow_status, self.get(pair)
+        if self.source_of(rec) == BBG and not self.bbg_alive() and self.bbg_quiet():
+            return "stopped"              # Bloomberg's quiet hours: the pair keeps its levels, no alert
+        if not self.source_alive(rec) or time.time() - fs.get("heartbeat", 0) > FOLLOW_STALE:
             return "down"
         st = (fs.get("pairs") or {}).get(pair)
         if st is None:
             return "starting"
         return {"ok": "ok", "held": "held"}.get(st.get("state"), "down")
 
-    def fresh_view(self, pair: str, rec: dict, cfg: dict, brand: str | None = None) -> dict:
-        """Market view with the age of every quote and a stale flag."""
+    def fresh_view(self, pair: str, rec: dict, cfg: dict, brand: str | None = None, follow: bool = False) -> dict:
+        """Market view with the age of every quote and a stale flag. follow: the pair's
+        preferred source only, as Follow market publishes it (no mix of Bloomberg and FMD)."""
+        src = self.source_of(rec)
+        quotes = self.quotes_for(dict(rec, pair=pair))
+        if follow:
+            brand = BBG if src == BBG else cfg.get("fmd_brand", "auto")
+            quotes = [q for q in quotes if (q.get("brand") == BBG) == (src == BBG)]
         brand = brand or cfg.get("fmd_brand", "auto")
-        view = market_view(self.market.get(pair, []), rec.get("atm_type") or "DNS", brand, bool(rec.get("inverse")))
+        view = market_view(quotes, rec.get("atm_type") or "DNS", brand, bool(rec.get("inverse")), prefer=src)
         stale_min = cfg.get("market_stale_minutes", 30)
         now = datetime.now(timezone.utc)
         for marks in view.values():
@@ -192,9 +252,13 @@ class Service:
                 q["stale"] = q["age_min"] is not None and q["age_min"] > stale_min
         return view
 
-    def market_for(self, pair: str, brand: str | None = None, draft: dict | None = None) -> dict:
+    def market_for(self, pair: str, brand: str | None = None, draft: dict | None = None,
+                   source: str | None = None) -> dict:
+        """source: the draft's market source (FMD or BBG) before it is saved."""
         rec = draft or self.get(pair) or {}
-        quotes = self.market.get(pair, [])
+        if source in ("FMD", BBG):
+            rec = dict(rec, market_source=BBG if source == BBG else None)
+        quotes = self.quotes_for(dict(rec, pair=pair))
         cfg = self.store.config()
         brand = brand or cfg.get("fmd_brand", "auto")
         view = self.fresh_view(pair, rec, cfg, brand)
@@ -202,7 +266,8 @@ class Service:
         if rec.get("follow_market"):
             follow = dict((self.follow_status.get("pairs") or {}).get(pair) or {},
                           health=self.follow_state(pair))
-        return {"feed": self.feed_status(), "brand": brand, "follow": follow,
+        return {"feed": self.feed_status(), "bbg": self.bbg_feed_status(), "source": self.source_of(rec),
+                "live": self.market_alive(rec), "brand": brand, "follow": follow,
                 "brands": sorted({q.get("brand") for q in quotes if q.get("brand")}),
                 "atm_type": rec.get("atm_type") or "DNS", "view": view}
 
@@ -569,6 +634,31 @@ class Service:
             entries = list(os.scandir(d))
         except OSError:
             return
+        bdir = d / "bbg"
+        try:
+            bbg_entries = list(os.scandir(bdir)) if bdir.is_dir() else []
+        except OSError:
+            bbg_entries = []
+        names = {e.name for e in bbg_entries}
+        with self._lock:                  # pairs switched back to FMD: their Bloomberg file is gone
+            for p in [p for p in self.market_bbg if f"{p}.json" not in names]:
+                self.market_bbg.pop(p)
+                self._market_mtimes.pop(f"bbg/{p}.json", None)
+                changed.append(p)
+        for e in bbg_entries:
+            if not e.name.endswith(".json"):
+                continue
+            try:
+                mt = e.stat().st_mtime
+                if self._market_mtimes.get(f"bbg/{e.name}") == mt:
+                    continue
+                data = json.loads(Path(e.path).read_text())
+            except (OSError, ValueError):
+                continue          # being replaced - next poll
+            self._market_mtimes[f"bbg/{e.name}"] = mt
+            with self._lock:
+                self.market_bbg[data["pair"]] = data["quotes"]
+            changed.append(data["pair"])
         for e in entries:
             if not e.name.endswith(".json"):
                 continue
@@ -585,6 +675,10 @@ class Service:
             self._market_mtimes[e.name] = mt
             if e.name == "_status.json":
                 self.market_status = data
+            elif e.name == BBG_STATUS:
+                if bool(data.get("connected")) != bool(self.bbg_status.get("connected")):
+                    changed += list(self.market_bbg)        # Bloomberg on or off: those pairs' views change
+                self.bbg_status = data
             elif e.name == "_follow.json":
                 self.follow_status = data
                 changed.append("_follow")
@@ -599,7 +693,7 @@ class Service:
 
     def _market_snapshot(self, rec: dict) -> dict | None:
         """Broker mids at publish time, for the audit trail."""
-        if not self.market.get(rec["pair"]) or not self.feed_alive():
+        if not self.quotes_for(rec) or not self.market_alive(rec):
             return None
         m = self.market_for(rec["pair"], draft=rec)
         snap = {t: {k: q.get("mid") for k, q in marks.items()} for t, marks in m["view"].items()}
@@ -768,7 +862,7 @@ class Service:
         if state.get("excel"):
             raise ValueError(f"{pair} is marked in Excel: VolMarker already reads its file")
         if state.get("follow_market"):
-            raise ValueError(f"{pair} follows FMD: switch off Follow FMD in Setup to load a file")
+            raise ValueError(f"{pair} follows the market: switch off Follow market in Setup to load a file")
         found = self._read_export_file(pair)
         if not found:
             c1, c2 = exports.fa_pair(pair, self._fa_ccy())
@@ -884,7 +978,6 @@ class Service:
         now = time.time() if now is None else now
         cfg = self.store.config()
         acfg = cfg["alerts"]
-        feed_ok = self.feed_alive()
         with self._lock:
             recs = list(self.cache.values())
         cands: dict[tuple, dict] = {}
@@ -893,8 +986,8 @@ class Service:
             if rec.get("follow_market"):
                 self._follow_candidates(rec, cands)
                 continue
-            if not acfg.get("enabled", True) or rec.get("alerts_off") or not feed_ok \
-                    or not self.market.get(pair):
+            if not acfg.get("enabled", True) or rec.get("alerts_off") or not self.market_alive(rec) \
+                    or not self.quotes_for(rec):
                 continue
             view = self.fresh_view(pair, rec, cfg)
             res = resolve(rec)
@@ -916,7 +1009,7 @@ class Service:
                         "pair": pair, "tenor": t, "mark": m, "value": v, "mkt": q.get("mid"),
                         "bid": q.get("bid"), "offer": q.get("offer"), "brand": q.get("brand"),
                         "dev": round(dev, 4), "tol": round(tol, 4), "source": rec.get("source"),
-                        "msg": f"{pair} {t} {m.upper()}: ours {v:.2f}, FMD {q.get('mid'):.2f} "
+                        "msg": f"{pair} {t} {m.upper()}: ours {v:.2f}, {q.get('brand') or 'market'} {q.get('mid'):.2f} "
                                f"({dev:+.2f}, tol {tol:.2f})"}
         for pair, mt in self.excel_foreign.items():
             at = datetime.fromtimestamp(mt).strftime("%H:%M")
@@ -936,22 +1029,23 @@ class Service:
         pair = rec["pair"]
         health = self.follow_state(pair)
         st = (self.follow_status.get("pairs") or {}).get(pair) or {}
-        why = ("the FMD feed is down" if not self.feed_alive() else
+        src = "Bloomberg" if self.source_of(rec) == BBG else "FMD"
+        why = (f"the {src} feed is down" if not self.source_alive(rec) else
                f"the follower failed ({st.get('error')})" if st.get("state") == "error" else
                "the follower is not running")
-        cands[(pair, "", "follow")] = {
+        cands[(pair, "", "follow")] = {        # not after Bloomberg's daily stop: that is expected
             "level": "breach" if health == "down" else "clear", "kind": "follow", "confirm": 10,
             "pair": pair, "tenor": "", "mark": "follow",
-            "msg": f"{pair} follows FMD but {why}: Fenics keeps v{rec['version']} "
+            "msg": f"{pair} follows {src} but {why}: Fenics keeps v{rec['version']} "
                    f"from {rec['ts'][11:16]} UTC"}
-        if health == "down":
+        if health in ("down", "stopped"):
             return
         for h in st.get("held") or []:
             d = h["to"] - (h["from"] or 0)
             cands[(pair, h["tenor"], h["mark"] + "-jump")] = {
                 "level": "breach", "kind": "jump", "confirm": 0, "pair": pair, "tenor": h["tenor"],
                 "mark": h["mark"], "value": h["from"], "mkt": h["to"], "dev": round(-d, 4),
-                "msg": f"{pair} {h['tenor']} {h['mark'].upper()}: FMD moved {d:+.2f}, held back; "
+                "msg": f"{pair} {h['tenor']} {h['mark'].upper()}: {src} moved {d:+.2f}, held back; "
                        f"taken in {h['accept_in']}s unless it reverts"}
 
     def ack_alerts(self, keys: list[str] | None = None, pair: str | None = None) -> int:
@@ -1461,8 +1555,11 @@ class Service:
         if day != self._rec_day:
             self._rec_day, self._rec_last = day, {}
         brands = set(cfg.get("brands") or [])
-        with self._lock:
+        with self._lock:          # FMD's quotes of every pair, and Bloomberg's of the pairs that prefer it
             market = {p: list(q) for p, q in self.market.items()}
+            if self.bbg_alive():
+                for p, q in self.market_bbg.items():
+                    market[p] = market.get(p, []) + list(q)
         lines, n = [], 0
         for pair in sorted(market):
             last = self._rec_last.get(pair)
@@ -1520,3 +1617,4 @@ class Service:
     def stop(self) -> None:
         self._stop.set()
         self.fenics.logout()
+        self.bbg.stop("VolMarker closed")

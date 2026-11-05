@@ -112,6 +112,7 @@
   <tr><td>User · folder</td><td>Who you are logged in as and which shared data folder VolMarker uses.</td></tr>
   <tr><td><span class="red">⚠ 45</span></td><td>Market alerts. Red while some are not acknowledged. Opens the alert panel (<a href="#alerts">section 13</a>).</td></tr>
   <tr><td>Fenics login · every 5 min</td><td>Log in to Fenics to fetch FMD 1.0 vols, and how often (<a href="#fenics">section 14</a>).</td></tr>
+  <tr><td>Bloomberg</td><td>Start Bloomberg for the desk's Bloomberg pairs until the next stop (18:00 or midnight). Shows <i>BBG: you</i> while yours runs, or who else runs it (<a href="#bloomberg">section 14</a>).</td></tr>
   <tr><td><span class="fmd">● FMD live</span></td><td>The market data feed is running. <i>FMD off</i> means no market levels.</td></tr>
   <tr><td><span class="fmd">● live</span></td><td>Your connection to the shared folder. If it turns red, others' changes are not reaching you.</td></tr>
   <tr><td>Help</td><td>Opens this guide in a new tab.</td></tr>
@@ -270,14 +271,15 @@
 <figure><img src="shots/spread.png" alt="GBPUSD with spread to EURUSD"><figcaption>GBPUSD with EURUSD as spread parent: the <b>vs EURUSD</b> column.</figcaption></figure>
 <p>Set a <b>Spread parent</b> in Setup to get a column with this pair's ATM minus the parent's published ATM. Type either one: an ATM updates the spread, a spread sets ATM = parent + spread. Tick <b>Move with parent</b> to keep the spreads instead: every publish of the parent then moves this pair's ATMs, which show in blue.</p>
 
-<h3>Follow FMD (market mode)</h3>
+<h3>Follow market (market mode)</h3>
 <figure><img src="shots/follow.png" alt="EURSEK following FMD"><figcaption>EURSEK follows FMD: the market fields are pink and read-only; the bar on top shows the last FMD publish.</figcaption></figure>
-<p>Tick <b>Follow FMD</b> in Setup and the feed publishes the FMD mids for ATM, 25D/10D RR and BF by itself, through the normal publish. You keep the spread, skew and event weights.</p>
+<p>Tick <b>Follow market</b> in Setup and the feed publishes the mids of the pair's <b>market source</b> (FMD or Bloomberg, set in Setup) for ATM, 25D/10D RR and BF by itself, through the normal publish. It takes only that source, never a mix: a Bloomberg pair whose Bloomberg quote is missing keeps that mark's last value rather than take FMD's. You keep the spread, skew and event weights.</p>
 <ul>
   <li>It publishes when any mark has moved at least 0.05 vol, at most every 15 seconds.</li>
   <li><b>Jump guard</b>: a very large move is held for a minute and taken only if it is still there. Meanwhile the pair is amber and an alert explains.</li>
   <li><b>Feed down</b>: nothing is published, Fenics keeps the last levels, the pair turns red and everyone gets an alert.</li>
-  <li>Untick Follow FMD and save to take the pair back; the current levels become your marks.</li>
+  <li><b>Bloomberg not running between 18:00 and 07:00</b>: a Bloomberg pair keeps its last levels until Bloomberg is started again. That is expected, so there is no alert. From 07:00 to 18:00 a Bloomberg pair that isn't updating (Bloomberg not started yet, or stopped by hand) raises the usual alert.</li>
+  <li>Untick Follow market and save to take the pair back; the current levels become your marks.</li>
 </ul>
 
 <h3>Marked in Excel</h3>
@@ -368,8 +370,9 @@
   <tr><td>Group</td><td>Where the pair is listed in the sidebar, for everyone.</td></tr>
   <tr><td>Key pair</td><td>Auto-quoted, with the tighter staleness limit.</td></tr>
   <tr><td>ATM convention</td><td>DNS or ATMF, used to match broker ATM quotes.</td></tr>
-  <tr><td>Inverse</td><td>Fenics and FMD quote the pair's RRs in the inverted pair's terms (e.g. NOKCHF as CHFNOK), so their sign is flipped going to Fenics and coming from FMD.</td></tr>
-  <tr><td>Follow FMD</td><td>Market mode (<a href="#types">section 8</a>).</td></tr>
+  <tr><td>Inverse</td><td>Fenics and FMD quote the pair's RRs in the inverted pair's terms (e.g. NOKCHF as CHFNOK), so their sign is flipped going to Fenics and coming from FMD. Bloomberg is fetched for the same standard pair (CHFNOK) and flipped the same way.</td></tr>
+  <tr><td>Market source</td><td>FMD, or Bloomberg. With Bloomberg, the grid, alerts and Follow market use Bloomberg's levels while it runs, and FMD's where Bloomberg has none or after it stops (<a href="#bloomberg">section 14</a>).</td></tr>
+  <tr><td>Follow market</td><td>Market mode (<a href="#types">section 8</a>).</td></tr>
   <tr><td>Marked in Excel</td><td>Read the marks from Excel's export file (<a href="#types">section 8</a>).</td></tr>
   <tr><td>Alert tolerance</td><td>Per-pair tolerances in vol points; empty uses the desk default. Mute all alerts, or only the RR and BF ones.</td></tr>
 </table>
@@ -393,15 +396,24 @@
 </ul>
 
 <!-- ------------------------------------------------------------------ -->
-<h2 id="fenics">14. Fenics login and the FMD feed</h2>
+<h2 id="fenics">14. Fenics login, the FMD feed and Bloomberg</h2>
 
 <figure class="narrow"><img src="shots/dlg-fenics.png" alt="Fenics login"></figure>
 <p>One feed serves the whole desk and writes the market levels to the shared folder; every VolMarker reads them from there. With FMD 1.0, the usual way is <b>Fenics login</b> in the top bar: type your Fenics user and password. That VolMarker then fetches every pair's surface from Fenics until you log out or close it.</p>
 <ul>
-  <li><b>every … s / min</b> next to the button sets how often (default 5 minutes, at least 10 seconds). Shorten it around an event; it applies at once.</li>
+  <li><b>every … s / min</b> next to the button sets how often (default 5 minutes, at least 10 seconds), for FMD 1.0 and Bloomberg alike. Shorten it around an event; it applies at once.</li>
   <li>The password is kept in memory only, never saved. It is also used by <b>Send weights</b> when you leave its password empty.</li>
   <li>Only one feed runs per data folder, so a login is refused while someone else's feed is alive.</li>
   <li>FMD 1.0 gives a bid/offer for the ATM only; RRs and strangles come as mids and show as <code>mid</code> in the grid.</li>
+</ul>
+
+<h3 id="bloomberg">Bloomberg</h3>
+<p>Pairs whose <b>Market source</b> in Setup is Bloomberg get their levels from Bloomberg. Like the Fenics login, one VolMarker fetches them for the whole desk: click <b>Bloomberg</b> in the top bar on a PC with a Bloomberg Terminal (and the <code>blp</code> Python package). The button then reads <i>BBG: you</i>; everyone else sees who runs it.</p>
+<ul>
+  <li>Only the Bloomberg pairs are fetched, as often as the <b>every … s / min</b> field next to Fenics login says (the same interval as FMD 1.0; a change applies at once), with their tenors and deltas: e.g. <code>EURUSDV1M BGN Curncy</code> (ATM), <code>EURUSD25R1M</code> and <code>EURUSD25B1M</code>. FMD keeps fetching those pairs too, and both are recorded.</li>
+  <li>The grid takes Bloomberg first, and FMD where Bloomberg has no quote; the market choice above the grid shows which brand each quote came from.</li>
+  <li><b>18:00 and midnight</b>: to stay within Bloomberg's download limits it stops by itself at the next of these. If you stay late, click <b>Bloomberg</b> again: it runs until midnight, and can be started again after that too. The first one in next morning starts it for the day. While it is stopped, Bloomberg pairs show FMD levels, and those that follow the market keep their levels.</li>
+  <li>Closing your VolMarker stops it too; someone else can then start it.</li>
 </ul>
 
 <!-- ------------------------------------------------------------------ -->
@@ -519,7 +531,7 @@
   <tr><td><code>fmd_daily_basis</code></td><td><code>calendar</code></td><td>Dailies: "ND" = today + N calendar days, rolled off the weekend (holidays are expiries too).</td></tr>
   <tr><td><code>calendar_tz</code></td><td><code>Europe/Zurich</code></td><td>Time zone of the Bloomberg terminal the calendar is exported from.</td></tr>
   <tr><td><code>market_record.interval_min</code></td><td>5</td><td>How often the leader app records the FMD quotes for analysis. 0 switches recording off.</td></tr>
-  <tr><td><code>market_record.brands</code></td><td><code>["FMD", "FMD1"]</code></td><td>Which brands to record. Empty: all.</td></tr>
+  <tr><td><code>market_record.brands</code></td><td><code>["FMD", "FMD1", "BBG"]</code></td><td>Which brands to record. Empty: all.</td></tr>
   <tr><td><code>market_record.dir</code></td><td><code>market_history</code></td><td>Where the recordings go, one compressed file per month.</td></tr>
   <tr><td><code>analysis_dir</code></td><td><code>analysis</code></td><td>Where the tables for analysis go. Each morning the leader adds the previous day. Empty (<code>""</code>): off. To fill in the past once, including the dated copies from the Excel years, run <code>python scripts/export_history.py --data …\vol_data</code>; see the README.</td></tr>
 </table>
@@ -541,6 +553,18 @@
   <tr><td><code>xml.retry_missing</code>, <code>xml.timeout</code>, <code>xml.raw_dir</code></td><td>How long before asking again for a pair Fenics has no vols for (3600 s), the request timeout, and an optional folder for the raw answers, for debugging.</td></tr>
 </table>
 
+<h3>Bloomberg (<code>bbg</code>)</h3>
+<table class="cfg">
+  <tr><th>Setting</th><th>Meaning</th></tr>
+  <tr><td><code>source</code>, <code>pair_source</code></td><td>The pricing source in the tickers (<code>BGN</code>), and per-pair exceptions, e.g. <code>{"USDPLN": "BVOL"}</code>.</td></tr>
+  <tr><td><code>tickers</code></td><td>Ticker patterns for <code>atm</code>, <code>rr</code> and <code>bf</code>, with <code>{pair}</code> (the standard pair: CHFNOK for an inverse NOKCHF), <code>{tenor}</code>, <code>{delta}</code> and <code>{source}</code>.</td></tr>
+  <tr><td><code>fields</code></td><td>The Bloomberg fields for bid, offer and mid (<code>PX_BID</code>, <code>PX_ASK</code>, <code>PX_MID</code>).</td></tr>
+  <tr><td><code>atm_type</code></td><td>Bloomberg's ATM convention (DNS), matched against each pair's ATM convention.</td></tr>
+  <tr><td><code>batch</code></td><td>Tickers per request (200). How often is the interval field in the top bar.</td></tr>
+  <tr><td><code>stop_at</code></td><td>A run stops at the next of these times, in <code>calendar_tz</code> (<code>["18:00", "00:00"]</code>); it can be started again at once. <code>[]</code>: never.</td></tr>
+  <tr><td><code>quiet_hours</code></td><td>From and to (<code>["18:00", "07:00"]</code>): Bloomberg not running then raises no alert for pairs that follow it. <code>[]</code>: always alert.</td></tr>
+</table>
+
 <h3>Event weights (<code>weights_export</code>, <code>cuts</code>)</h3>
 <table class="cfg">
   <tr><th>Setting</th><th>Meaning</th></tr>
@@ -551,13 +575,13 @@
   <tr><td><code>cuts</code></td><td>The expiry cuts offered in Setup, each a time zone and time, e.g. <code>"WAR": {"tz": "Europe/Warsaw", "time": "11:00"}</code>. <code>times</code> sets another time on some weekdays, e.g. <code>{"Fri": "12:00"}</code>.</td></tr>
 </table>
 
-<h3>Derived pairs, Follow FMD and alerts</h3>
+<h3>Derived pairs, Follow market and alerts</h3>
 <table class="cfg">
   <tr><th>Setting</th><th>Default</th><th>Meaning</th></tr>
   <tr><td><code>propagation.min_change</code></td><td>0.005</td><td>After a market-driven move, a derived or parent-following pair is republished only if an ATM moves at least this much…</td></tr>
   <tr><td><code>propagation.min_corr_change</code></td><td>0.005</td><td>…or, on a cross whose ATMs stay put, the implied correlation moves at least this much…</td></tr>
   <tr><td><code>propagation.min_interval_s</code></td><td>5</td><td>…and at most this often. Manual publishes always go through.</td></tr>
-  <tr><td><code>follow.min_change</code></td><td>0.05</td><td>Follow FMD publishes when any mark has moved at least this much (vol points).</td></tr>
+  <tr><td><code>follow.min_change</code></td><td>0.05</td><td>Follow market publishes when any mark has moved at least this much (vol points).</td></tr>
   <tr><td><code>follow.min_publish_interval_s</code></td><td>15</td><td>At most one automatic publish per pair this often.</td></tr>
   <tr><td><code>follow.max_jump</code></td><td>ATM 1.0, 25D RR 0.75, 10D RR 1.5, 25D BF 0.5, 10D BF 1.0</td><td>Bigger moves are held…</td></tr>
   <tr><td><code>follow.jump_confirm_s</code></td><td>60</td><td>…until they have lasted this long.</td></tr>

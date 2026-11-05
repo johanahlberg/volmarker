@@ -1,17 +1,19 @@
-"""Market mode: publish FMD mids for pairs set to "Follow FMD".
+"""Market mode: publish market mids for pairs set to "Follow market".
 
-Runs inside the feed process, which is already the single writer of market
-data for the folder, so exactly one follower publishes. Each round, for each
-following pair:
+Runs inside a feed process: the FMD feed and the Bloomberg feed each start one,
+and the first one claims market/_follow.json; the other stands by while that
+heartbeat is fresh and takes over when it stops, so exactly one follower
+publishes. Each round, for each following pair:
 
-  * takes the fresh FMD mid (brand per fmd_brand) for ATM, 25D/10D RR and BF (and the
-    pair's extra tenors and deltas); marks without a fresh quote keep their last value
+  * takes the fresh mid of the pair's preferred source (Bloomberg, or FMD with the
+    brand per fmd_brand; never a mix) for ATM, 25D/10D RR and BF (and the pair's
+    extra tenors and deltas); marks without a fresh quote keep their last value
   * publishes when any mark has moved at least min_change, at most once per
     min_publish_interval_s - through the normal publish, so the Fenics and
     Front Arena files, derived crosses, history and journal all follow
   * holds a move bigger than max_jump until it has lasted jump_confirm_s
-  * does nothing while the feed is down (Fenics keeps the last levels; the
-    apps raise an alert)
+  * does nothing while the pair's source is down (Fenics keeps the last levels; the
+    apps raise an alert, except after Bloomberg's daily stop)
 
 Spread, skew and event weights stay with the traders.
 
@@ -27,7 +29,8 @@ import threading
 import time
 
 from .alerts import iso
-from .service import STATE_KEYS, Service
+from .market import BBG
+from .service import FOLLOW_STALE, STATE_KEYS, Service
 from .store import ConflictError, LockTimeout, write_shared
 from .surface import all_marks, resolve, tenor_list, tol_mark
 
@@ -46,6 +49,8 @@ class Follower:
         """One round; returns the pairs published."""
         now = time.time() if now is None else now
         svc = self.svc
+        if self._other_active(now):
+            return []
         svc.poll_journal()
         svc.poll_market(notify=False)
         cfg = svc.store.config()
@@ -69,13 +74,21 @@ class Follower:
                                             "pairs": status}))
         return published
 
+    def _other_active(self, now: float) -> bool:
+        """Another feed's follower is publishing (its heartbeat is fresh): stand by."""
+        try:
+            cur = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return False
+        return cur.get("instance") != self.svc.instance and now - cur.get("heartbeat", 0) < FOLLOW_STALE
+
     def _pair(self, pair: str, cfg: dict, now: float) -> dict:
         svc, fc = self.svc, cfg["follow"]
         rec = svc.get(pair)
-        st = {"last_check": iso(now), "version": rec["version"]}
-        if not svc.feed_alive():
+        st = {"last_check": iso(now), "version": rec["version"], "source": svc.source_of(rec)}
+        if not svc.source_alive(rec):
             return dict(st, state="down")
-        view = svc.fresh_view(pair, rec, cfg)
+        view = svc.fresh_view(pair, rec, cfg, follow=True)
         res = resolve(rec)
         take, held, missing, moved = {}, [], [], []
         for t in tenor_list(rec):
@@ -115,7 +128,7 @@ class Follower:
                 row[f"{m}f"] = v / row[f"{m[:2]}25"]
         _, t, m, d = max(moved, key=lambda x: x[0])
         put = rec.get("rr_put") and m.startswith("rr")     # favour puts: RR moves as shown, put - call
-        comment = f"FMD: {t} {m.upper()}{' P-C' if put else ''} " + (f"{-d if put else d:+.2f}" if d is not None else "new")
+        comment = f"{'Bloomberg' if st['source'] == BBG else 'FMD'}: {t} {m.upper()}{' P-C' if put else ''} " + (f"{-d if put else d:+.2f}" if d is not None else "new")
         if len(moved) > 1:
             comment += f" (+{len(moved) - 1} more)"
         try:
@@ -131,6 +144,6 @@ class Follower:
             try:
                 pubs = self.step()
                 if pubs:
-                    log.info("published from FMD: %s", ", ".join(pubs))
+                    log.info("published from the market: %s", ", ".join(pubs))
             except Exception:
                 log.exception("follower round failed")

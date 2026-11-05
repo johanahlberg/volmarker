@@ -111,6 +111,24 @@ DEFAULT_CONFIG = {
             "raw_dir": "",              # e.g. "exports/fenics_vols": keep the last answer per pair (<PAIR>.xml) to debug
         },
     },
+    # Bloomberg (volmarker/bbgfeed.py): started from the app's Bloomberg button on a PC with a
+    # Terminal and the blp package; fetches only the pairs whose Setup prefers Bloomberg and
+    # writes them to market/bbg/ for every app. A run stops itself at the next stop_at time
+    # (calendar_tz) to keep within the Terminal's download limits; anyone can start it again.
+    "bbg": {
+        "source": "BGN",               # pricing source in the tickers (BGN, BVOL, CMPN, a broker's code)
+        "pair_source": {},             # per pair, e.g. {"USDPLN": "BVOL"}
+        "tickers": {                   # {pair}: the standard pair (CHFNOK for an inverse NOKCHF), {delta}: 25, 10
+            "atm": "{pair}V{tenor} {source} Curncy",
+            "rr": "{pair}{delta}R{tenor} {source} Curncy",
+            "bf": "{pair}{delta}B{tenor} {source} Curncy",
+        },
+        "fields": {"bid": "PX_BID", "offer": "PX_ASK", "mid": "PX_MID"},
+        "atm_type": "DNS",             # convention of Bloomberg's ATM
+        "batch": 200,                  # tickers per request
+        "stop_at": ["18:00", "00:00"],  # a run stops at the next of these (calendar_tz); [] = never
+        "quiet_hours": ["18:00", "07:00"],  # Bloomberg not running then is expected: no follow alert
+    },
     # event weights: Fenics XML poster and the Front Arena event files (as the Excel weight workbook)
     "weights_export": {
         "fenics_url": "",          # the pricing server (as in the Excel macro's login form); /xmlposter is appended
@@ -144,10 +162,11 @@ DEFAULT_CONFIG = {
     "market_stale_minutes": 30,
     # FMD history for analysis: the leader appends the quotes that changed since its last round
     # to <dir>/YYYY-MM.jsonl.gz (UTC month), every interval_min (0 = off); brands: which to keep
-    "market_record": {"interval_min": 5, "brands": ["FMD", "FMD1"], "dir": "market_history"},
+    "market_record": {"interval_min": 5, "brands": ["FMD", "FMD1", "BBG"], "dir": "market_history"},
     # tables for analysis (volmarker/analysis.py): the leader appends each finished day ("" = off)
     "analysis_dir": "analysis",
-    # Market mode: pairs with "Follow FMD" get FMD mids published automatically by the feed process
+    # Market mode: pairs with "Follow market" get the mids of their market source (FMD or
+    # Bloomberg) published automatically by a feed process
     "follow": {
         "interval_s": 2,                # how often the follower looks at the market
         "min_change": 0.05,             # publish when any mark moved at least this much (vol pts)

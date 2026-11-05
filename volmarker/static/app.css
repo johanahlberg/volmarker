@@ -256,7 +256,8 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top
 p.small, div.small { font-size: 12px; margin: 6px 0 0; }
 
 .conn.off { color: var(--muted); }
-#fenics-btn.on { color: var(--good); }
+#fenics-btn.on, #bbg-btn.on { color: var(--good); }
+#bbg-btn.other { color: var(--ink-2); }
 .fx-every { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
 .fx-every.on { color: var(--ink-2); }
 .fx-every input { width: 52px; padding: 2px 4px; }
@@ -282,6 +283,7 @@ p.small, div.small { font-size: 12px; margin: 6px 0 0; }
 .tag.follow { color: var(--good); }
 .tag.follow.held { color: var(--warning); }
 .tag.follow.down { color: var(--critical); }
+.tag.follow.stopped { color: var(--muted); }
 .tag.alert { color: var(--critical); font-weight: 700; }
 .tag.alert.acked { color: var(--muted); font-weight: 500; }
 .alerts-btn { background: transparent; color: var(--muted); padding: 2px 8px; }

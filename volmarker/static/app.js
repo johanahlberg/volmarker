@@ -5,15 +5,15 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type", "lock_rr10f", "lock_bf10f",
-  "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "inverse", "follow_bases",
+  "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "inverse", "market_source", "follow_bases",
   "deltas", "extra_tenors", "removed_tenors", "wing_locks", "tenors"];
 // pair settings the Setup tab saves on its own (service.SETTING_KEYS)
 const SETUP_KEYS = ["mode", "bases", "key", "group", "spread_ref", "follow_parent", "follow_bases", "cut", "dc_factor",
   "atm_type", "follow_market", "excel", "alert_tol", "alerts_off", "alerts_smile_off", "inverse",
-  "deltas", "extra_tenors", "removed_tenors"];
+  "market_source", "deltas", "extra_tenors", "removed_tenors"];
 // marks with a market quote: ATM and the RR and BF of every delta (rr25, rr10, a pair's extra rr5 ...)
 const isMark = (f) => /^(atm|rr\d+|bf\d+)$/.test(f);
-// owned by the feed on Follow FMD pairs: the marks and the wings' factors
+// owned by the feed on Follow market pairs: the marks and the wings' factors
 const isFollowField = (f) => f === "atm" || /^(rr|bf)\d+f?$/.test(f);
 // a pair's deltas: 25D, 10D and its extra ones (e.g. 5D, 1D for steep wings, or 30D), inside out
 const allDeltas = (d = app.draft) => [25, 10, ...(d?.deltas || [])].sort((a, b) => b - a);
@@ -158,7 +158,7 @@ function pairRow(p, flashPair) {
     p.skew ? `<span class="tag" title="Skew active in Fenics">skew</span>` : "",
     p.stale ? `<span class="tag stale" title="Not marked for ${age(p.age_minutes)}">stale</span>` : "",
     p.warnings ? `<span class="tag" title="${p.warnings} check(s)">!${p.warnings}</span>` : "",
-    p.follow ? `<span class="tag follow ${p.follow}" title="Follows FMD (${p.follow})">FMD</span>` : "",
+    p.follow ? `<span class="tag follow ${p.follow}" title="Follows ${p.market_source === "BBG" ? "Bloomberg" : "FMD"} (${p.follow})">${p.market_source === "BBG" ? "BBG" : "FMD"}</span>` : "",
     p.follow_parent ? `<span class="tag" title="Moves with ${esc(p.spread_ref)}">P</span>` : "",
     p.excel ? `<span class="tag xl${p.excel_error ? " bad" : ""}" title="${esc(p.excel_error ? "Excel file not readable: " + p.excel_error : "Marked in Excel, read from its export file")}">XL</span>` : "",
     p.excel_foreign ? `<span class="tag xl bad" title="Its export file was changed outside VolMarker: is it still marked in Excel?">XL?</span>` : "",
@@ -314,7 +314,7 @@ function pick(rec) {
     : cc.map((c) => ({ ...e, ccy: c, weight: Math.round((Number(e.weight) || 0) / 2 * 1e4) / 1e4 })));
   for (const k of ["lock_rr10f", "lock_bf10f"]) s[k] = s[k] === null ? true : !!s[k];
   s.atm_type = s.atm_type || "DNS";
-  s.follow_market = !!s.follow_market; s.alerts_off = !!s.alerts_off; s.alerts_smile_off = !!s.alerts_smile_off; s.rr_put = !!s.rr_put; s.inverse = !!s.inverse;
+  s.follow_market = !!s.follow_market; s.alerts_off = !!s.alerts_off; s.alerts_smile_off = !!s.alerts_smile_off; s.rr_put = !!s.rr_put; s.inverse = !!s.inverse; s.market_source = s.market_source === "BBG" ? "BBG" : null;
   s.follow_bases = s.follow_bases !== false;
   for (const r of Object.values(s.tenors)) {   // records from before the 10D values were stored
     for (const d of wingDeltas(s)) for (const w of ["rr", "bf"])
@@ -540,7 +540,7 @@ function renderGrid() {
       el.title = xl ? "Marked in Excel: read from its export file (untick Marked in Excel in Setup to mark here)" :
         held ? (external() ? `Implied by the ATM ${app.draft.excel ? "from Excel" : "from FMD"} and the bases; it moves when either is published`
           : "Implied by the ATM and the bases (tick Move with bases in Setup to keep the correlation instead)") :
-        fol ? "Follows FMD: published by the feed (untick Follow FMD in Setup to mark by hand)" :
+        fol ? `Follows ${srcName()}: published by the feed (untick Follow market in Setup to mark by hand)` :
         lockRo ? (col.role === "factor" ? `Calibrated from the ${col.delta}D quote (untick lock to edit)` : `25D × factor (untick lock to type the ${col.delta}D)`) : "";
     }
     el.classList.toggle("follow", fol);
@@ -769,15 +769,69 @@ function toLocalInput(d) {
 async function loadMarket(render = true) {
   if (!app.current) return;
   try {
-    app.market = await api(`/api/pairs/${app.current}/market?brand=${encodeURIComponent($("#mkt-brand").value)}`);
+    const src = app.draft?.pair === app.current ? `&source=${app.draft.market_source === "BBG" ? "BBG" : "FMD"}` : "";
+    app.market = await api(`/api/pairs/${app.current}/market?brand=${encodeURIComponent($("#mkt-brand").value)}${src}`);
   } catch { app.market = null; }
   renderFeed(app.market && app.market.feed);
   const sel = $("#mkt-brand"), cur = sel.value;
   const brands = (app.market && app.market.brands) || [];
-  sel.innerHTML = `<option value="auto">Auto (FMD first)</option><option value="best">Best of brands</option>` +
+  sel.innerHTML = `<option value="auto">Auto (${srcName()} first)</option><option value="best">Best of brands</option>` +
     brands.map((b) => `<option value="${esc(b)}">${esc(b)}</option>`).join("");
   sel.value = [...sel.options].some((o) => o.value === cur) ? cur : "auto";
+  if (app.market?.bbg) renderBbgFeed(app.market.bbg);
   if (render && app.view) { renderMarket(); renderFollow(); renderTermChart(); }
+}
+// the pair's market source, as the draft has it (Setup)
+const srcName = (d = app.draft) => d?.market_source === "BBG" ? "Bloomberg" : "FMD";
+// ---------------------------------------------------------------- Bloomberg feed (one for the desk, stops at 18:00)
+async function loadBbg() {
+  try { app.bbg = await api("/api/bbg"); } catch { app.bbg = null; }
+  renderBbg();
+}
+function renderBbg() {
+  const b = app.bbg, btn = $("#bbg-btn");
+  if (!b) { btn.textContent = "Bloomberg"; btn.title = "VolMarker did not answer about Bloomberg"; return; }
+  const due = b.running ? b.stop_due : b.other ? b.other.stop_due : b.stop_due;
+  const until = due ? ` until ${localTime(due)}` : "";
+  btn.classList.toggle("on", !!b.running);
+  btn.classList.toggle("other", !!b.other);
+  renderFenics();                     // the interval field is live while Bloomberg runs too
+  if (b.running) {
+    btn.textContent = "BBG: you";
+    btn.title = `Bloomberg runs from this VolMarker for the desk${until}, every ${everyText(b.seconds)}: ${b.pairs ?? 0} pair(s), ${b.tickers ?? 0} tickers` +
+      ` · last fetch ${b.last_msg ? localTime(b.last_msg) : "–"}` + (b.last_error ? ` · ${b.last_error}` : "") + ". Click to stop";
+  } else if (b.other) {
+    btn.textContent = `BBG: ${b.other.user}`;
+    btn.title = `Bloomberg runs from ${b.other.user}'s VolMarker (${b.other.host})${until}, every ${everyText(b.other.seconds)} · last fetch ${b.other.last_msg ? localTime(b.other.last_msg) : "–"}`;
+  } else {
+    btn.textContent = "Bloomberg";
+    btn.title = `Start Bloomberg for the desk from this PC's Terminal${until} (download limits): the pairs whose Setup prefers Bloomberg` +
+      (b.stopped ? `. Last run: ${b.stopped}` : "");
+  }
+}
+function renderBbgFeed(st) {     // from the market status every app reads: someone else may have started or stopped it
+  const was = app.bbg && (app.bbg.running || !!app.bbg.other), now = st.state === "live";
+  if (was !== now) loadBbg();
+}
+async function clickBbg() {
+  await loadBbg();
+  const b = app.bbg;
+  if (!b) return;
+  if (b.other) {
+    showBanner(`Bloomberg is already running for the desk from ${esc(b.other.user)}'s VolMarker (${esc(b.other.host)}).`, [["OK", () => hideBanner()]]);
+    return;
+  }
+  if (b.running) {
+    if (!window.confirm("Stop Bloomberg for the whole desk? Bloomberg pairs then show FMD levels, and those that follow the market keep their last levels.")) return;
+    try { app.bbg = await api("/api/bbg/stop", {}); } catch (err) { showBanner(esc(err.message), [["OK", () => hideBanner()]], "error"); }
+    renderBbg(); return;
+  }
+  $("#bbg-btn").disabled = true; $("#bbg-btn").textContent = "Starting…";
+  try { app.bbg = await api("/api/bbg/start", { seconds: fenicsSeconds() }); }
+  catch (err) { showBanner(`Bloomberg not started: ${esc(err.message)}`, [["OK", () => hideBanner()]], "error"); }
+  $("#bbg-btn").disabled = false;
+  renderBbg();
+  loadMarket();
 }
 function renderFeed(st) {
   const el = $("#fmd"); if (!st) return;
@@ -805,9 +859,10 @@ function renderFenics() {
     const unit = sec % 60 ? 1 : 60;
     $("#fx-unit").value = unit; $("#fx-int").value = sec / unit;
   }
-  $(".fx-every").classList.toggle("on", on);
-  $(".fx-every").title = (on ? "How often the FMD 1.0 vols are fetched from Fenics; changes apply at once"
-    : "How often to fetch the FMD 1.0 vols once logged in to Fenics") + " (at least 10 s)";
+  const live = on || !!app.bbg?.running;
+  $(".fx-every").classList.toggle("on", live);
+  $(".fx-every").title = (live ? "How often the FMD 1.0 vols (Fenics login) and Bloomberg are fetched; changes apply at once"
+    : "How often to fetch the FMD 1.0 vols (Fenics login) and Bloomberg once started") + " (at least 10 s)";
 }
 // the Fenics user: the Windows login, or the name of the last login that worked if it differs
 const fenicsUserDefault = () => app.prefs.fenics_login || app.me?.user || "";
@@ -818,7 +873,7 @@ function rememberFenicsUser(name) {
   }
 }
 const everyText = (sec) => sec % 60 ? `${sec} s` : `${sec / 60} min`;
-const fenicsSeconds = () => (app.fenics?.logged_in ? app.fenics.seconds : app.prefs.fenics_seconds) || 300;
+const fenicsSeconds = () => (app.fenics?.logged_in ? app.fenics.seconds : app.bbg?.running ? app.bbg.seconds : app.prefs.fenics_seconds) || 300;
 async function setFenicsInterval() {
   const el = $("#fx-int"), sec = Number(el.value) * Number($("#fx-unit").value);
   const bad = !(sec >= 10);
@@ -829,6 +884,11 @@ async function setFenicsInterval() {
   if (app.fenics?.logged_in) {
     try { app.fenics = await api("/api/fenics/interval", { seconds: sec }); }
     catch (err) { el.classList.add("bad"); el.title = err.message; return; }
+  }
+  if (app.bbg?.running) {             // Bloomberg fetches as often as FMD 1.0
+    try { app.bbg = await api("/api/bbg/interval", { seconds: sec }); }
+    catch (err) { el.classList.add("bad"); el.title = err.message; return; }
+    renderBbg();
   }
   renderFenics();
 }
@@ -864,7 +924,7 @@ async function submitFenics(e) {
 }
 
 function mktQuote(t, m) {
-  if (!app.market || !$("#mkt-show").checked || app.market.feed.state === "off") return null;
+  if (!app.market || !$("#mkt-show").checked || (app.market.feed.state === "off" && !app.market.live)) return null;
   return app.market.view?.[t]?.[m] || null;
 }
 function renderMarket() {
@@ -930,21 +990,25 @@ function renderFollow() {
   bar.hidden = false;
   const f = (app.market && app.market.follow) || {};
   let cls = "", html;
-  if (d.follow_market && !pub.follow_market) html = "<b>Follow FMD</b> is switched on in the draft. Publish to hand ATM, RR and BF to the feed.";
-  else if (!d.follow_market) html = "<b>Follow FMD</b> switched off in the draft. Publish to take the surface back; the current values stay as your marks.";
+  const src = srcName(pub);
+  if (d.follow_market && !pub.follow_market) html = `<b>Follow market</b> (${srcName()}) is switched on in the draft. Publish to hand ATM, RR and BF to the feed.`;
+  else if (!d.follow_market) html = "<b>Follow market</b> switched off in the draft. Publish to take the surface back; the current values stay as your marks.";
   else {
     const h = f.health || "down";
     cls = h === "ok" || h === "starting" ? "" : h;
     const v = app.view.record;
-    html = h === "down" ? `<b>Follows FMD, but it is not updating</b> (${app.market?.feed?.state !== "live" ? "feed down" : "follower not running"}). Fenics keeps v${v.version} from ${localTime(v.ts)}.`
-      : h === "starting" ? "<b>Follows FMD.</b> Waiting for the follower in the FMD feed process…"
-      : `<b>Follows FMD</b> · last FMD publish ${f.last_publish ? localTime(f.last_publish) : "–"} · checked ${f.last_check ? localTime(f.last_check) : "–"}` +
+    const feedUp = (src === "Bloomberg" ? app.market?.bbg?.state : app.market?.feed?.state) === "live";
+    html = h === "stopped" ? `<b>Follows Bloomberg, which is not running</b> (stopped for the evening). Fenics keeps v${v.version} from ${localTime(v.ts)} until someone starts Bloomberg again.`
+      : h === "down" ? `<b>Follows ${src}, but it is not updating</b> (${!feedUp ? `${src} feed down` : "follower not running"}). Fenics keeps v${v.version} from ${localTime(v.ts)}.`
+      : h === "starting" ? `<b>Follows ${src}.</b> Waiting for the follower in the feed process…`
+      : `<b>Follows ${src}</b> · last ${src} publish ${f.last_publish ? localTime(f.last_publish) : "–"} · checked ${f.last_check ? localTime(f.last_check) : "–"}` +
         (f.waiting ? " · next publish due (throttled)" : "");
-    if (h !== "down" && f.missing) html += ` · <span title="${esc((f.missing_list || []).join(", "))}">${f.missing} mark(s) without a fresh FMD quote keep their last value</span>`;
-    for (const j of (h !== "down" && f.held) || [])
+    const live = h !== "down" && h !== "stopped";
+    if (live && f.missing) html += ` · <span title="${esc((f.missing_list || []).join(", "))}">${f.missing} mark(s) without a fresh ${src} quote keep their last value</span>`;
+    for (const j of (live && f.held) || [])
       html += `<br>Held: ${j.tenor} ${markLabel(j.mark)}${rrSign(j.mark) < 0 ? " (P−C)" : ""} ${fmt(rrSign(j.mark) * j.from, 2)} → ${fmt(rrSign(j.mark) * j.to, 2)}, taken in ${j.accept_in}s unless it reverts`;
     html += " · You keep spread, skew and event weights." +
-      (d.mode === "derived" ? " The correlation is implied from the FMD ATMs and the bases." : "");
+      (d.mode === "derived" ? ` The correlation is implied from the ${src} ATMs and the bases.` : "");
   }
   bar.className = "followbar " + cls; bar.innerHTML = html;
 }
@@ -1884,17 +1948,18 @@ function renderSetup() {
   $("#su-spref").value = d.spread_ref || "";
   $("#su-follow-parent").checked = !!d.follow_parent;
   $("#su-follow-parent").disabled = !d.spread_ref || d.mode !== "marked" || !!d.follow_market || !!d.excel;
-  $("#su-follow-parent").parentElement.title = $("#su-follow-parent").disabled ? "Needs a spread parent, on a marked pair that doesn't follow FMD and isn't marked in Excel" : "";
+  $("#su-follow-parent").parentElement.title = $("#su-follow-parent").disabled ? "Needs a spread parent, on a marked pair that doesn't follow the market and isn't marked in Excel" : "";
   const cuts = app.me.cuts || {};
   $("#su-cut").innerHTML = Object.entries(cuts).map(([k, c]) => `<option value="${k}">${k} (${cutLabel(c)})</option>`).join("");
   $("#su-cut").value = d.cut || "NYC";
   if (document.activeElement !== $("#su-dc")) $("#su-dc").value = d.dc_factor == null ? "" : fmt(d.dc_factor, 2);
   $("#su-atm").value = d.atm_type || "DNS";
   $("#su-inverse").checked = !!d.inverse;
+  $("#su-src").value = d.market_source || "";
   $$(".su-derived").forEach((el) => (el.hidden = d.mode !== "derived"));
   $("#su-follow-bases").checked = d.follow_bases !== false;
   $("#su-follow-bases").disabled = external(d);
-  $("#su-follow-bases").parentElement.title = external(d) ? `The ATMs come from ${d.excel ? "Excel" : "FMD"}, so the correlation always follows the bases` : "";
+  $("#su-follow-bases").parentElement.title = external(d) ? `The ATMs come from ${d.excel ? "Excel" : srcName(d)}, so the correlation always follows the bases` : "";
   $("#su-follow").checked = !!d.follow_market;
   $("#su-follow").disabled = !!d.excel;
   $("#su-excel").checked = !!d.excel;
@@ -1924,6 +1989,9 @@ function onSetupChange() {
   d.follow_parent = fp;
   d.atm_type = $("#su-atm").value;
   d.inverse = $("#su-inverse").checked;
+  const srcChanged = ($("#su-src").value || null) !== (d.market_source || null);
+  d.market_source = $("#su-src").value || null;
+  if (srcChanged) loadMarket();         // the broker levels shown follow the draft's source
   if (mode === "derived") {
     if (!bases[0] || !bases[1]) { $$(".su-derived").forEach((el) => (el.hidden = false)); return; }
     if (d.mode !== "derived" || String(d.bases) !== String(bases)) {
@@ -1946,14 +2014,14 @@ function onSetupChange() {
       const q = app.market?.view?.[t]?.[m];
       if (q && q.mid != null && !q.stale && !q.alt_atm) { setFromMarket(t, m, Math.round(q.mid * 1e4) / 1e4, true); n++; }
     }
-    showBanner(`Follow FMD: ${n} marks set to FMD mids in the draft. Publish to hand the surface to the feed.`, [["OK", () => hideBanner()]]);
+    showBanner(`Follow market: ${n} marks set to ${srcName()} mids in the draft. Publish to hand the surface to the feed.`, [["OK", () => hideBanner()]]);
   }
   if (!follow && d.follow_market) {
     // FMD 10D quotes can give factors a locked factor can't hold (25D near zero, opposite signs)
     for (const w of ["rr", "bf"]) for (const x of wingDeltas(d)) {
       if (getLock(`lock_${w}${x}f`, d) && app.tenors.some((t) => !(d.tenors[t][`${w}${x}f`] > 0))) {
         setLock(`lock_${w}${x}f`, false, d);
-        showBanner(`Follow FMD off: the ${w.toUpperCase()} ${x}D factor lock was unticked because some FMD factors are zero or negative. The ${x}D quotes stay as they are.`, [["OK", () => hideBanner()]]);
+        showBanner(`Follow market off: the ${w.toUpperCase()} ${x}D factor lock was unticked because some market factors are zero or negative. The ${x}D quotes stay as they are.`, [["OK", () => hideBanner()]]);
       }
     }
   }
@@ -2269,7 +2337,7 @@ function wire() {
   const followBlock = () => {
     if (!app.draft.follow_market && !app.draft.excel) return false;
     showBanner(app.draft.excel ? "This pair is marked in Excel: the marks come from its export file. Untick Marked in Excel in Setup to mark here."
-      : "This pair follows FMD: ATM, RR and BF come from the feed. Untick Follow FMD in Setup to mark by hand.", [["OK", () => hideBanner()]]);
+      : `This pair follows ${srcName()}: ATM, RR and BF come from the feed. Untick Follow market in Setup to mark by hand.`, [["OK", () => hideBanner()]]);
     return true;
   };
   $("#sh-mkt").onclick = () => {
@@ -2297,6 +2365,7 @@ function wire() {
     else showBanner("No fresh market quotes in that range.", [["OK", () => hideBanner()]]);
   };
   setInterval(async () => { try { renderFeed(await api("/api/market/status")); } catch {} }, 10000);
+  setInterval(loadBbg, 15000);       // who runs Bloomberg, and its daily stop
   $("#publish").onclick = publish;
   $("#discard").onclick = () => reloadView();
   $("#load-fa").onclick = loadExportFile;
@@ -2365,7 +2434,7 @@ function wire() {
   $("#su-save").onclick = saveSettings;
 
   // setup
-  ["#su-mode", "#su-b1", "#su-b2", "#su-key", "#su-group", "#su-spref", "#su-cut", "#su-dc", "#su-atm", "#su-inverse", "#su-follow", "#su-excel", "#su-follow-parent", "#su-follow-bases", "#su-alerts-off", "#su-alerts-smile"].forEach((id) => $(id).addEventListener("change", onSetupChange));
+  ["#su-mode", "#su-b1", "#su-b2", "#su-key", "#su-group", "#su-spref", "#su-cut", "#su-dc", "#su-atm", "#su-src", "#su-inverse", "#su-follow", "#su-excel", "#su-follow-parent", "#su-follow-bases", "#su-alerts-off", "#su-alerts-smile"].forEach((id) => $(id).addEventListener("change", onSetupChange));
   $("#su-tol").addEventListener("change", (e) => {
     const m = e.target.dataset.m; if (!m) return;
     const txt = e.target.value.trim(), v = Number(txt);
@@ -2385,6 +2454,7 @@ function wire() {
   });
 
   $("#fenics-btn").onclick = openFenics;
+  $("#bbg-btn").onclick = clickBbg;
   $("#fx-int").addEventListener("change", setFenicsInterval);
   $("#fx-int").addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
   let fxUnit = 60;
@@ -2472,6 +2542,7 @@ async function init() {
   try { app.prefs = await api("/api/prefs"); } catch { app.prefs = {}; }
   wire();
   loadFenics();
+  loadBbg();
   await loadPairs();
   loadAlerts();
   connect();

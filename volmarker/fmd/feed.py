@@ -163,7 +163,7 @@ class Feed:
 
         threading.Thread(target=flusher, daemon=True).start()
         if self.follow:
-            # market mode: this process is the one that publishes FMD levels for "Follow FMD" pairs
+            # market mode: publishes the levels of "Follow market" pairs (unless the Bloomberg feed's follower already does)
             from ..follow import Follower
             from ..service import Service
             fsvc = Service(self.store, "FMD")

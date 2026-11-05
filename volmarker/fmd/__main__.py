@@ -31,7 +31,7 @@ def main() -> None:
                     help="feed: connect to a simulator instead of FMD (no TLS)")
     ap.add_argument("--force", action="store_true", help="feed: start even if another feed looks alive")
     ap.add_argument("--no-follow", action="store_true",
-                    help="feed: do not publish FMD levels for pairs set to Follow FMD")
+                    help="feed: do not publish market levels for pairs set to Follow market")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,

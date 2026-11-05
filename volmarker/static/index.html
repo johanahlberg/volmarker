@@ -14,6 +14,7 @@
   <button id="alerts-btn" class="alerts-btn" title="Market alerts">⚠ 0</button>
   <button id="fenics-btn" class="ghost" title="Log in to Fenics to fetch the FMD 1.0 vols (XML poster)">Fenics login</button>
   <span class="fx-every">every <input id="fx-int" type="number" min="1" step="any" class="num"><select id="fx-unit"><option value="1">s</option><option value="60">min</option></select></span>
+  <button id="bbg-btn" class="ghost" title="Start the Bloomberg feed for the desk">Bloomberg</button>
   <span id="fmd" class="conn off" title="Fenics Market Data feed">FMD off</span>
   <span id="conn" class="conn" title="Live connection to the shared folder">● live</span>
   <a id="help-btn" class="ghost btn" href="/guide/" target="_blank" rel="noopener" title="User guide (opens in a new tab)">Help</a>
@@ -217,7 +218,7 @@
           </div>
           <label class="su-derived">Base 1 <select id="su-b1"></select></label>
           <label class="su-derived">Base 2 <select id="su-b2"></select></label>
-          <label class="check su-indent su-derived"><input id="su-follow-bases" type="checkbox"><span><b>Move with bases</b>: keep the correlation per tenor; every publish of a base moves this pair's ATMs (typing an ATM recalibrates that tenor's correlation). Untick to keep the ATMs where they are; the correlation then follows the bases. With Follow FMD or Marked in Excel the ATMs come from there and the correlation always follows</span></label>
+          <label class="check su-indent su-derived"><input id="su-follow-bases" type="checkbox"><span><b>Move with bases</b>: keep the correlation per tenor; every publish of a base moves this pair's ATMs (typing an ATM recalibrates that tenor's correlation). Untick to keep the ATMs where they are; the correlation then follows the bases. With Follow market or Marked in Excel the ATMs come from there and the correlation always follows</span></label>
           <label title="Front Arena DC spread file: ATM spread × 0.5 × factor per tenor. Empty or below 0.01: no file (as in the Excel workbook)">DC spread factor <input id="su-dc" class="num" inputmode="decimal" placeholder="none"></label>
           <label>Expiry cut <select id="su-cut" title="Events released after the cut weigh on the next expiry"></select></label>
           <label title="Shows a column next to ATM with this pair's ATM minus the parent's ATM. Type either the ATM or the spread.">Spread parent <select id="su-spref"></select></label>
@@ -231,8 +232,11 @@
           <label>ATM convention (for broker ATM quotes)
             <select id="su-atm"><option value="DNS">DNS (delta-neutral straddle)</option><option value="ATMF">ATMF (at-the-money forward)</option></select>
           </label>
-          <label class="check"><input id="su-inverse" type="checkbox"><span><b>Inverse</b> (Excel's Quotation = Inverse): Fenics and FMD quote this pair's RRs in the inverted pair's terms (e.g. NOKCHF as CHFNOK), so the Fenics file gets the RRs with the sign flipped and FMD RRs are flipped before they are shown, alerted on or followed. Front Arena, ATM and BF are unchanged</span></label>
-          <label class="check"><input id="su-follow" type="checkbox"><span><b>Follow FMD</b> (market mode): the feed publishes FMD mids for ATM, 25D/10D RR and BF to Fenics and Front Arena automatically</span></label>
+          <label>Market source (broker levels, alerts and Follow market)
+            <select id="su-src"><option value="">FMD</option><option value="BBG">Bloomberg (FMD where Bloomberg has no quote)</option></select>
+          </label>
+          <label class="check"><input id="su-inverse" type="checkbox"><span><b>Inverse</b> (Excel's Quotation = Inverse): Fenics and FMD quote this pair's RRs in the inverted pair's terms (e.g. NOKCHF as CHFNOK), so the Fenics file gets the RRs with the sign flipped and FMD and Bloomberg RRs (fetched for the standard pair) are flipped before they are shown, alerted on or followed. Front Arena, ATM and BF are unchanged</span></label>
+          <label class="check"><input id="su-follow" type="checkbox"><span><b>Follow market</b> (market mode): the feed publishes the market source's mids (FMD or Bloomberg) for ATM, 25D/10D RR and BF to Fenics and Front Arena automatically</span></label>
           <label class="check"><input id="su-excel" type="checkbox"><span><b>Marked in Excel</b>: VolMarker reads the marks from the pair's Excel export file (Front Arena volsurface file) whenever Excel writes a newer one, and never writes this pair's files itself</span></label>
           <p class="muted su-follow-note">You keep the spread, skew and event weights. Moves bigger than the jump limit are held for a minute first. If the feed stops, nothing is published and every app raises an alert. Untick to take the surface back.</p>
           <div class="su-tol">

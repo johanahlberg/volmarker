@@ -11,18 +11,24 @@ from datetime import datetime, timezone
 
 MARKS = ["atm", "rr25", "rr10", "bf25", "bf10"]
 MARK_RE = re.compile(r"^(atm|rr\d+|bf\d+)$")       # extra deltas too: rr5, bf1, rr30 ...
-BRAND_ORDER = ["FMD", "FMD1", "BGC", "GFI", "RPM"]   # FMD = aggregated, FMD1 = FMD 1.0 via the Fenics XML poster
+BRAND_ORDER = ["FMD", "FMD1", "BGC", "GFI", "RPM", "BBG"]   # FMD = aggregated, FMD1 = FMD 1.0 via the Fenics XML poster
+BBG = "BBG"                                                  # Bloomberg (volmarker/bbgfeed.py), for pairs that prefer it
 
 
-def _brand_rank(b: str | None) -> int:
+def _brand_rank(b: str | None, prefer: str | None = None) -> int:
+    if prefer and b == prefer:
+        return -1
     return BRAND_ORDER.index(b) if b in BRAND_ORDER else len(BRAND_ORDER)
 
 
-def market_view(quotes: list[dict], atm_type: str = "DNS", brand: str = "auto", inverse: bool = False) -> dict:
-    """brand: 'auto' (FMD aggregate first, then FMD1, BGC, GFI, RPM), 'best'
-    (highest bid / lowest offer across brands) or a specific brand.
+def market_view(quotes: list[dict], atm_type: str = "DNS", brand: str = "auto", inverse: bool = False,
+                prefer: str | None = None) -> dict:
+    """brand: 'auto' (FMD aggregate first, then FMD1, BGC, GFI, RPM; the pair's preferred
+    source, prefer, before all of them), 'best' (highest bid / lowest offer across brands)
+    or a specific brand.
     inverse: FMD quotes the pair's RRs in the inverted pair's terms, as Fenics
-    does; the view turns them into the desk's (sign flipped, bid and offer swapped)."""
+    does (the Bloomberg feed fetches the same standard pair); the view turns them
+    into the desk's (sign flipped, bid and offer swapped)."""
     view: dict[str, dict] = {}
     groups: dict[tuple[str, str], list[dict]] = {}
     for q in quotes:
@@ -54,7 +60,7 @@ def market_view(quotes: list[dict], atm_type: str = "DNS", brand: str = "auto", 
             cands = qs if brand == "auto" else [q for q in qs if q.get("brand") == brand]
             if not cands:
                 continue
-            q = min(cands, key=lambda q: _brand_rank(q.get("brand")))
+            q = min(cands, key=lambda q: _brand_rank(q.get("brand"), prefer))
             pick = {k: q.get(k) for k in ("bid", "offer", "mid", "brand", "ts", "ptype", "cut")}
         if pick.get("mid") is None and pick.get("bid") is not None and pick.get("offer") is not None:
             pick["mid"] = (pick["bid"] + pick["offer"]) / 2

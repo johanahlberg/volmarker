@@ -100,6 +100,8 @@ def make_handler(svc: Service):
                 return self._json(svc.as_of(m.group(1), before))
             if p == "/api/fenics":
                 return self._json(svc.fenics.status())
+            if p == "/api/bbg":
+                return self._json(svc.bbg.state())
             if p == "/api/alerts":
                 return self._json({"alerts": svc.alerts.list(), "config": svc.store.config()["alerts"]})
             if p == "/api/market/status":
@@ -107,7 +109,8 @@ def make_handler(svc: Service):
             m = re.fullmatch(r"/api/pairs/([A-Z]{6})/market", p)
             if m:
                 q = parse_qs(url.query)
-                return self._json(svc.market_for(m.group(1), q.get("brand", [None])[0]))
+                return self._json(svc.market_for(m.group(1), q.get("brand", [None])[0],
+                                                 source=q.get("source", [None])[0]))
             m = re.fullmatch(r"/api/pairs/([A-Z]{6})/curve", p)
             if m:
                 return self._json(svc.curve(m.group(1)))
@@ -134,6 +137,12 @@ def make_handler(svc: Service):
                     return self._json(svc.fenics.logout())
                 if p == "/api/fenics/interval":
                     return self._json(svc.fenics.set_seconds(body["seconds"]))
+                if p == "/api/bbg/start":
+                    return self._json(svc.bbg.start(body.get("seconds")))
+                if p == "/api/bbg/interval":
+                    return self._json(svc.bbg.set_seconds(body["seconds"]))
+                if p == "/api/bbg/stop":
+                    return self._json(svc.bbg.stop(f"stopped by {svc.user}"))
                 if p == "/api/event-defaults":
                     return self._json(svc.save_event_defaults(body.get("rows") or [], body.get("expected_version")))
                 if p in ("/api/calendar/preview", "/api/calendar/import"):

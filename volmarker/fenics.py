@@ -4,7 +4,7 @@ The trader logs in from the app (Fenics button). User and password are kept
 in memory only, for as long as this VolMarker runs, and are also used to
 send event weights. While logged in, the app runs the same feed as
 `python -m volmarker.fmd feed --transport xml`: it writes market/<PAIR>.json
-and market/_status.json for every app, and publishes Follow FMD pairs.
+and market/_status.json for every app, and publishes Follow market pairs.
 Only one feed may run per data folder, so a second login elsewhere is refused
 while this one is alive.
 """

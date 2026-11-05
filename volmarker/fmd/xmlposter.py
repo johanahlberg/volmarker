@@ -16,7 +16,7 @@ A pair Fenics has no vols for is skipped for an hour instead of asked again
 every round.
 
 Each row becomes the same entry format as the FIX and WebAPI feeds, so the
-QuoteBook, the market view, alerts and Follow FMD work unchanged. There is
+QuoteBook, the market view, alerts and Follow market work unchanged. There is
 no streaming: the whole surface is fetched again every poll interval.
 """
 
