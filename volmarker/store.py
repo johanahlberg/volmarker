@@ -112,7 +112,7 @@ DEFAULT_CONFIG = {
         },
     },
     # Bloomberg (volmarker/bbgfeed.py): started from the app's Bloomberg button on a PC with a
-    # Terminal and the blp package; fetches only the pairs whose Setup prefers Bloomberg and
+    # Terminal and the blpapi package; fetches only the pairs whose Setup prefers Bloomberg and
     # writes them to market/bbg/ for every app. A run stops itself at the next stop_at time
     # (calendar_tz) to keep within the Terminal's download limits; anyone can start it again.
     "bbg": {

@@ -101,7 +101,7 @@ The WebAPI uses the bank's HTTPS proxy from `HTTPS_PROXY`. A proxy that inspects
 
 ## Bloomberg
 
-Pairs whose **Market source** in Setup is Bloomberg get their market levels from Bloomberg. One VolMarker fetches them for the desk, like the Fenics login: click **Bloomberg** in the top bar on a PC with a Bloomberg Terminal and the `blp` package (`pip install blp`, which needs Bloomberg's `blpapi`). It writes `market/bbg/<PAIR>.json` and `market/_status_bbg.json`, which every app reads.
+Pairs whose **Market source** in Setup is Bloomberg get their market levels from Bloomberg. One VolMarker fetches them for the desk, like the Fenics login: click **Bloomberg** in the top bar on a PC with a Bloomberg Terminal and Bloomberg's `blpapi` package (`pip install --index-url=https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi`; it connects to the Terminal's Desktop API at localhost:8194). It writes `market/bbg/<PAIR>.json` and `market/_status_bbg.json`, which every app reads.
 
 - Only Bloomberg pairs are fetched, as often as the interval field next to Fenics login (the same as FMD 1.0, e.g. every 5 min), every tenor and delta: `EURUSDV1M BGN Curncy`, `EURUSD25R1M BGN Curncy`, `EURUSD25B1M BGN Curncy` (`bbg.tickers`, `bbg.source`, `bbg.pair_source`). An inverse pair (NOKCHF) is fetched as the standard pair (CHFNOK) and its RRs flipped as FMD's are. FMD keeps fetching Bloomberg pairs too, and the leader records both (`market_record.brands`).
 - The grid and alerts take Bloomberg first and FMD where Bloomberg has no quote. Follow market takes Bloomberg only.

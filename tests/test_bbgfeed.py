@@ -5,7 +5,10 @@ import unittest
 from unittest import mock
 from datetime import datetime, timezone
 
-from volmarker.bbgfeed import BloombergFeed, next_stop, quiet, ticker_map
+import sys
+import types
+
+from volmarker.bbgfeed import BlpClient, BloombergFeed, next_stop, quiet, ticker_map
 from volmarker.conventions import TENORS
 from volmarker.follow import Follower
 from volmarker.service import Service
@@ -63,6 +66,123 @@ def bbg_status(store, connected=True, stopped=None):
     (store.root / "market" / "_status_bbg.json").write_text(json.dumps(
         {"instance": "elsewhere", "user": "anna", "connected": connected, "heartbeat": time.time(),
          "stopped": stopped}))
+
+
+def fake_blpapi(values, start_ok=True, error=None):
+    """A stand-in blpapi module: values = {ticker: {field: float}}; a ticker
+    missing from values comes back with a securityError."""
+    m = types.ModuleType("blpapi")
+
+    class Event:
+        PARTIAL_RESPONSE, RESPONSE, TIMEOUT, SESSION_STATUS = 6, 5, 10, 2
+
+        def __init__(self, kind, msgs=()):
+            self.kind, self.msgs = kind, list(msgs)
+
+        def eventType(self):
+            return self.kind
+
+        def __iter__(self):
+            return iter(self.msgs)
+
+    class El:
+        def __init__(self, v):
+            self.v = v
+
+        def hasElement(self, n):
+            return isinstance(self.v, dict) and n in self.v
+
+        def getElement(self, n):
+            return El(self.v[n])
+
+        def getElementAsString(self, n):
+            return str(self.v[n])
+
+        def getElementAsFloat(self, n):
+            return float(self.v[n])
+
+        def numValues(self):
+            return len(self.v)
+
+        def getValueAsElement(self, i):
+            return El(self.v[i])
+
+        def appendValue(self, x):
+            self.v.append(x)
+
+    class Msg(El):
+        def __init__(self, v, cid):
+            super().__init__(v)
+            self.cid = cid
+
+        def correlationIds(self):
+            return [self.cid]
+
+    class Session:
+        def __init__(self, opts):
+            self.opts, self.queue = opts, []
+
+        def start(self):
+            return start_ok
+
+        def openService(self, name):
+            return True
+
+        def getService(self, name):
+            return types.SimpleNamespace(createRequest=lambda kind: El({"securities": [], "fields": []}))
+
+        def sendRequest(self, req):
+            secs, fields = req.v["securities"], req.v["fields"]
+            if error:
+                body = {"responseError": {"message": error}}
+            else:
+                body = {"securityData": [
+                    {"security": t, "fieldData": {f: v for f, v in values[t].items() if f in fields}}
+                    if t in values else {"security": t, "securityError": {"message": "Unknown"}}
+                    for t in secs]}
+            self.queue = [Event(Event.SESSION_STATUS), Event(Event.RESPONSE, [Msg(body, "cid")])]
+            return "cid"
+
+        def nextEvent(self, ms):
+            return self.queue.pop(0) if self.queue else Event(Event.TIMEOUT)
+
+        def stop(self):
+            pass
+
+    class SessionOptions:
+        def setServerHost(self, h):
+            self.host = h
+
+        def setServerPort(self, p):
+            self.port = p
+
+    m.Event, m.Session, m.SessionOptions = Event, Session, SessionOptions
+    return m
+
+
+class TestBlpClient(unittest.TestCase):
+    def client(self, *a, **k):
+        with mock.patch.dict(sys.modules, {"blpapi": fake_blpapi(*a, **k)}):
+            return BlpClient()
+
+    def test_fetch(self):
+        c = self.client({"EURUSDV1M BGN Curncy": {"PX_BID": 7.9, "PX_ASK": 8.2, "PX_MID": 8.05},
+                         "EURUSD25R1M BGN Curncy": {"PX_BID": -0.5, "PX_ASK": -0.3}})
+        got = c.fetch(["EURUSDV1M BGN Curncy", "EURUSD25R1M BGN Curncy", "BAD Curncy"],
+                      ["PX_BID", "PX_ASK", "PX_MID"])
+        self.assertEqual(got["EURUSDV1M BGN Curncy"], {"PX_BID": 7.9, "PX_ASK": 8.2, "PX_MID": 8.05})
+        self.assertEqual(got["EURUSD25R1M BGN Curncy"], {"PX_BID": -0.5, "PX_ASK": -0.3, "PX_MID": None})
+        self.assertEqual(got["BAD Curncy"], {"PX_BID": None, "PX_ASK": None, "PX_MID": None})
+
+    def test_errors(self):
+        with mock.patch.dict(sys.modules, {"blpapi": None}):
+            with self.assertRaisesRegex(ValueError, "blpapi package is not installed"):
+                BlpClient()
+        with self.assertRaisesRegex(ValueError, "Could not connect"):
+            self.client({}, start_ok=False)
+        c = self.client({}, error="Not authorized")
+        with self.assertRaisesRegex(ValueError, "Not authorized"):
+            c.fetch(["EURUSDV1M BGN Curncy"], ["PX_BID"])
 
 
 class TestTickers(unittest.TestCase):

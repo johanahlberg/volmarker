@@ -408,7 +408,7 @@
 </ul>
 
 <h3 id="bloomberg">Bloomberg</h3>
-<p>Pairs whose <b>Market source</b> in Setup is Bloomberg get their levels from Bloomberg. Like the Fenics login, one VolMarker fetches them for the whole desk: click <b>Bloomberg</b> in the top bar on a PC with a Bloomberg Terminal (and the <code>blp</code> Python package). The button then reads <i>BBG: you</i>; everyone else sees who runs it.</p>
+<p>Pairs whose <b>Market source</b> in Setup is Bloomberg get their levels from Bloomberg. Like the Fenics login, one VolMarker fetches them for the whole desk: click <b>Bloomberg</b> in the top bar on a PC with a Bloomberg Terminal (and Bloomberg's <code>blpapi</code> Python package). The button then reads <i>BBG: you</i>; everyone else sees who runs it.</p>
 <ul>
   <li>Only the Bloomberg pairs are fetched, as often as the <b>every … s / min</b> field next to Fenics login says (the same interval as FMD 1.0; a change applies at once), with their tenors and deltas: e.g. <code>EURUSDV1M BGN Curncy</code> (ATM), <code>EURUSD25R1M</code> and <code>EURUSD25B1M</code>. FMD keeps fetching those pairs too, and both are recorded.</li>
   <li>The grid takes Bloomberg first, and FMD where Bloomberg has no quote; the market choice above the grid shows which brand each quote came from.</li>

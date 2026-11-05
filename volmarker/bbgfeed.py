@@ -1,8 +1,7 @@
 """Bloomberg market data for the pairs whose Setup prefers Bloomberg.
 
 One trader starts it from the app (Bloomberg button, next to Fenics login) on a
-PC with a Bloomberg Terminal and the blp package (pip install blp; it needs
-blpapi). That VolMarker then fetches, as often as the interval field next to
+PC with a Bloomberg Terminal and Bloomberg's blpapi package. That VolMarker then fetches, as often as the interval field next to
 Fenics login says (the same as FMD 1.0, e.g. every 5 min), the ATM,
 RR and BF of every tenor and delta of the pairs set to Bloomberg, and writes
 
@@ -63,30 +62,84 @@ def _num(x) -> float | None:
 
 
 class BlpClient:
-    """Reference data (bdp) through the blp package, on this PC's Terminal."""
+    """Reference data (like BDP in Excel) through Bloomberg's blpapi package,
+    from the Terminal on this PC (the Desktop API at localhost:8194)."""
+
+    HOST, PORT = "localhost", 8194
+    SERVICE = "//blp/refdata"
+    TIMEOUT = 30.0                       # seconds for one request
 
     def __init__(self):
         try:
-            from blp import blp
+            import blpapi
         except ImportError as e:
-            raise ValueError("The blp package is not installed on this PC (pip install blp; it needs "
-                             f"Bloomberg's blpapi): {e}") from None
+            raise ValueError("The blpapi package is not installed on this PC (pip install --index-url="
+                             "https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi): "
+                             f"{e}") from None
+        self.blpapi = blpapi
+        opts = blpapi.SessionOptions()
+        opts.setServerHost(self.HOST)
+        opts.setServerPort(self.PORT)
+        self.session = blpapi.Session(opts)
         try:
-            self.bq = blp.BlpQuery().start()
-        except Exception as e:           # no Terminal, not logged in ...
-            raise ValueError(f"Could not connect to the Bloomberg Terminal on this PC: {e}") from None
+            ok = self.session.start()
+        except Exception as e:
+            ok, why = False, e
+        else:
+            why = "is the Terminal running and logged in?"
+        if not ok:
+            raise ValueError(f"Could not connect to the Bloomberg Terminal on this PC: {why}")
+        if not self.session.openService(self.SERVICE):
+            self.close()
+            raise ValueError(f"Could not open {self.SERVICE} on the Bloomberg Terminal")
+        self.service = self.session.getService(self.SERVICE)
 
     def fetch(self, tickers: list[str], fields: list[str]) -> dict[str, dict[str, float | None]]:
-        df = self.bq.bdp(tickers, fields)
-        return {r.get("security"): {f: _num(r.get(f)) for f in fields} for r in df.to_dict("records")}
+        blpapi = self.blpapi
+        req = self.service.createRequest("ReferenceDataRequest")
+        for t in tickers:
+            req.getElement("securities").appendValue(t)
+        for f in fields:
+            req.getElement("fields").appendValue(f)
+        cid = self.session.sendRequest(req)
+        out: dict[str, dict[str, float | None]] = {}
+        deadline = time.monotonic() + self.TIMEOUT
+        while True:
+            if time.monotonic() > deadline:
+                raise ValueError("Bloomberg did not answer within "
+                                 f"{self.TIMEOUT:.0f} s")
+            ev = self.session.nextEvent(500)
+            kind = ev.eventType()
+            if kind not in (blpapi.Event.PARTIAL_RESPONSE, blpapi.Event.RESPONSE):
+                continue
+            for msg in ev:
+                if cid not in msg.correlationIds():
+                    continue
+                if msg.hasElement("responseError"):
+                    err = msg.getElement("responseError")
+                    raise ValueError(f"Bloomberg request failed: {err.getElementAsString('message')}")
+                data = msg.getElement("securityData")
+                for i in range(data.numValues()):
+                    sec = data.getValueAsElement(i)
+                    name = sec.getElementAsString("security")
+                    vals: dict[str, float | None] = {f: None for f in fields}
+                    if not sec.hasElement("securityError") and sec.hasElement("fieldData"):
+                        fd = sec.getElement("fieldData")
+                        for f in fields:
+                            if fd.hasElement(f):
+                                try:
+                                    vals[f] = _num(fd.getElementAsFloat(f))
+                                except Exception:
+                                    vals[f] = None
+                    out[name] = vals
+            if kind == blpapi.Event.RESPONSE:
+                return out
 
     def close(self) -> None:
-        stop = getattr(self.bq, "stop", None)
-        if stop:
-            try:
-                stop()
-            except Exception:
-                pass
+        try:
+            self.session.stop()
+        except Exception:
+            pass
 
 
 def ticker_map(rec: dict, cfg: dict) -> dict[str, tuple[str, str, str]]:
