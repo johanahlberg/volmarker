@@ -52,6 +52,39 @@ class TestLocks(unittest.TestCase):
                 with st.lock("EURUSD"):
                     pass
 
+    def test_access_denied_while_a_lock_is_being_deleted(self):
+        """Windows: creating a lock file that is being deleted gives PermissionError."""
+        with tempfile.TemporaryDirectory() as tmp:
+            st = Store(tmp)
+            real, calls = os.open, []
+
+            def flaky(path, flags, *a):
+                if str(path).endswith("EURUSD.lock") and len(calls) < 3:
+                    calls.append(1)
+                    raise PermissionError(13, "Access is denied", str(path))
+                return real(path, flags, *a)
+            with mock.patch("volmarker.store.os.open", flaky):
+                with st.lock("EURUSD"):
+                    pass
+            self.assertEqual(len(calls), 3)
+            self.assertFalse((st.root / "locks" / "EURUSD.lock").exists())
+
+    def test_release_retries_a_refused_delete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            st = Store(tmp)
+            p = st.root / "locks" / "EURUSD.lock"
+            real, calls = type(p).unlink, []
+
+            def flaky(self, *a, **k):
+                if self.name == "EURUSD.lock" and len(calls) < 2:
+                    calls.append(1)
+                    raise PermissionError(13, "Access is denied", str(self))
+                return real(self, *a, **k)
+            with mock.patch.object(type(p), "unlink", flaky):
+                with st.lock("EURUSD"):
+                    pass
+            self.assertFalse(p.exists())
+
     def test_release_leaves_a_lock_someone_else_took_over(self):
         with tempfile.TemporaryDirectory() as tmp:
             st = Store(tmp)

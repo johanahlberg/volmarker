@@ -196,7 +196,7 @@ class Store:
         self.config_error: str | None = None     # why config.json was not (fully) used, shown in the app
         for sub in ("pairs", "locks", "calendar"):
             (self.root / sub).mkdir(parents=True, exist_ok=True)
-        self._lock_seen: dict[Path, tuple[str, float]] = {}   # lock file -> (content, first seen)
+        self._lock_seen: dict[Path, tuple[tuple, float]] = {}   # lock file -> (identity, first seen)
         self.journal_path = self.root / "journal.jsonl"
         self.journal_path.touch(exist_ok=True)
         cfg_path = self.root / "config.json"
@@ -244,33 +244,35 @@ class Store:
     # ---- locking ------------------------------------------------------
     @contextmanager
     def lock(self, name: str, owner: str = ""):
+        # Windows: a lock file someone is deleting, or has open for a moment, gives
+        # "Access is denied" (PermissionError) instead of "exists": the lock is busy,
+        # so wait and try again. Lock files are never opened for reading once written
+        # (only stat), so a reader can't stop the holder from deleting its lock.
         path = self.root / "locks" / f"{name}.lock"
-        mine = f"{owner}@{socket.gethostname()} {time.time()} {uuid.uuid4().hex}"
         deadline = time.monotonic() + LOCK_TIMEOUT
         while True:
             try:
                 fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 with os.fdopen(fd, "w") as f:
-                    f.write(mine)
+                    f.write(f"{owner}@{socket.gethostname()} {time.time()} {uuid.uuid4().hex}")
+                mine = _sig(path)
                 break
             except FileExistsError:
                 if self._lock_stale(path):
-                    try:
-                        path.unlink()
-                    except FileNotFoundError:
-                        pass
+                    _unlink(path)
                     continue
-                if time.monotonic() > deadline:
-                    raise LockTimeout(f"Could not lock {name}")
-                time.sleep(0.05)
+            except PermissionError:
+                pass
+            if time.monotonic() > deadline:
+                raise LockTimeout(f"Could not lock {name}")
+            time.sleep(0.05)
         try:
             yield
         finally:
-            try:                         # only our own: a lock taken over as stale is someone else's now
-                if path.read_text() == mine:
-                    path.unlink()
-            except OSError:
-                pass
+            # only our own: a lock taken over as stale is someone else's now
+            if mine is None or _sig(path) == mine:
+                if not _unlink(path):
+                    log.warning("could not remove lock %s; others wait until it counts as abandoned", path.name)
 
     def clock_offset(self, max_age: float = 300.0) -> float | None:
         """Seconds this PC's clock is behind the file server's (negative: ahead), from
@@ -299,10 +301,10 @@ class Store:
         """Abandoned (its holder crashed): unchanged for LOCK_STALE seconds by this
         PC's own clock, or very old by the share's. Not judged from the file time
         alone, which comes from the file server's clock, not this PC's."""
-        try:
-            content, mtime = path.read_text(), path.stat().st_mtime
-        except OSError:
+        content = _sig(path)             # stat only: never hold the file open
+        if content is None:
             return False                 # gone, or being written: try again
+        mtime = content[1] / 1e9
         if time.time() - mtime > LOCK_STALE_MTIME:
             return True
         now = time.monotonic()
@@ -587,6 +589,30 @@ def _merge(base: dict, over: dict) -> None:
             _merge(base[k], v)
         else:
             base[k] = v
+
+
+def _sig(path: Path) -> tuple | None:
+    """A lock file's identity without opening it: (size, mtime_ns, file id)."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime_ns, st.st_ino)
+
+
+def _unlink(path: Path, tries: int = 40) -> bool:
+    """Delete, retrying while Windows refuses (someone has the file open for a moment)."""
+    for _ in range(tries):
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+        except PermissionError:
+            time.sleep(0.05)
+        except OSError:
+            return False
+    return False
 
 
 def _append_line(path: Path, line: str) -> None:
