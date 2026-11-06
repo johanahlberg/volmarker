@@ -392,7 +392,7 @@
   <li><b>Ack</b> mutes an alert for you until it clears or the gap grows by another full tolerance. <b>Ack AUDCHF</b> and <b>Ack all</b> do several at once.</li>
   <li>Derived crosses are checked against the FMD cross quote too, so a stale correlation shows up.</li>
   <li>Pairs following FMD get "not updating" and "move held" alerts instead.</li>
-  <li>An alert also warns when a pair's export file was changed outside VolMarker (e.g. by Excel).</li>
+  <li>An alert also warns when a pair's export file was changed outside VolMarker (e.g. by Excel). A file that holds exactly what VolMarker wrote for the pair's latest version doesn't count, even if it was written late.</li>
 </ul>
 
 <!-- ------------------------------------------------------------------ -->
@@ -456,13 +456,13 @@
   <tr><td><code>&lt;PAIR&gt;spreads.txt</code></td><td>The DC spread file, for pairs with a DC spread factor.</td></tr>
   <tr><td><code>&lt;PAIR&gt;_date_time.csv</code></td><td>A copy of the Fenics file for every manual publish, as the Excel macro made.</td></tr>
 </table>
-<p>Files are written under a temporary name and then renamed, so Fenics and Front Arena never read a half-written file.</p>
+<p>Files are written under a temporary name and then renamed, so Fenics and Front Arena never read a half-written file. If a file is blocked because another program has it open, the version is still saved and everyone sees it; VolMarker writes the file again every few seconds until it gets through.</p>
 
 <h3>History and archive</h3>
 <p>Every version of every pair is kept. Once a day, whole months older than 90 days move into compressed monthly archive files next to the pair's history. Nothing is deleted: the History and Changes tabs read the archive when they need to.</p>
 
 <h3>Market history</h3>
-<p>Every 5 minutes, the leader app also records the FMD quotes of every pair, so the desk can later study how the market moved around events. Only quotes that changed are stored, so quiet periods cost almost nothing. Recording runs in the background and doesn't slow VolMarker down.</p>
+<p>Every 5 minutes, the leader app also records the market quotes of every pair (FMD, and Bloomberg while it runs), so the desk can later study how the market moved around events. Only quotes that changed are stored, so quiet periods cost almost nothing. Recording runs in the background and doesn't slow VolMarker down.</p>
 
 <h3>Analysing the history</h3>
 <p>The <code>analysis</code> folder in the data folder holds the desk's vol history as tables you can open in Excel or load into Python or R, one file per month:</p>
@@ -478,6 +478,7 @@
 
 <h3>The leader</h3>
 <p>One running VolMarker at a time does the desk's shared housekeeping: the daily archive, recording the market, adding the previous day to the analysis tables, then removing past events from the pairs (they stay in the history), expiring skews, removing extra tenors on their end date, reading Excel's files for pairs marked in Excel, and the alert log. It is normally the first one started in the morning. If it closes, another running app takes over within about 45 seconds. Nobody has to do anything about it.</p>
+<p>All of this works on the shared drive from many PCs at once, and doesn't depend on their clocks agreeing: whether a feed or the leader is still running is judged by whether its heartbeat keeps moving. If a PC's clock is more than 5 seconds off the file server's, VolMarker says so in the header (see Troubleshooting).</p>
 
 <!-- ------------------------------------------------------------------ -->
 <h2 id="trouble">18. Troubleshooting</h2>
@@ -532,7 +533,7 @@
   <tr><td><code>fmd_brand</code></td><td><code>auto</code></td><td>Default market source: <code>auto</code> (FMD first), <code>best</code> (best of brands) or one brand.</td></tr>
   <tr><td><code>fmd_daily_basis</code></td><td><code>calendar</code></td><td>Dailies: "ND" = today + N calendar days, rolled off the weekend (holidays are expiries too).</td></tr>
   <tr><td><code>calendar_tz</code></td><td><code>Europe/Zurich</code></td><td>Time zone of the Bloomberg terminal the calendar is exported from.</td></tr>
-  <tr><td><code>market_record.interval_min</code></td><td>5</td><td>How often the leader app records the FMD quotes for analysis. 0 switches recording off.</td></tr>
+  <tr><td><code>market_record.interval_min</code></td><td>5</td><td>How often the leader app records the market quotes for analysis. 0 switches recording off.</td></tr>
   <tr><td><code>market_record.brands</code></td><td><code>["FMD", "FMD1", "BBG"]</code></td><td>Which brands to record. Empty: all.</td></tr>
   <tr><td><code>market_record.dir</code></td><td><code>market_history</code></td><td>Where the recordings go, one compressed file per month.</td></tr>
   <tr><td><code>analysis_dir</code></td><td><code>analysis</code></td><td>Where the tables for analysis go. Each morning the leader adds the previous day. Empty (<code>""</code>): off. To fill in the past once, including the dated copies from the Excel years, run <code>python scripts/export_history.py --data …\vol_data</code>; see the README.</td></tr>
