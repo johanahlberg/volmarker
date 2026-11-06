@@ -179,7 +179,9 @@ class Service:
         return bool(self.market_status.get("connected")) and self._beat("fmd", self.market_status)
 
     def bbg_alive(self) -> bool:
-        return bool(self.bbg_status.get("connected")) and self._beat("bbg", self.bbg_status)
+        # live False: running, but the last round got nothing from the Terminal
+        return bool(self.bbg_status.get("connected")) and self.bbg_status.get("live") is not False and \
+            self._beat("bbg", self.bbg_status)
 
     @staticmethod
     def source_of(rec: dict | None) -> str:

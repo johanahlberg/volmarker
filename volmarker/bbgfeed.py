@@ -214,6 +214,8 @@ class BloombergFeed:
         self.instance: str | None = None
         self.status: dict = {}
         self._last: dict[str, list] = {}        # pair -> quotes last written (values only)
+        self._live: bool | None = None          # did the last round get data (None: no round yet)
+        self._no_data: set[str] = set()         # pairs Bloomberg had nothing for (said once)
         self.live = Liveness()
 
     # ---- control ------------------------------------------------------
@@ -276,15 +278,18 @@ class BloombergFeed:
             self.status = {"instance": self.instance, "user": self.user, "host": socket.gethostname(),
                            "connected": True, "since": now_iso(t), "started": now_iso(t), "last_msg": None,
                            "last_error": None, "pairs": 0, "tickers": 0, "seconds": seconds,
-                           "stop_due": now_iso(due) if due else None, "stopped": None}
+                           "stop_due": now_iso(due) if due else None, "stopped": None, "live": None}
             self.stop_due = due
+            self._live, self._no_data = None, set()
             self.stop_ev = stop = threading.Event()
             self._write_status()
         threading.Thread(target=self._heartbeat, args=(stop,), name="bbg-status", daemon=True).start()
         threading.Thread(target=self._loop, args=(stop,), name="bbg-feed", daemon=True).start()
         if follow:
             self._start_follower(stop)
-        log.info("Bloomberg: started by %s", self.user)
+        at = to_local(datetime.fromtimestamp(due, timezone.utc), self.tz()).strftime("%H:%M") if due else None
+        log.info("Bloomberg: started by %s, fetching every %g s%s", self.user, seconds,
+                 f", stops at {at}" if at else "")
         return self.state()
 
     def stop(self, reason: str = "stopped") -> dict:
@@ -296,7 +301,8 @@ class BloombergFeed:
                 if self.client is not None:
                     self.client.close()
                 self.client = None
-                log.info("Bloomberg: %s", reason)
+                n = self.status.get("pairs") or 0
+                log.info("Bloomberg: %s%s", reason, f" ({n} pairs no longer updated)" if n else "")
         return self.state()
 
     def state(self) -> dict:
@@ -404,9 +410,31 @@ class BloombergFeed:
             if f.stem not in maps:
                 f.unlink(missing_ok=True)
                 self._last.pop(f.stem, None)
+        with_data = {p for p in maps if self._last.get(p)}
+        live = bool(with_data) or not tickers
+        self._report(maps, tickers, with_data, errors, live)
         with self.lock:
-            self.status.update(pairs=len(maps), tickers=len(tickers),
+            self.status.update(pairs=len(maps), tickers=len(tickers), live=live,
                                last_error=errors[0] if errors else None)
             if got or not tickers:
                 self.status["last_msg"] = ts
         return changed
+
+    def _report(self, maps: dict, tickers: list, with_data: set, errors: list, live: bool) -> None:
+        """The command window, as for FMD: each round, and when the feed goes live or is interrupted."""
+        for e in errors[:3]:
+            log.warning("Bloomberg request failed: %s", e)
+        if live and self._live is not True:
+            log.info("Bloomberg %s: %d pairs", "live" if self._live is None else "live again", len(with_data))
+        elif not live and self._live is not False:
+            log.warning("Bloomberg %s: %s (%d pairs not updated)", "interrupted" if self._live else "has no data yet",
+                        errors[0] if errors else "no data for any ticker", len(maps))
+        self._live = live
+        if not live:
+            return
+        log.info("Bloomberg poll: %d pairs (%d tickers)%s", len(with_data), len(tickers),
+                 f", {len(errors)} requests failed" if errors else "")
+        missing = set(maps) - with_data       # pairs with tickers but nothing back (e.g. a wrong ticker)
+        for p in sorted(missing - self._no_data):
+            log.info("Bloomberg has no data for %s (e.g. %s)", p, next(iter(maps[p]), "-"))
+        self._no_data = missing

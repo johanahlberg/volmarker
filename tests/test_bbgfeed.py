@@ -233,6 +233,53 @@ class TestFeed(unittest.TestCase):
             self.assertEqual(fake.asked, [])
             self.assertFalse((store.root / "market" / "bbg" / "USDPLN.json").exists())
 
+    def test_command_window_live_interrupted_live_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, trader = setup(tmp)
+            fake = FakeBlp()
+            feed = BloombergFeed(store, "trader", trader._recs)
+            feed.client = fake
+            with self.assertLogs("volmarker.bbg", "INFO") as logs:
+                feed.round()
+            self.assertTrue(any("Bloomberg live: 1 pairs" in l for l in logs.output))
+            self.assertTrue(any("Bloomberg poll: 1 pairs" in l for l in logs.output))
+            self.assertTrue(feed.status["live"])
+
+            def down(tickers, fields):
+                raise ValueError("Terminal not logged in")
+            fake.fetch = down
+            with self.assertLogs("volmarker.bbg", "INFO") as logs:
+                feed.round()
+                feed.round()                                  # said once, not every round
+            self.assertEqual(sum("interrupted" in l for l in logs.output), 1)
+            self.assertIn("Terminal not logged in", logs.output[1])
+            self.assertIs(feed.status["live"], False)
+            feed.status.update(connected=True, heartbeat=time.time())
+            feed._write_status()
+            trader.poll_market()
+            self.assertFalse(trader.bbg_alive())              # the apps show Bloomberg down
+            del fake.fetch
+            with self.assertLogs("volmarker.bbg", "INFO") as logs:
+                feed.round()
+            self.assertTrue(any("Bloomberg live again: 1 pairs" in l for l in logs.output))
+
+    def test_pair_without_data_said_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, trader = setup(tmp)
+            trader.create_pair("EURPLN", "marked", None, True)
+            rec = store.latest("EURPLN")
+            rec["market_source"] = "BBG"
+            trader.save_settings("EURPLN", rec, rec["version"])
+            fake = FakeBlp()
+            real = fake.fetch
+            fake.fetch = lambda t, f: {k: v for k, v in real(t, f).items() if not k.startswith("EURPLN")}
+            feed = BloombergFeed(store, "trader", trader._recs)
+            feed.client = fake
+            with self.assertLogs("volmarker.bbg", "INFO") as logs:
+                feed.round()
+                feed.round()
+            self.assertEqual(sum("no data for EURPLN" in l for l in logs.output), 1)
+
     def test_start_refused_while_another_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
             store, trader = setup(tmp)

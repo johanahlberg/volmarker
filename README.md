@@ -106,6 +106,7 @@ Pairs whose **Market source** in Setup is Bloomberg get their market levels from
 - Only Bloomberg pairs are fetched, as often as the interval field next to Fenics login (the same as FMD 1.0, e.g. every 5 min), every tenor and delta: `EURUSDV1M BGN Curncy`, `EURUSD25R1M BGN Curncy`, `EURUSD25B1M BGN Curncy` (`bbg.tickers`, `bbg.source`, `bbg.pair_source`). An inverse pair (NOKCHF) is fetched as the standard pair (CHFNOK) and its RRs flipped as FMD's are. FMD keeps fetching Bloomberg pairs too, and the leader records both (`market_record.brands`).
 - The grid and alerts take Bloomberg first and FMD where Bloomberg has no quote. Follow market takes Bloomberg only.
 - For the Terminal's download limits a run stops itself at the next of `bbg.stop_at` (18:00 and midnight, `calendar_tz`). Anyone can start it again at once (staying late: it then runs until midnight); the first one in next morning starts it for the day. Closing that VolMarker stops it too.
+- **Command window** (on the PC running it), as for FMD: `Bloomberg: started by …, fetching every 300 s, stops at 18:00`, then `Bloomberg live: N pairs` and `Bloomberg poll: N pairs (M tickers)` every round. If the Terminal stops answering: `Bloomberg interrupted: <why> (N pairs not updated)`, once, and `Bloomberg live again: N pairs` when data comes back. A pair Bloomberg has nothing for (e.g. a wrong ticker) is named once. While no ticker gets data, every app shows Bloomberg as down, and Bloomberg pairs fall back to FMD as when it is stopped.
 
 ## Market mode (Follow market)
 
