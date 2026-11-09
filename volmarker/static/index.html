@@ -244,6 +244,11 @@
             <div id="su-tol" class="factors"></div>
             <label class="check"><input id="su-alerts-off" type="checkbox"> Mute market alerts for this pair</label>
             <label class="check"><input id="su-alerts-smile" type="checkbox"> Mute RR and BF alerts only (keep the ATM alerts)</label>
+            <div class="su-mine">
+              <div class="lbl">Just for me <span class="muted">(saved at once, not with Save; other traders are not affected)</span></div>
+              <label class="check"><input id="su-my-mute" type="checkbox"> Mute this pair's market alerts for me</label>
+              <div class="ma-range"><span>My alert tenors</span><label>from <select id="su-my-from"></select></label><label>to <select id="su-my-to"></select></label></div>
+            </div>
           </div>
           <p class="muted">Click <b>Save</b> to apply the settings. Marks you are editing stay in the draft and are not published by Save.
           A tenor added here starts from the curve (the ATM its expiry already has) and a delta from 25D × the starting factor; mark them on the Surface tab after saving.<br>
@@ -278,9 +283,10 @@
     <button id="al-ackall" class="ghost" title="Acknowledge all: muted until they clear or get worse by another tolerance">Ack all</button>
     <button id="al-close" class="ghost" title="Close">✕</button></div>
   <label class="check"><input id="al-notify" type="checkbox"> Desktop notifications</label>
+  <div class="al-mine"><span id="al-mine" class="muted small"></span><div class="spacer"></div><button id="al-mine-btn" class="ghost" title="Your own alert settings: on/off, tenor range, tolerances">My alerts…</button></div>
   <div id="al-list"></div>
   <p class="muted small">Published mids vs FMD, per mark: alert when the gap stays above the tolerance for a while, cleared below 80 % of it.
-    Defaults in <code>config.json</code> → <code>alerts</code>; per pair in Setup.</p>
+    Defaults in <code>config.json</code> → <code>alerts</code>; per pair in Setup; your own in <b>My alerts</b>.</p>
 </aside>
 
 <datalist id="group-list"></datalist>
@@ -292,6 +298,21 @@
   <label>Font <select id="ds-font"><option value="">Standard</option><option value="atkinson">Atkinson Hyperlegible</option><option value="verdana">Verdana / Consolas</option><option value="tahoma">Tahoma / Consolas</option></select></label>
   <label>Stronger contrast <input id="ds-contrast" type="checkbox"></label>
   <form method="dialog"><div class="actions"><button class="primary">Close</button></div></form>
+</dialog>
+<dialog id="dlg-myalerts">
+  <form method="dialog">
+    <h2>My market alerts <span class="muted small">only you, on any PC</span></h2>
+    <label class="check"><input id="ma-on" type="checkbox"> Market alerts on</label>
+    <div class="lbl">Tenors alerted on, every pair</div>
+    <div class="ma-range"><label>from <select id="ma-from"></select></label><label>to <select id="ma-to"></select></label></div>
+    <div class="lbl">My tolerances (vol pts; empty = desk default)</div>
+    <div id="ma-tol" class="factors"></div>
+    <div class="lbl">Pairs set differently (in their Setup tab)</div>
+    <div id="ma-pairs"></div>
+    <p class="muted small ma-note">A pair's own tolerance in Setup is the desk's and wins over yours. Excel-file and Follow market
+      alerts are always on. The desk's alert log keeps the desk's settings.</p>
+    <div class="actions"><button class="primary">Close</button></div>
+  </form>
 </dialog>
 <dialog id="dlg-new">
   <form method="dialog" id="form-new">

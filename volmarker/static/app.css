@@ -302,6 +302,18 @@ p.small, div.small { font-size: 12px; margin: 6px 0 0; }
 .al-row .when { margin-left: auto; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .al-row button { padding: 0 6px; font-size: 11px; }
 .su-tol .factors { margin: 4px 0; }
+.su-mine { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 4px; }
+.ma-range { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-size: 12px; }
+.ma-range label { display: flex; gap: 6px; align-items: center; justify-content: flex-start; }
+.al-mine { display: flex; align-items: center; gap: 6px; }
+dialog label.check { justify-content: flex-start; }
+#dlg-myalerts { max-width: 460px; }
+#dlg-myalerts .factors label { flex-direction: column; align-items: flex-start; gap: 3px; }
+#ma-pairs { display: flex; flex-direction: column; gap: 2px; max-height: 180px; overflow-y: auto; font-size: 12px; }
+.ma-pair { display: flex; gap: 8px; align-items: center; }
+.ma-pair a { width: 5em; font-weight: 600; }
+.ma-pair button { margin-left: auto; padding: 0 6px; font-size: 11px; }
+.ma-note { margin: 0; }
 .su-tol .factors label { flex-direction: column; align-items: flex-start; gap: 3px; }
 .followbar { padding: 6px 10px; border-radius: 6px; background: var(--surface-2); border-left: 3px solid var(--s5); margin-bottom: 8px; font-size: 12px; }
 .followbar.down { border-left-color: var(--critical); }

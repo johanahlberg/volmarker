@@ -280,6 +280,53 @@ class TestAlerts(unittest.TestCase):
             trader.evaluate_alerts(NOW + 100)
             self.assertEqual(trader.alerts.list(), [])
 
+    def _breach(self, store, trader, prefs, atm=7.4):
+        trader.save_prefs(prefs)
+        write_market(store, "EURUSD", atm)
+        trader.poll_market(notify=False)
+        trader.evaluate_alerts(NOW)
+        trader.evaluate_alerts(NOW + 30)
+        return {a["tenor"] for a in trader.alerts.list() if a["kind"] == "market" and a["mark"] == "atm"}
+
+    def test_user_tenor_range(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, trader, _ = setup(tmp, follow=False)
+            every = self._breach(store, trader, {})
+            self.assertEqual(every, set(TENORS) - {"ON"})        # ON: 0.25 x 2 > 0.4
+            got = self._breach(store, trader, {"alerts": {"range": {"from": "1M", "to": "1Y"}}})
+            self.assertEqual(got, {"1M", "2M", "3M", "6M", "9M", "1Y"})
+            # a pair's own range replaces the ends it sets: null opens the long end
+            got = self._breach(store, trader, {"alerts": {"range": {"from": "1M", "to": "1Y"},
+                                                          "pair_range": {"EURUSD": {"to": None}}}})
+            self.assertEqual(got, set(TENORS) - {"ON", "1W", "2W"})
+            got = self._breach(store, trader, {"alerts": {"range": {"from": "1W", "to": "1Y"},
+                                                          "pair_range": {"EURUSD": {"from": "6M"}}}})
+            self.assertEqual(got, {"6M", "9M", "1Y"})
+            got = self._breach(store, trader, {"alerts": {"range": {"from": "bad", "to": "3M"}}})
+            self.assertEqual(got, {"1W", "2W", "1M", "2M", "3M"})   # a bad end is open
+
+    def test_user_off_muted_and_tolerance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, trader, _ = setup(tmp, follow=False)
+            self.assertEqual(self._breach(store, trader, {"alerts": {"off": True}}), set())
+            self.assertEqual(self._breach(store, trader, {"alerts": {"muted": ["EURUSD"]}}), set())
+            self.assertEqual(self._breach(store, trader, {"alerts": {"tolerance": {"atm": 0.5}}}), set())
+            self.assertEqual(self._breach(store, trader, {"alerts": {"tolerance": {"atm": 0.3}}}, atm=7.35),
+                             set(TENORS) - {"ON", "1W", "2W"})  # 0.35 > 0.3, not 0.3 x 1.5 or x 1.25
+            st = store.latest("EURUSD")
+            st["alert_tol"] = {"atm": 0.5}                       # the pair's own tolerance wins
+            trader.publish("EURUSD", st, st["version"])
+            self.assertEqual(self._breach(store, trader, {"alerts": {"tolerance": {"atm": 0.1}}}, atm=7.3), set())
+
+    def test_desk_log_ignores_the_leaders_own_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, trader, _ = setup(tmp, follow=False)
+            trader._leader = True
+            self.assertEqual(self._breach(store, trader, {"alerts": {"off": True}}), set())
+            logged = [json.loads(line) for f in (store.root / "alerts").glob("*.jsonl")
+                      for line in f.read_text().splitlines()]
+            self.assertIn("EURUSD|1M|atm", {e["key"] for e in logged if e["event"] == "raised"})
+
     def test_follow_pair_alerts_when_not_updated(self):
         with tempfile.TemporaryDirectory() as tmp:
             store, trader, fol = setup(tmp)

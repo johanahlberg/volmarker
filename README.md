@@ -133,7 +133,8 @@ Every app compares the **published** mids (not the draft, and without skew) of e
 - **Ack:** mutes an alert (per trader) until it clears, or until the gap grows by another full tolerance.
 - **Derived crosses** are checked against the FMD cross quote as well, so a stale correlation shows up as an alert.
 - **Following pairs** don't get deviation alerts. They get "not updating" and "move held" alerts instead.
-- **Log:** one app keeps a log of every raised and cleared alert in `alerts/<date>.jsonl`.
+- **My alerts (per trader):** the alert panel's **My alerts…** narrows *your* market alerts only: switch them off, limit them to a tenor range for every pair (e.g. 1W to 1Y, the auto-quoted range), or set your own default tolerances (a pair's own tolerance in Setup still wins). In a pair's Setup tab, **Just for me** mutes that pair for you or gives it its own tenor range (e.g. 1M to 2Y); an end left at *My default* keeps the general one. These save at once in `users/<you>.json` under `alerts` and follow you to any PC. Follow market and file-changed alerts are not affected.
+- **Log:** one app keeps a log of every raised and cleared alert in `alerts/<date>.jsonl`, on the desk settings whatever the traders' own ones.
 
 ## Shared folder layout
 
@@ -155,7 +156,7 @@ data/
   market/_status_bbg.json     Bloomberg feed state and heartbeat
   market/_follow.json         market-mode follower state per pair
   alerts/<date>.jsonl         alert log (raised / cleared)
-  users/<user>.json           each trader's own sidebar order, folded groups, test dates
+  users/<user>.json           each trader's own sidebar order, folded groups, test dates, My alerts
   calendar/event_defaults.csv relevant events with default weights (+ .log.jsonl)
   calendar/bloomberg/<CCY>.json  last Bloomberg ECO import per currency
   exports/weights/            Fenics message copy, FA_FX and FA_WS event files; weights_sent.jsonl

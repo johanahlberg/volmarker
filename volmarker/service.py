@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import exports
-from .alerts import AlertEngine, deviation, iso, level
+from .alerts import AlertEngine, UserAlerts, deviation, iso, level
 from .analysis import Exporter
 from .tz import to_local
 from .conventions import TENORS, norm_extra_tenor, normalise_pair
@@ -80,7 +80,8 @@ class Service:
         self.bbg_status: dict = {}
         self.follow_status: dict = {}
         self._market_mtimes: dict[str, float] = {}
-        self.alerts = AlertEngine()
+        self.alerts = AlertEngine()                   # this trader's alerts, on their own settings
+        self.desk_alerts = AlertEngine()              # ... and the desk's, for the log the leader keeps
         self.fenics = FenicsLogin(store)          # FMD 1.0 feed while a trader is logged in to Fenics
         self.bbg = BloombergFeed(store, user, self._recs)   # Bloomberg while a trader runs it from this app
         self._leader = False
@@ -766,11 +767,22 @@ class Service:
         return self.store.root / "users" / f"{name}.json"
 
     def prefs(self) -> dict:
+        """Read again only when the file changed: the alerts read it every round."""
+        path = self._prefs_path()
         try:
-            p = json.loads(self._prefs_path().read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            mtime = path.stat().st_mtime
+        except OSError:
             return {}
-        return p if isinstance(p, dict) else {}
+        cached = getattr(self, "_prefs_cache", None)
+        if cached and cached[0] == mtime:
+            return copy.deepcopy(cached[1])
+        try:
+            p = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return copy.deepcopy(cached[1]) if cached else {}   # half-written on the shared drive: keep the last
+        p = p if isinstance(p, dict) else {}
+        self._prefs_cache = (mtime, p)
+        return copy.deepcopy(p)
 
     def save_prefs(self, prefs: dict) -> dict:
         if not isinstance(prefs, dict):
@@ -779,6 +791,7 @@ class Service:
         if len(text) > 200_000:
             raise ValueError("Preferences too large")
         atomic_write(self._prefs_path(), text)
+        self._prefs_cache = None
         return prefs
 
     # ---- write side ---------------------------------------------------
@@ -984,12 +997,17 @@ class Service:
 
     # ---- alerts -------------------------------------------------------
     def evaluate_alerts(self, now: float | None = None) -> None:
+        """Two passes over the same deviations: the trader's own alerts (their prefs narrow
+        them: off, muted pairs, own tolerances, a tenor range) and the desk's, on config.json
+        and the pairs' Setup only, which are what the leader logs."""
         now = time.time() if now is None else now
         cfg = self.store.config()
         acfg = cfg["alerts"]
+        mine = UserAlerts(self.prefs())
         with self._lock:
             recs = list(self.cache.values())
-        cands: dict[tuple, dict] = {}
+        cands: dict[tuple, dict] = {}       # the trader's
+        desk: dict[tuple, dict] = {}
         for rec in recs:
             pair = rec["pair"]
             if rec.get("follow_market"):
@@ -1002,7 +1020,9 @@ class Service:
             res = resolve(rec)
             own = rec.get("alert_tol") or {}
             marks = ["atm"] if rec.get("alerts_smile_off") else all_marks(rec)     # RR and BF muted, ATM kept
+            wanted = mine.wants(pair)
             for t in tenor_list(rec):
+                in_range = wanted and mine.in_range(pair, t)
                 for m in marks:
                     q = view.get(t, {}).get(m)
                     v = res[t]["mid"][m]
@@ -1012,25 +1032,38 @@ class Service:
                     if dev is None:
                         continue
                     tm = tol_mark(m)       # an extra delta: the 10D's tolerance (25D's inside 25D)
-                    tol = (own.get(tm) or acfg["tolerance"][tm]) * acfg.get("tenor_scale", {}).get(t, 1.0)
-                    cands[(pair, t, m)] = {
-                        "level": level(dev, tol, acfg.get("clear_ratio", 0.8)), "kind": "market",
-                        "pair": pair, "tenor": t, "mark": m, "value": v, "mkt": q.get("mid"),
-                        "bid": q.get("bid"), "offer": q.get("offer"), "brand": q.get("brand"),
-                        "dev": round(dev, 4), "tol": round(tol, 4), "source": rec.get("source"),
-                        "msg": f"{pair} {t} {m.upper()}: ours {v:.2f}, {q.get('brand') or 'market'} {q.get('mid'):.2f} "
-                               f"({dev:+.2f}, tol {tol:.2f})"}
+                    scale = acfg.get("tenor_scale", {}).get(t, 1.0)
+                    desk[(pair, t, m)] = self._market_candidate(
+                        pair, t, m, v, q, dev, (own.get(tm) or acfg["tolerance"][tm]) * scale, rec, acfg)
+                    if in_range:
+                        tol = (own.get(tm) or mine.tolerance.get(tm) or acfg["tolerance"][tm]) * scale
+                        cands[(pair, t, m)] = self._market_candidate(pair, t, m, v, q, dev, tol, rec, acfg)
         for pair, mt in self.excel_foreign.items():
             at = datetime.fromtimestamp(mt).strftime("%H:%M")
             cands[(pair, "", "excel")] = {
                 "level": "breach", "kind": "excel", "confirm": 0, "pair": pair, "tenor": "", "mark": "excel",
                 "msg": f"{pair}: its export file was changed outside VolMarker at {at}. If Excel still marks "
                        f"this pair, tick Marked in Excel in Setup, or the two overwrite each other"}
-        new, cleared = self.alerts.update(cands, now, acfg.get("confirm_s", 20))
+        for k, c in cands.items():          # Excel and Follow market alerts are the same for everyone
+            if c["kind"] != "market":
+                desk[k] = c
+        confirm = acfg.get("confirm_s", 20)
+        new, cleared = self.alerts.update(cands, now, confirm)
         if new or cleared:
-            self._log_alerts(new, cleared, now)
             self._notify({"type": "alerts", "new": new, "cleared": [a["key"] for a in cleared],
                           "count": len(self.alerts.active)})
+        d_new, d_cleared = self.desk_alerts.update(desk, now, confirm)   # kept up on every app: a new
+        if d_new or d_cleared:                                           # leader doesn't re-log them
+            self._log_alerts(d_new, d_cleared, now)
+
+    @staticmethod
+    def _market_candidate(pair, t, m, v, q, dev, tol, rec, acfg) -> dict:
+        return {"level": level(dev, tol, acfg.get("clear_ratio", 0.8)), "kind": "market",
+                "pair": pair, "tenor": t, "mark": m, "value": v, "mkt": q.get("mid"),
+                "bid": q.get("bid"), "offer": q.get("offer"), "brand": q.get("brand"),
+                "dev": round(dev, 4), "tol": round(tol, 4), "source": rec.get("source"),
+                "msg": f"{pair} {t} {m.upper()}: ours {v:.2f}, {q.get('brand') or 'market'} {q.get('mid'):.2f} "
+                       f"({dev:+.2f}, tol {tol:.2f})"}
 
     def _follow_candidates(self, rec: dict, cands: dict) -> None:
         """A pair in market mode: alert when it is not being updated, or a big

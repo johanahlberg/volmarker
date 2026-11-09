@@ -1972,6 +1972,7 @@ function renderSetup() {
   $("#su-alerts-smile").checked = !!d.alerts_smile_off;
   $("#su-alerts-smile").disabled = !!d.alerts_off;
   $(".su-tol").hidden = !!d.follow_market;
+  renderMySetup();
   renderExtras();
 }
 function onSetupChange() {
@@ -2230,6 +2231,7 @@ function renderAlerts() {
   document.title = fresh ? `(${fresh}) VolMarker` : "VolMarker";
   const basis = app.alertCfg?.basis === "range" ? "outside FMD bid/offer" : "vs FMD mid";
   $("#al-sub").textContent = list.length ? `${list.length} · ${basis}` : basis;
+  $("#al-mine").textContent = myAlertsSummary();
   const pairs = [...new Set(list.map((a) => a.pair))];
   $("#al-list").innerHTML = pairs.length ? pairs.map((p) => {
     const rows = list.filter((a) => a.pair === p);
@@ -2238,7 +2240,7 @@ function renderAlerts() {
       rows.map((a) => `<div class="al-row ${a.acked ? "acked" : ""} ${a.kind}"><span>${esc(alertText(a))}</span>` +
         `<span class="when" title="since ${esc(localTime(a.since))}">${age((Date.now() - new Date(a.since)) / 60000)}</span>` +
         (a.acked ? "" : `<button class="ghost" data-ack="${esc(a.key)}">Ack</button>`) + `</div>`).join("");
-  }).join("") : `<div class="muted">No alerts. Published surfaces are within tolerance of FMD.</div>`;
+  }).join("") : `<div class="muted">${myAl().off ? "Your market alerts are off (My alerts)." : "No alerts. Published surfaces are within tolerance of FMD."}</div>`;
 }
 function notifyOn() { try { return localStorage.getItem("vm-notify") === "1"; } catch { return false; } }
 function notifyAlerts(list) {
@@ -2277,6 +2279,112 @@ function wireAlerts() {
     try { localStorage.setItem("vm-notify", on ? "1" : "0"); } catch {}
   };
   setInterval(() => { if (!panel.hidden) renderAlerts(); }, 30000);   // refresh the ages
+  wireMyAlerts();
+}
+
+// ---------------------------------------------------------------- my alerts (this trader's, in their prefs)
+// prefs.alerts = {off, muted: [pair], tolerance: {mark: v}, range: {from, to}, pair_range: {pair: {from?, to?}}}
+// range ends: a tenor, or missing/null = no limit. A pair's end that is there replaces the general one
+// (null = no limit for that pair), a missing one keeps it. The server reads the same file (alerts.UserAlerts).
+const myAl = () => (app.prefs.alerts ||= {});
+function tenorOpts(sel, val, def) {
+  sel.innerHTML = (def !== undefined ? `<option value="">My default (${def})</option>` : "") +
+    `<option value="-">No limit</option>` + app.me.tenors.map((t) => `<option>${t}</option>`).join("");
+  sel.value = val;
+}
+function rangeText(from, to) {
+  return !from && !to ? "all tenors" : !from ? `up to ${to}` : !to ? `${from} and longer` : `${from} to ${to}`;
+}
+function myRange(pair) {
+  const a = myAl(), r = { ...(a.range || {}), ...((pair && (a.pair_range || {})[pair]) || {}) };
+  return rangeText(r.from, r.to);
+}
+function myAlertsSummary() {
+  const a = myAl();
+  if (a.off) return "My market alerts: off";
+  const n = (a.muted || []).length, own = Object.keys(a.pair_range || {}).length;
+  return `Mine: ${myRange()}` + (n ? ` · ${n} muted` : "") + (own ? ` · ${own} own range${own > 1 ? "s" : ""}` : "") +
+    (Object.keys(a.tolerance || {}).length ? " · own tolerances" : "");
+}
+function tidyMyAlerts() {
+  const a = myAl();
+  if (!a.off) delete a.off;
+  if (a.muted && !a.muted.length) delete a.muted;
+  for (const k of ["tolerance", "range"]) if (a[k] && !Object.keys(a[k]).length) delete a[k];
+  for (const [p, r] of Object.entries(a.pair_range || {})) if (!Object.keys(r).length) delete a.pair_range[p];
+  if (a.pair_range && !Object.keys(a.pair_range).length) delete a.pair_range;
+  if (!Object.keys(a).length) delete app.prefs.alerts;
+}
+function myAlertsChanged() {
+  tidyMyAlerts(); savePrefs();
+  renderAlerts();
+  if ($("#dlg-myalerts").open) renderMyAlerts();
+  if (app.draft) renderMySetup();
+}
+function renderMyAlerts() {
+  const a = myAl(), def = app.alertCfg?.tolerance || {}, off = !!a.off;
+  $("#ma-on").checked = !off;
+  tenorOpts($("#ma-from"), a.range?.from || "-"); tenorOpts($("#ma-to"), a.range?.to || "-");
+  $("#ma-tol").innerHTML = Object.entries(MARK_LABEL).map(([m, l]) =>
+    `<label>${l}<input class="num" data-m="${m}" value="${a.tolerance?.[m] != null ? fmt(a.tolerance[m], 2) : ""}" placeholder="${fmt(def[m], 2)}"></label>`).join("");
+  for (const el of $("#dlg-myalerts").querySelectorAll("select, #ma-tol input")) el.disabled = off;
+  const muted = a.muted || [], pairs = [...new Set([...muted, ...Object.keys(a.pair_range || {})])].sort();
+  $("#ma-pairs").innerHTML = pairs.length ? pairs.map((p) =>
+    `<div class="ma-pair"><a href="#${p}" data-go="${p}">${p}</a><span>${muted.includes(p) ? "muted" : myRange(p)}</span>` +
+    `<button type="button" class="ghost" data-reset="${p}" title="Back to your settings for every pair">Reset</button></div>`).join("")
+    : `<div class="muted">None</div>`;
+}
+function renderMySetup() {
+  const d = app.draft; if (!d) return;
+  const a = myAl(), p = d.pair, r = (a.pair_range || {})[p] || {}, g = a.range || {};
+  const val = (k) => !(k in r) ? "" : r[k] || "-";
+  const mute = (a.muted || []).includes(p);
+  $("#su-my-mute").checked = mute;
+  tenorOpts($("#su-my-from"), val("from"), g.from || "no limit");
+  tenorOpts($("#su-my-to"), val("to"), g.to || "no limit");
+  const dis = mute || !!a.off || !!d.alerts_off;
+  $("#su-my-from").disabled = $("#su-my-to").disabled = dis;
+  $("#su-my-mute").disabled = !!a.off || !!d.alerts_off;
+  $(".su-mine").title = a.off ? "Your market alerts are off (alerts panel → My alerts)" :
+    d.alerts_off ? "Market alerts are muted for this pair for the whole desk" : "";
+}
+function wireMyAlerts() {
+  const dlg = $("#dlg-myalerts");
+  $("#al-mine-btn").onclick = () => { renderMyAlerts(); dlg.showModal(); };
+  $("#ma-on").onchange = (e) => { myAl().off = !e.target.checked; myAlertsChanged(); };
+  const setEnd = (k, v) => { const r = (myAl().range ||= {}); if (v === "-") delete r[k]; else r[k] = v; myAlertsChanged(); };
+  $("#ma-from").onchange = (e) => setEnd("from", e.target.value);
+  $("#ma-to").onchange = (e) => setEnd("to", e.target.value);
+  $("#ma-tol").addEventListener("change", (e) => {
+    const m = e.target.dataset.m; if (!m) return;
+    const txt = e.target.value.trim(), v = Number(txt), tol = (myAl().tolerance ||= {});
+    if (txt === "" || !(v > 0)) delete tol[m]; else tol[m] = v;
+    myAlertsChanged();
+  });
+  $("#ma-pairs").addEventListener("click", (e) => {
+    const t = e.target.closest("[data-reset], [data-go]"); if (!t) return;
+    e.preventDefault();
+    const a = myAl();
+    if (t.dataset.reset) {
+      const p = t.dataset.reset;
+      a.muted = (a.muted || []).filter((x) => x !== p);
+      if (a.pair_range) delete a.pair_range[p];
+      myAlertsChanged();
+    } else { dlg.close(); selectPair(t.dataset.go); }
+  });
+  // Setup tab: this pair, just for me
+  $("#su-my-mute").onchange = (e) => {
+    const a = myAl(), p = app.draft.pair, m = new Set(a.muted || []);
+    if (e.target.checked) m.add(p); else m.delete(p);
+    a.muted = [...m].sort(); myAlertsChanged();
+  };
+  const setPairEnd = (k, v) => {
+    const a = myAl(), p = app.draft.pair, r = ((a.pair_range ||= {})[p] ||= {});
+    if (v === "") delete r[k]; else r[k] = v === "-" ? null : v;
+    myAlertsChanged();
+  };
+  $("#su-my-from").onchange = (e) => setPairEnd("from", e.target.value);
+  $("#su-my-to").onchange = (e) => setPairEnd("to", e.target.value);
 }
 
 // ---------------------------------------------------------------- wiring
