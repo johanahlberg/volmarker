@@ -33,7 +33,7 @@ from .fmd.book import daily_n
 from .market import BBG, compare, market_view, parse_fix_time
 from .store import ConflictError, LockTimeout, Store, _reverse_lines, atomic_write, write_shared
 from .surface import (all_marks, apply_derivation, apply_parent, check_surface, clean_state, follow_fields,
-                      new_state, now_iso, resolve, skew_active, tenor_list, tol_mark)
+                      in_alert_tenors, new_state, now_iso, resolve, skew_active, tenor_list, tol_mark)
 
 log = logging.getLogger("volmarker")
 
@@ -43,7 +43,7 @@ def _atms(rec: dict) -> dict[str, float | None]:
     return {t: rec["tenors"][t]["atm"] for t in tenor_list(rec) if t in rec["tenors"]}
 
 STATE_KEYS = ["pair", "mode", "bases", "key", "skew_expiry", "weights", "atm_type",
-              "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "inverse", "market_source", "follow_bases",
+              "lock_rr10f", "lock_bf10f", "follow_market", "alert_tol", "alert_tenors", "alerts_off", "alerts_smile_off", "group", "spread_ref", "follow_parent", "cut", "dc_factor", "excel", "rr_put", "inverse", "market_source", "follow_bases",
               "deltas", "extra_tenors", "removed_tenors", "wing_locks", "tenors"]
 LEADER_STALE = 45.0
 LEADER_FIRST_SIGHT_S = 300.0   # a leader heartbeat this old by the clocks is gone at once
@@ -52,7 +52,7 @@ FOLLOW_STALE = 30.0
 MAX_TEST_DATES = 120
 # pair settings saved by the Setup tab's Save (the rest of a version comes from the latest one)
 SETTING_KEYS = ["mode", "bases", "key", "group", "spread_ref", "follow_parent", "follow_bases", "cut", "dc_factor",
-                "atm_type", "follow_market", "excel", "alert_tol", "alerts_off", "alerts_smile_off", "inverse",
+                "atm_type", "follow_market", "excel", "alert_tol", "alert_tenors", "alerts_off", "alerts_smile_off", "inverse",
                 "market_source", "deltas", "extra_tenors", "removed_tenors"]
 
 
@@ -80,7 +80,7 @@ class Service:
         self.bbg_status: dict = {}
         self.follow_status: dict = {}
         self._market_mtimes: dict[str, float] = {}
-        self.alerts = AlertEngine()                   # this trader's alerts, on their own settings
+        self.alerts = AlertEngine()                   # this trader's alerts (less what they muted)
         self.desk_alerts = AlertEngine()              # ... and the desk's, for the log the leader keeps
         self.fenics = FenicsLogin(store)          # FMD 1.0 feed while a trader is logged in to Fenics
         self.bbg = BloombergFeed(store, user, self._recs)   # Bloomberg while a trader runs it from this app
@@ -997,21 +997,20 @@ class Service:
 
     # ---- alerts -------------------------------------------------------
     def evaluate_alerts(self, now: float | None = None) -> None:
-        """Two passes over the same deviations: the trader's own alerts (their prefs narrow
-        them: off, muted pairs, own tolerances, a tenor range) and the desk's, on config.json
-        and the pairs' Setup only, which are what the leader logs."""
+        """The desk's alerts (config.json and the pairs' Setup: tolerances, watched tenors,
+        mutes), which the leader logs, and this trader's: the same, less the pairs they
+        muted for themselves, or none when they switched their market alerts off."""
         now = time.time() if now is None else now
         cfg = self.store.config()
         acfg = cfg["alerts"]
         mine = UserAlerts(self.prefs())
         with self._lock:
             recs = list(self.cache.values())
-        cands: dict[tuple, dict] = {}       # the trader's
         desk: dict[tuple, dict] = {}
         for rec in recs:
             pair = rec["pair"]
             if rec.get("follow_market"):
-                self._follow_candidates(rec, cands)
+                self._follow_candidates(rec, desk)
                 continue
             if not acfg.get("enabled", True) or rec.get("alerts_off") or not self.market_alive(rec) \
                     or not self.quotes_for(rec):
@@ -1020,9 +1019,9 @@ class Service:
             res = resolve(rec)
             own = rec.get("alert_tol") or {}
             marks = ["atm"] if rec.get("alerts_smile_off") else all_marks(rec)     # RR and BF muted, ATM kept
-            wanted = mine.wants(pair)
             for t in tenor_list(rec):
-                in_range = wanted and mine.in_range(pair, t)
+                if not in_alert_tenors(rec, t):
+                    continue
                 for m in marks:
                     q = view.get(t, {}).get(m)
                     v = res[t]["mid"][m]
@@ -1032,21 +1031,22 @@ class Service:
                     if dev is None:
                         continue
                     tm = tol_mark(m)       # an extra delta: the 10D's tolerance (25D's inside 25D)
-                    scale = acfg.get("tenor_scale", {}).get(t, 1.0)
-                    desk[(pair, t, m)] = self._market_candidate(
-                        pair, t, m, v, q, dev, (own.get(tm) or acfg["tolerance"][tm]) * scale, rec, acfg)
-                    if in_range:
-                        tol = (own.get(tm) or mine.tolerance.get(tm) or acfg["tolerance"][tm]) * scale
-                        cands[(pair, t, m)] = self._market_candidate(pair, t, m, v, q, dev, tol, rec, acfg)
+                    tol = (own.get(tm) or acfg["tolerance"][tm]) * acfg.get("tenor_scale", {}).get(t, 1.0)
+                    desk[(pair, t, m)] = {
+                        "level": level(dev, tol, acfg.get("clear_ratio", 0.8)), "kind": "market",
+                        "pair": pair, "tenor": t, "mark": m, "value": v, "mkt": q.get("mid"),
+                        "bid": q.get("bid"), "offer": q.get("offer"), "brand": q.get("brand"),
+                        "dev": round(dev, 4), "tol": round(tol, 4), "source": rec.get("source"),
+                        "msg": f"{pair} {t} {m.upper()}: ours {v:.2f}, {q.get('brand') or 'market'} {q.get('mid'):.2f} "
+                               f"({dev:+.2f}, tol {tol:.2f})"}
         for pair, mt in self.excel_foreign.items():
             at = datetime.fromtimestamp(mt).strftime("%H:%M")
-            cands[(pair, "", "excel")] = {
+            desk[(pair, "", "excel")] = {
                 "level": "breach", "kind": "excel", "confirm": 0, "pair": pair, "tenor": "", "mark": "excel",
                 "msg": f"{pair}: its export file was changed outside VolMarker at {at}. If Excel still marks "
                        f"this pair, tick Marked in Excel in Setup, or the two overwrite each other"}
-        for k, c in cands.items():          # Excel and Follow market alerts are the same for everyone
-            if c["kind"] != "market":
-                desk[k] = c
+        # Excel and Follow market alerts are the same for everyone
+        cands = {k: c for k, c in desk.items() if c["kind"] != "market" or mine.wants(k[0])}
         confirm = acfg.get("confirm_s", 20)
         new, cleared = self.alerts.update(cands, now, confirm)
         if new or cleared:
@@ -1055,15 +1055,6 @@ class Service:
         d_new, d_cleared = self.desk_alerts.update(desk, now, confirm)   # kept up on every app: a new
         if d_new or d_cleared:                                           # leader doesn't re-log them
             self._log_alerts(d_new, d_cleared, now)
-
-    @staticmethod
-    def _market_candidate(pair, t, m, v, q, dev, tol, rec, acfg) -> dict:
-        return {"level": level(dev, tol, acfg.get("clear_ratio", 0.8)), "kind": "market",
-                "pair": pair, "tenor": t, "mark": m, "value": v, "mkt": q.get("mid"),
-                "bid": q.get("bid"), "offer": q.get("offer"), "brand": q.get("brand"),
-                "dev": round(dev, 4), "tol": round(tol, 4), "source": rec.get("source"),
-                "msg": f"{pair} {t} {m.upper()}: ours {v:.2f}, {q.get('brand') or 'market'} {q.get('mid'):.2f} "
-                       f"({dev:+.2f}, tol {tol:.2f})"}
 
     def _follow_candidates(self, rec: dict, cands: dict) -> None:
         """A pair in market mode: alert when it is not being updated, or a big

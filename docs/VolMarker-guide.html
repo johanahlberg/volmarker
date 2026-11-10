@@ -374,7 +374,7 @@
   <tr><td>Market source</td><td>FMD, or Bloomberg. With Bloomberg, the grid, alerts and Follow market use Bloomberg's levels while it runs, and FMD's where Bloomberg has none or after it stops (<a href="#bloomberg">section 14</a>).</td></tr>
   <tr><td>Follow market</td><td>Market mode (<a href="#types">section 8</a>).</td></tr>
   <tr><td>Marked in Excel</td><td>Read the marks from Excel's export file (<a href="#types">section 8</a>).</td></tr>
-  <tr><td>Alert tolerance</td><td>Per-pair tolerances in vol points; empty uses the desk default. Mute all alerts, or only the RR and BF ones.</td></tr>
+  <tr><td>Alert tolerance</td><td>Per-pair tolerances in vol points; empty uses the desk default. Mute all alerts, or only the RR and BF ones. Tenors watched (from/to). Mute the pair for you only.</td></tr>
 </table>
 
 <h3>New pairs</h3>
@@ -394,15 +394,13 @@
   <li>Pairs following FMD get "not updating" and "move held" alerts instead.</li>
   <li>An alert also warns when a pair's export file was changed outside VolMarker (e.g. by Excel). A file that holds exactly what VolMarker wrote for the pair's latest version doesn't count, even if it was written late.</li>
 </ul>
-<h3>My alerts</h3>
-<p>Each trader can narrow their own market alerts without changing anyone else's. Open the alert panel and click <b>My alerts…</b>:</p>
+<h3>Tenors watched, and your own switches</h3>
 <ul>
-  <li><b>Market alerts on</b>: untick to stop all your market alerts.</li>
-  <li><b>Tenors alerted on, every pair</b>: e.g. <i>from 1W to 1Y</i> to be alerted only on the auto-quoted range. <i>No limit</i> on either end by default.</li>
-  <li><b>My tolerances</b>: your own defaults instead of the desk's. A pair's own tolerance in Setup is the desk's and still wins.</li>
+  <li><b>Tenors watched</b> (pair's Setup, saved with Save, for everyone): e.g. <i>from 1W to 1Y</i> to alert only on the auto-quoted range. <i>No limit</i> on either end by default.</li>
+  <li><b>My market alerts on</b> (alert panel): untick to stop all your market alerts. Only yours.</li>
+  <li><b>Mute this pair's market alerts for me only</b> (pair's Setup): saved at once, not with Save. The alert panel lists the pairs you muted; ✕ unmutes one.</li>
 </ul>
-<p>For one pair, use <b>Just for me</b> at the bottom of the alert settings in its Setup tab: mute the pair for you, or give it its own tenor range (e.g. <i>1M to 2Y</i>). These save at once, not with Save. <i>My default</i> keeps your general range for that end. My alerts lists the pairs set differently, with <b>Reset</b>.</p>
-<p>Your settings follow you to any PC. The "not updating", "move held" and file-changed alerts are not affected, and the desk's alert log keeps the desk's settings.</p>
+<p>Your switches follow you to any PC. The "not updating", "move held" and file-changed alerts are not affected, and the desk's alert log keeps the desk's settings.</p>
 
 <!-- ------------------------------------------------------------------ -->
 <h2 id="fenics">14. Fenics login, the FMD feed and Bloomberg</h2>
@@ -617,7 +615,7 @@
   <tr><td><code>pairs/&lt;PAIR&gt;/</code></td><td>Every version of the pair, plus its monthly archive.</td></tr>
   <tr><td><code>market_history/</code></td><td>The recorded FMD quotes, one compressed file per month: only quotes that changed since the last round, and a full set at the start of each day.</td></tr>
   <tr><td><code>analysis/</code></td><td>The tables for analysis (section 17), one file per month, and <code>_state.json</code>, which records the last day added.</td></tr>
-  <tr><td><code>users/</code></td><td>Each trader's own sidebar order, folded groups, test dates and alert settings (My alerts).</td></tr>
+  <tr><td><code>users/</code></td><td>Each trader's own sidebar order, folded groups, test dates and alert switches (on/off, pairs muted for you).</td></tr>
   <tr><td><code>market/</code>, <code>alerts/</code>, <code>locks/</code></td><td>Market levels from the feed, the alert log, and short-lived lock files.</td></tr>
 </table>
 

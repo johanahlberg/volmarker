@@ -11,37 +11,21 @@ level:
 Acknowledging an alert mutes it until it clears, or until the deviation has
 grown by another full tolerance.
 
-Each trader can narrow their own market alerts (prefs "alerts", see UserAlerts):
-switch them off, mute pairs, set their own default tolerances, and limit them
-to a tenor range for every pair or a single one. The desk's alert log is kept
-on the desk settings (config.json and the pairs' Setup) whatever the leader's
-trader has chosen.
+Each trader can switch their own market alerts off, or mute single pairs for
+themselves (prefs "alerts", see UserAlerts). Which tenors are watched is the
+pair's setting (alert_tenors), the same for everyone. The desk's alert log is
+kept on the desk settings whatever the leader's trader has chosen.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from .conventions import TENOR_RE, TENOR_DAYS, tenor_days
-
-MARKS = ("atm", "rr25", "rr10", "bf25", "bf10")
-
-
-def _tenor(t) -> str | None:
-    t = str(t).strip().upper() if isinstance(t, str) else ""
-    return t if t in TENOR_DAYS or TENOR_RE.match(t) else None
-
-
 class UserAlerts:
     """One trader's own market-alert settings, read leniently from their prefs:
 
-        {"off": bool,                         # no market alerts at all
-         "muted": ["EURSEK", ...],            # pairs without market alerts
-         "tolerance": {"atm": 0.3, ...},      # own defaults (a pair's Setup tolerance still wins)
-         "range": {"from": "1W", "to": "1Y"}, # tenors alerted on, every pair (missing/null = open)
-         "pair_range": {"EURUSD": {"from": null, "to": "2Y"}}}
-                                              # per pair: a key that is there replaces that end of
-                                              # "range" (null = open), a missing key keeps it
+        {"off": bool,                  # no market alerts at all
+         "muted": ["EURSEK", ...]}     # pairs without market alerts for this trader
 
     Excel-file and Follow market alerts are not market alerts and are never filtered."""
 
@@ -49,35 +33,10 @@ class UserAlerts:
         a = (prefs or {}).get("alerts")
         a = a if isinstance(a, dict) else {}
         self.off = bool(a.get("off"))
-        self.muted = {str(p).upper() for p in a.get("muted") or [] if isinstance(p, str)}
-        tol = a.get("tolerance") if isinstance(a.get("tolerance"), dict) else {}
-        self.tolerance = {m: float(v) for m, v in tol.items()
-                          if m in MARKS and isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0}
-        self.range = self._ends(a.get("range"))
-        pr = a.get("pair_range") if isinstance(a.get("pair_range"), dict) else {}
-        self.pair_range = {str(p).upper(): self._ends(r) for p, r in pr.items() if isinstance(r, dict)}
-
-    @staticmethod
-    def _ends(r) -> dict:
-        """{"from"/"to": tenor or None} for the ends that are set; a bad tenor is open."""
-        if not isinstance(r, dict):
-            return {}
-        return {k: _tenor(r[k]) for k in ("from", "to") if k in r}
-
-    def bounds(self, pair: str) -> tuple[int, int]:
-        """The pair's tenor range in days, both ends inclusive."""
-        r = {**self.range, **self.pair_range.get(pair, {})}
-        lo, hi = r.get("from"), r.get("to")
-        lo_d = tenor_days(lo) if lo else 0
-        hi_d = tenor_days(hi) if hi else 10 ** 6
-        return (lo_d, hi_d) if lo_d <= hi_d else (hi_d, lo_d)
+        self.muted = {p.upper() for p in a.get("muted") or [] if isinstance(p, str)}
 
     def wants(self, pair: str) -> bool:
         return not self.off and pair not in self.muted
-
-    def in_range(self, pair: str, tenor: str) -> bool:
-        lo, hi = self.bounds(pair)
-        return lo <= tenor_days(tenor) <= hi
 
 
 def deviation(value: float, q: dict, basis: str = "mid") -> float | None:

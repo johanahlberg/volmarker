@@ -32,7 +32,8 @@ Other pair-level settings: group (sidebar group, e.g. "Scandies"), spread_ref
 cut, e.g. NYC or TOK: decides which expiry an event weighs on), excel (marked
 in Excel: read from Excel's export file, never written by VolMarker), dc_factor
 (Front Arena DC spread file = ATM spread x 0.5 x factor; none below 0.01), follow_market (the feed process publishes FMD
-mids into FOLLOW_FIELDS), alert_tol (per-mark alert tolerance overrides),
+mids into FOLLOW_FIELDS), alert_tol (per-mark alert tolerance overrides), alert_tenors ({from, to}:
+the tenors market alerts watch, both ends inclusive, None = open),
 alerts_off, alerts_smile_off (mute the RR and BF alerts only, keep the ATM ones), follow_bases (derived pairs, default on: the ATMs move with the
 bases at a fixed correlation; off: the ATMs stay put and the correlation is
 recalculated as the bases move; always so on a derived pair marked in Excel or following FMD,
@@ -59,6 +60,32 @@ TENOR_FIELDS = ["atm", "spread", "rr25", "rr10f", "rr10", "bf25", "bf10f", "bf10
                 "corr", "psprd", "skew_atm", "skew_rr", "skew_bf"]
 
 ALERT_MARKS = ["atm", "rr25", "rr10", "bf25", "bf10"]
+
+
+def _alert_tenors(r) -> dict | None:
+    """{from, to}: the tenors a pair's market alerts watch (None or a missing end = open)."""
+    if not r:
+        return None
+    if not isinstance(r, dict):
+        raise ValueError("Alert tenors must be {from, to}")
+    out = {}
+    for k in ("from", "to"):
+        t = str(r.get(k) or "").strip().upper()
+        if t:
+            try:
+                tenor_days(t)
+            except ValueError:
+                raise ValueError(f"Unknown alert tenor {t}") from None
+            out[k] = t
+    if "from" in out and "to" in out and tenor_days(out["from"]) > tenor_days(out["to"]):
+        raise ValueError(f"Alert tenors: {out['from']} is after {out['to']}")
+    return out or None
+
+
+def in_alert_tenors(state: dict, tenor: str) -> bool:
+    r = state.get("alert_tenors") or {}
+    d = tenor_days(tenor)
+    return (not r.get("from") or tenor_days(r["from"]) <= d) and (not r.get("to") or d <= tenor_days(r["to"]))
 # fields the market follower owns on a pair with follow_market (trader keeps spread, skew, weights)
 FOLLOW_FIELDS = ["atm", "rr25", "rr10f", "rr10", "bf25", "bf10f", "bf10"]
 
@@ -226,6 +253,7 @@ def clean_state(state: dict) -> dict:
                 raise ValueError(f"Alert tolerance for {m} must be positive")
             tol[m] = float(v)
     s["alert_tol"] = tol or None
+    s["alert_tenors"] = _alert_tenors(s.get("alert_tenors"))
     if s["mode"] == "derived":
         bases = s.get("bases") or []
         if len(bases) != 2:

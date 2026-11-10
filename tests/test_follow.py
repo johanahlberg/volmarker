@@ -288,35 +288,38 @@ class TestAlerts(unittest.TestCase):
         trader.evaluate_alerts(NOW + 30)
         return {a["tenor"] for a in trader.alerts.list() if a["kind"] == "market" and a["mark"] == "atm"}
 
-    def test_user_tenor_range(self):
+    def _set_tenors(self, store, trader, rng):
+        st = store.latest("EURUSD")
+        st["alert_tenors"] = rng
+        trader.publish("EURUSD", st, st["version"])
+
+    def test_pair_alert_tenors(self):
         with tempfile.TemporaryDirectory() as tmp:
             store, trader, _ = setup(tmp, follow=False)
-            every = self._breach(store, trader, {})
-            self.assertEqual(every, set(TENORS) - {"ON"})        # ON: 0.25 x 2 > 0.4
-            got = self._breach(store, trader, {"alerts": {"range": {"from": "1M", "to": "1Y"}}})
-            self.assertEqual(got, {"1M", "2M", "3M", "6M", "9M", "1Y"})
-            # a pair's own range replaces the ends it sets: null opens the long end
-            got = self._breach(store, trader, {"alerts": {"range": {"from": "1M", "to": "1Y"},
-                                                          "pair_range": {"EURUSD": {"to": None}}}})
-            self.assertEqual(got, set(TENORS) - {"ON", "1W", "2W"})
-            got = self._breach(store, trader, {"alerts": {"range": {"from": "1W", "to": "1Y"},
-                                                          "pair_range": {"EURUSD": {"from": "6M"}}}})
-            self.assertEqual(got, {"6M", "9M", "1Y"})
-            got = self._breach(store, trader, {"alerts": {"range": {"from": "bad", "to": "3M"}}})
-            self.assertEqual(got, {"1W", "2W", "1M", "2M", "3M"})   # a bad end is open
+            self.assertEqual(self._breach(store, trader, {}), set(TENORS) - {"ON"})   # ON: 0.25 x 2 > 0.4
+            self._set_tenors(store, trader, {"from": "1M", "to": "1Y"})
+            self.assertEqual(store.latest("EURUSD")["alert_tenors"], {"from": "1M", "to": "1Y"})
+            self.assertEqual(self._breach(store, trader, {}), {"1M", "2M", "3M", "6M", "9M", "1Y"})
+            self._set_tenors(store, trader, {"from": "6M", "to": None})              # open long end
+            self.assertEqual(self._breach(store, trader, {}), {"6M", "9M", "1Y", "2Y", "3Y", "4Y", "5Y"})
+            self._set_tenors(store, trader, {"from": "", "to": ""})
+            self.assertIsNone(store.latest("EURUSD")["alert_tenors"])
 
-    def test_user_off_muted_and_tolerance(self):
+    def test_pair_alert_tenors_are_checked(self):
+        st = flat_state("EURUSD", 7.0)
+        for bad in ({"from": "1Y", "to": "1M"}, {"from": "7X"}, ["1M", "1Y"]):
+            st["alert_tenors"] = bad
+            with self.assertRaises(ValueError):
+                clean_state(st)
+        st["alert_tenors"] = {"from": "1w", "to": "18m"}
+        self.assertEqual(clean_state(st)["alert_tenors"], {"from": "1W", "to": "18M"})
+
+    def test_user_off_and_muted(self):
         with tempfile.TemporaryDirectory() as tmp:
             store, trader, _ = setup(tmp, follow=False)
             self.assertEqual(self._breach(store, trader, {"alerts": {"off": True}}), set())
             self.assertEqual(self._breach(store, trader, {"alerts": {"muted": ["EURUSD"]}}), set())
-            self.assertEqual(self._breach(store, trader, {"alerts": {"tolerance": {"atm": 0.5}}}), set())
-            self.assertEqual(self._breach(store, trader, {"alerts": {"tolerance": {"atm": 0.3}}}, atm=7.35),
-                             set(TENORS) - {"ON", "1W", "2W"})  # 0.35 > 0.3, not 0.3 x 1.5 or x 1.25
-            st = store.latest("EURUSD")
-            st["alert_tol"] = {"atm": 0.5}                       # the pair's own tolerance wins
-            trader.publish("EURUSD", st, st["version"])
-            self.assertEqual(self._breach(store, trader, {"alerts": {"tolerance": {"atm": 0.1}}}, atm=7.3), set())
+            self.assertEqual(self._breach(store, trader, {"alerts": {"muted": ["EURSEK"]}}), set(TENORS) - {"ON"})
 
     def test_desk_log_ignores_the_leaders_own_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
