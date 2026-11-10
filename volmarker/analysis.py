@@ -45,6 +45,7 @@ import logging
 import os
 import re
 import time
+import zlib
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -136,16 +137,20 @@ def _csv(rows: list[list], header: list[str] | None) -> bytes:
 
 def _read_csv_gz(path: Path) -> list[list[str]]:
     """All rows (header included) of a gzip CSV; a member cut off at the end is dropped."""
-    out, buf = [], b""
-    with gzip.open(path, "rb") as g:
+    # member by member: gzip.open's read() raises on a cut-off member before handing back the
+    # complete ones read in the same call, which loses the whole file when it is small
+    data, parts = path.read_bytes(), []
+    while data:
+        d = zlib.decompressobj(wbits=31)
         try:
-            while True:
-                chunk = g.read(1 << 20)
-                if not chunk:
-                    break
-                buf += chunk
-        except (OSError, EOFError):
-            buf = buf[:buf.rfind(b"\n") + 1]
+            chunk = d.decompress(data)
+        except zlib.error:
+            break
+        if not d.eof:
+            break                                  # cut off (e.g. an append still being written)
+        parts.append(chunk)
+        data = d.unused_data
+    buf = b"".join(parts)
     return list(csv.reader(io.StringIO(buf.decode("utf-8"))))
 
 
